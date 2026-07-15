@@ -1,0 +1,196 @@
+# MOSS Strategy Architecture & Execution Flow Documentation
+
+This document describes the architectural layout, core components, data flows, order execution logic, and spread calculations implemented in the `SampleAlgo` strategy shared library.
+
+---
+
+## 1. System Components & Architecture
+
+The strategy library exposes the strategy dynamic loading hooks (`create` / `destroy`) to the main execution engine. It relies on a modular architecture consisting of the following key files:
+
+| Component / File | Purpose |
+| :--- | :--- |
+| **[AlgoBase.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/AlgoBase.hpp)** | The base interface class provided by the platform. Defines tick, order response, broadcast, and UI event hooks. |
+| **[MinixStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.hpp)** / **[MinixStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.cpp)** | The dynamic entry-point and central orchestrator. Reassembles front-end configuration messages, handles the lifecycle of multiple box strategies, and routes market ticks/order responses. |
+| **[BoxSpreadStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/BoxSpreadStrategy.hpp)** / **[BoxSpreadStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/BoxSpreadStrategy.cpp)** | A concrete implementation of a 4-leg option box spread strategy. Contains the math for real-time spreads, execution state machines, and EOD square-offs. |
+| **[order_instance.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/order_instance.hpp)** / **[order_instance.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/order_instance.cpp)** | Convenience wrapper around the raw OMS order lifecycle, transitioning orders through placement, exchange confirmation, modification, and cancellation. |
+| **[PortfolioOrderManager.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/PortfolioOrderManager.hpp)** / **[PortfolioOrderManager.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/PortfolioOrderManager.cpp)** | A lightweight position bookkeeper. Processes order responses, keeps track of net token positions, and aggregates realized/unrealized PnL. |
+| **[ProductInfo.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/ProductInfo.hpp)** | Contains definitions for snapshot flags, option types, and the `product_data` market snapshot struct. |
+| **[oms_api.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/oms_api.hpp)** | Defines transaction codes, error codes, request statuses, order sides, types, and body structures used to interface with the OMS. |
+
+---
+
+## 2. Dynamic Lifecycle & Initial Setup
+
+```mermaid
+graph TD
+    A[MOSS Engine Loads libSampleAlgo.so] --> B["MinixStrategy Ctor / init()"]
+    B --> C[Read configuration JSON file]
+    C --> D[Extract Client ID, Algo ID, and OMS ID]
+    D --> E["Subscribe to static tokens in bcast.csv (flags: TER+MBP+OI+TBT)"]
+    E --> F[Check for simulation config 'LegStrategy_json' to auto-run box]
+```
+
+### Configuration & Subscription Setup
+* In the constructor of **[MinixStrategy](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.cpp#L438)**, the strategy pulls configuration parameter paths via `get_strategy_config_file()`.
+* It registers itself for market data events on the symbols configured in `bcast.csv` using the subscription flags:
+  * `TER_UPDATE_EVENT` (Trade Execution Range)
+  * `MBP_UPDATE_EVENT` (Market By Price / Snapshot Depth)
+  * `OI_UPDATE_EVENT` (Open Interest Updates)
+  * `TBT_UPDATE_EVENT` (Tick-By-Tick Data Updates)
+
+---
+
+## 3. UI Communication & Message Reassembly
+
+Communication with the front-end graphical interface requires a reassembly layer to circumvent message size limits.
+
+### A. Reassembling Incoming Strategy Config (From GUI to Strategy)
+1. The GUI connector pushes data to `onUIRequest()` using message codes `9612`, `9620`, or `9621`.
+2. The first packet received is a **Metadata Packet** structured as a JSON string detailing the `packet_count` (N chunks).
+3. The next N packets contain **Data Chunks** (1500 bytes each).
+4. `MinixStrategy` concatenates these chunks in `JsonReassembly::buf`. Once the accumulated chunk count equals the expected total, it forwards the complete JSON string to `applyLegStrategyJson()`.
+
+### B. Translating JSON Parameters & Handling Actions
+`applyLegStrategyJson` translates the human-facing GUI parameters to the canonical wire structure. It performs the following action dispatches:
+
+* **`add` / `edit`**: Instantiates or updates a `BoxSpreadStrategy` map entry matching the `strategynumber`.
+* **`start`**: Subscribes to the underlying legs (if not subscribed) and turns on the execution flag (`running_ = true`).
+* **`stop`**: Halts trading, cancels outstanding orders, and triggers immediate square-offs for any open positions.
+* **`delete`**: Stops the target strategy, unsubscribes the relevant tokens, deallocates the strategy object, and purges references.
+
+### C. Sending Updates Back (From Strategy to GUI)
+Every ~1 second, the engine’s `doWork()` loop calls `sendStrategySpreadsToUI()`. It constructs the update JSON, appends the latest metric fields, and packages it:
+1. Pushes a Metadata packet with `packet_count` to message code `9612` (Interface ID `22`).
+2. Iterates and transfers the payload in 1500-byte segments.
+
+---
+
+## 4. Market Data Event Processing
+
+The strategy updates its cached order books and performs calculations when a tick or broadcast is received:
+
+```mermaid
+sequenceDiagram
+    participant Engine as Platform Engine
+    participant Hub as MinixStrategy
+    participant Box as BoxSpreadStrategy
+    
+    rect rgb(240, 240, 240)
+        Note over Engine, Box: Tick Data Stream (High Frequency)
+        Engine->>Hub: OnTick(Quote)
+        Hub->>Hub: Extract Exchange/Event Timestamp
+        Hub->>Hub: Update Monotonic Clock (lastTickTs_)
+        Hub->>Box: onTick(Quote, lastTickTs_)
+        Box->>Box: Copy Ask/Bid Prices into contiguous Leg arrays
+        Box->>Box: run(event_token, nowTs)
+    end
+    
+    rect rgb(230, 245, 230)
+        Note over Engine, Box: Broadcast Snapshots (Coarse Frequency)
+        Engine->>Hub: onBcastData(product_data)
+        Hub->>Hub: Decode LastTradeTime (NSE 1980 epoch -> Unix)
+        Hub->>Hub: Update Monotonic Clock (lastTickTs_)
+        Hub->>Box: onBcast(product_data, lastTickTs_)
+        Box->>Box: Refresh Top-5 Leg arrays from snapshot MBP
+        Box->>Box: run(pd.product_id_, nowTs)
+    end
+```
+
+> [!NOTE]
+> The box strategy decouples real-time spread calculations from the clock. The Monotonic Clock (`lastTickTs_`) is only used to evaluate relative timeouts (e.g., bidding escalations and EOD square-offs).
+
+---
+
+## 5. Box Spread Mathematics
+
+A box spread strategy utilizes four options contracts consisting of two strikes: a lower strike $K_1$ and a higher strike $K_2$.
+
+### Arbitrage Edge Calculations (Paise)
+When all four roles ($Call_{K1}$, $Put_{K1}$, $Call_{K2}$, $Put_{K2}$) are successfully mapped, the box computes canonical spreads:
+
+* **Net Debit** (The premium cost required to purchase the box):
+  $$\text{NetDebit} = Call_{K1}.\text{Ask} - Put_{K1}.\text{Bid} - Call_{K2}.\text{Bid} + Put_{K2}.\text{Ask}$$
+
+* **Net Credit** (The premium revenue received when selling the box):
+  $$\text{NetCredit} = Call_{K1}.\text{Bid} - Put_{K1}.\text{Ask} - Call_{K2}.\text{Ask} + Put_{K2}.\text{Bid}$$
+
+* **BCmp (Market Buy Spread Edge)**:
+  $$\text{BCmp} = \text{Gap} - \text{NetDebit}$$
+  * A positive BCmp value represents an arbitrage profit when buying the box structure.
+
+* **SCmp (Market Sell Spread Edge)**:
+  $$\text{SCmp} = \text{NetCredit} - \text{Gap}$$
+  * A positive SCmp value represents an arbitrage profit when selling/reversing the box structure.
+
+> [!IMPORTANT]
+> Options prices are multiplied by $100$ to operate strictly in paise. The $\text{Gap}$ is computed as:
+> $$\text{Gap} = (K_2 - K_1) \times 100 \times \text{boxRatio}$$
+
+---
+
+## 6. Execution Schemes & State Machines
+
+When a buy ($\text{BCmp} \ge B\text{-}Pr$) or sell ($\text{SCmp} \le S\text{-}Pr$) threshold is crossed, the strategy locks the trade direction and initiates execution based on one of three modes:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle : activeDir_ Resolved
+    
+    state "AGGRESSIVE (Mode 1)" as M1 {
+        Idle --> Sweep : Spread Triggered
+        Sweep --> [*] : Fire IOC/Limit on all 4 Legs at Touch
+    }
+    
+    state "BIDDING (Mode 2)" as M2 {
+        Idle --> BidsPosted : Place passive limit orders on isbidding legs
+        BidsPosted --> BidsPosted : Update orders to chase touch
+        BidsPosted --> HedgesPosted : isbidding leg fills detected
+        HedgesPosted --> HedgesPosted : Sweep remaining hedge legs at Touch
+        HedgesPosted --> [*] : All legs fully hedged
+    }
+    
+    state "ALL-LEG BIDDING (Mode 4)" as M4 {
+        Idle --> AllBidsPosted : Place passive limits on all 4 legs
+        AllBidsPosted --> AllBidsPosted : Chase touch passively
+        AllBidsPosted --> Escalation : Leg fills or revert timeout reached
+        Escalation --> [*] : Cross all unfilled legs to touch aggressively
+    }
+```
+
+---
+
+## 7. Order Lifecycle & Position Tracking
+
+Orders are wrapper-tracked to handle confirmations and avoid latency issues:
+
+1. **State Machine (`order_instance`)**:
+   Tracks transition stages: `STRAT_INITIAL_STATE` $\rightarrow$ `STRAT_ORDER_PLACED` $\rightarrow$ `STRAT_OMS_PLACED` $\rightarrow$ `STRAT_EXCHG_CONF`. 
+   It ensures no modification (`update_order`) or cancellation (`cancel_order`) is dispatched while another response is pending (`is_response_pending()`).
+
+2. **Trades & Portfolio Management (`PortfolioOrderManager`)**:
+   * Listens to the `OMS_TRADE` event code (`6666`).
+   * When a fill is verified, it updates net positions (`net_qty`) and registers the transaction details.
+   * Cashflow adjustments are made based on the effective trade side:
+     $$\text{CashFlow} = \text{CashFlow} + (\text{Sign}_{\text{Side}} \times \text{Price} \times \text{Qty})$$
+   * Evaluates rolling realized PnL and updates mark prices on snap updates to reflect unrealized exposure.
+
+3. **Transaction Costs**:
+   Applied per fill on option traded values in paise:
+   * **Buy transactions**: $60$ Paise per Rs. $10,000$ value ($6,000$ Rs per Crore)
+   * **Sell transactions**: $70$ Paise per Rs. $10,000$ value ($7,000$ Rs per Crore)
+
+---
+
+## 8. End-of-Day (EOD) Operations
+
+To prevent overnight option exposure, the system executes square-off safety protocols:
+
+* **Time Anchor**: The strategy anchors the first tick with a valid exchange clock as the market open (representing `09:15:00`).
+* **Cutoff Marker**: It sets a target expiration timestamp (`eodTs_`) equivalent to the open timestamp plus a fixed offset of 22,440 seconds (corresponding to `15:29:00`).
+* **Liquidation Trigger**: When the exchange clock matches or exceeds `eodTs_`, the active execution cycle stops. It calls `squareOffLeg()` on each leg, which issues aggressive limit orders to close out remaining net positions (`signedPos`).
+
+---
+
+> [!WARNING]
+> If market data books are crossed ($\text{Bid} \ge \text{Ask}$), the strategy blocks trading updates (`booksReady()` returns false). This prevents the algorithm from executing trades on stale, single-sided, or invalid market feeds.

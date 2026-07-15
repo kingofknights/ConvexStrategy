@@ -1,0 +1,12 @@
+# Build and cache directories
+build/
+.cache/
+
+# IDE/Tooling configurations
+compile_commands.json
+.idea/
+.vscode/
+
+# User-specific scripts or logs
+transfer.sh
+*.log
