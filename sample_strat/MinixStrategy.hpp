@@ -13,6 +13,8 @@
 #include <iostream>
 #include "order_instance.hpp"        // execution_strat::order_instance, client_uid, OrderMap types
 #include "PortfolioOrderManager.hpp" // execution_strat::PortfolioOrderManager
+#include <nlohmann/json.hpp>
+
 
 class BoxSpreadStrategy; // 4-leg box strategy (the only strategy in this library)
 
@@ -50,6 +52,8 @@ class MinixStrategy : public AlgoBase
   private:
     // Parse one GUI strategy-config JSON doc -> create/edit/start/stop/delete a box.
     void applyLegStrategyJson(const std::string& jsonText);
+    void handleBoxStrategy(const nlohmann::json& root, const std::string& jsonText);
+
     // Once per ~1s, echo each box's original GUI JSON back with live BCmp/SCmp/Cost.
     void sendStrategySpreadsToUI();
     // GUI framing: one metadata packet {"packet_count":N,...} then N 1500-byte chunks.

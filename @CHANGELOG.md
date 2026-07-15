@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-15
+
+### Added
+- Dedicated box strategy parameters parsing and lifecycle management handler function `handleBoxStrategy` in `MinixStrategy`.
+
+### Changed
+- Refactored `MinixStrategy::applyLegStrategyJson` to route `Applied`, `Unsubscribed`, and `Cancelled` status events for "Box" strategy subtype to the dedicated handler.
+
 ## [1.0.0] - 2026-07-15
 
 ### Added
