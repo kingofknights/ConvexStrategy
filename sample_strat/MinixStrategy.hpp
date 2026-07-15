@@ -49,6 +49,9 @@ class MinixStrategy : public AlgoBase
     /** @brief Cancel an active order if present. */
     bool cancel_order(OrderMap& order_handle_, int32_t token);
 
+    bool subscribeProduct(const int32_t product_id, const uint16_t flags);
+    bool unSubscribeProduct(const int32_t product_id, const uint16_t flags);
+
   private:
     // Parse one GUI strategy-config JSON doc -> create/edit/start/stop/delete a box.
     void applyLegStrategyJson(const std::string& jsonText);

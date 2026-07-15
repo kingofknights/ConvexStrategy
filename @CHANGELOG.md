@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-15
+
+### Added
+- Logging of product subscription and unsubscription details inside `MinixStrategy` and `BoxSpreadStrategy`.
+- Logging of tick events inside `MinixStrategy::OnTick` and `BoxSpreadStrategy::onTick`.
+- Comprehensive parser configuration and lifecycle event logging inside `MinixStrategy::handleBoxStrategy`.
+
+### Changed
+- Refactored `MinixStrategy::sendStrategySpreadsToUI` to format the broadcast payload to include `StrategyId` and `Status` directly instead of iterating and populating the `StrategyUpdates` array.
+
 ## [1.1.0] - 2026-07-15
 
 ### Added

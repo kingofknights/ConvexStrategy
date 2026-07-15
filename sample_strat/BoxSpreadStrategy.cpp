@@ -114,7 +114,11 @@ BoxSpreadStrategy::BoxSpreadStrategy(MinixStrategy *ms, const StrategyDatafromui
   if (running_ && valid_ && !getenv("SKIP_SUBSCRIBE"))
   {
     uint16_t flags = kBoxSubFlags;
-    for (auto &l : legs_) ms_->subscribeProduct(l.token, flags);
+    for (auto &l : legs_)
+    {
+      DbgLine(ms_) << "[BOX_SUB] subscribing leg token=" << l.token << " flags=" << flags << " for strat " << strategynumber_ << std::endl;
+      ms_->subscribeProduct(l.token, flags);
+    }
   }
   if (running_ && valid_) subscribed_ = true;
 
@@ -228,7 +232,11 @@ void BoxSpreadStrategy::start()
   if (!subscribed_ && !getenv("SKIP_SUBSCRIBE"))
   {
     uint16_t flags = kBoxSubFlags;
-    for (auto &l : legs_) ms_->subscribeProduct(l.token, flags);
+    for (auto &l : legs_)
+    {
+      DbgLine(ms_) << "[BOX_SUB] subscribing leg token=" << l.token << " flags=" << flags << " for strat " << strategynumber_ << std::endl;
+      ms_->subscribeProduct(l.token, flags);
+    }
   }
   subscribed_ = true;
   running_ = true;
@@ -268,7 +276,11 @@ void BoxSpreadStrategy::unsubscribeTokens()
 {
   if (!subscribed_) return;
   uint16_t flags = kBoxSubFlags;
-  for (auto &l : legs_) ms_->unSubscribeProduct(l.token, flags);
+  for (auto &l : legs_)
+  {
+    DbgLine(ms_) << "[BOX_SUB] unsubscribing leg token=" << l.token << " flags=" << flags << " for strat " << strategynumber_ << std::endl;
+    ms_->unSubscribeProduct(l.token, flags);
+  }
   subscribed_ = false;
 }
 
@@ -372,6 +384,9 @@ void BoxSpreadStrategy::onTick(const Quote &event, int64_t nowTs)
   const int i = legIndex(event.header.product_id);
   if (i < 0) return;
   Leg &l = legs_[i];
+  DbgLine(ms_) << "[BOX_TICK] strat=" << strategynumber_ << " tok=" << event.header.product_id 
+               << " bid0=" << event.message.bid_levels[0].price << " ask0=" << event.message.ask_levels[0].price
+               << " ltp=" << event.message.ltp_ << " seq=" << event.header.sequence_no << std::endl;
   for (int j = 0; j < 5; ++j)
   {
     l.bid[j] = event.message.bid_levels[j].price;

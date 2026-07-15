@@ -145,33 +145,29 @@ void MinixStrategy::applyLegStrategyJson(const std::string &jsonText) {
     int strategyId = ljInt(strategy, "StrategyId", 0);
     std::cout << name << " " << status << " " << strategyId << std::endl;
 
-    if (status == "Subscribed") {
+    if (name == "BOX" || name == "Box" || name == "box") {
       sendStatus(status, strategyId);
-    } else if (status == "Unsubscribed" || status == "Cancelled") {
-      if (name == "Box") {
-        handleBoxStrategy(root, jsonText);
-      }
-      sendStatus(status, strategyId);
-    } else if (status == "Applied") {
-      if (name == "Box") {
-        handleBoxStrategy(root, jsonText);
-      }
-      sendStatus(status, strategyId);
+      handleBoxStrategy(root, jsonText);
     }
+
   } catch (const std::exception &e) {
     std::cout << "applyLegStrategyJson failed: " << e.what() << std::endl;
   }
 }
 
-void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::string &jsonText) {
+void MinixStrategy::handleBoxStrategy(const nlohmann::json &root,
+                                      const std::string &jsonText) {
   using aef::infra::ui_cmd::BuySell;
   using aef::infra::ui_cmd::StrategyDatafromui;
   using aef::infra::ui_cmd::TokenDatafromui;
 
+  // add the logs in this function
+
   try {
     if (!root.contains("Legs") || !root["Legs"].is_array() ||
         !root.contains("Strategy") || !root["Strategy"].is_object()) {
-      std::cout << "[handleBoxStrategy] missing Strategy or Legs in JSON" << std::endl;
+      std::cout << "[handleBoxStrategy] missing Strategy or Legs in JSON"
+                << std::endl;
       return;
     }
 
@@ -193,7 +189,8 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
       }
       legStrategies_.erase(strategyId);
       strategyJson_.erase(strategyId);
-      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy deleted strat=" << strategyId << std::endl;
+      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy deleted strat="
+                << strategyId << std::endl;
       return;
     }
 
@@ -201,7 +198,7 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     const int state =
         (statusL == "running" || statusL == "run" || statusL == "start" ||
          statusL == "active" || statusL == "play" || statusL == "resume" ||
-         statusL == "applied")
+         statusL == "applied" || statusL == "subscribed")
             ? 1
             : 0;
 
@@ -227,9 +224,13 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     s.strategytype = 1; // BOX
     s.strategystate = state;
     s.userbuyspread = static_cast<int>(std::round(
-        ljDouble(P, "BPr", ljDouble(S, "BPr", ljDouble(R, "LongBuyPrice", 0.0))) * 100.0));
+        ljDouble(P, "BPr",
+                 ljDouble(S, "BPr", ljDouble(R, "LongBuyPrice", 0.0))) *
+        100.0));
     s.usersellspread = static_cast<int>(std::round(
-        ljDouble(P, "SPr", ljDouble(S, "SPr", ljDouble(R, "ShortSellPrice", 0.0))) * 100.0));
+        ljDouble(P, "SPr",
+                 ljDouble(S, "SPr", ljDouble(R, "ShortSellPrice", 0.0))) *
+        100.0));
     s.buySL = ljInt(S, "buySL", 0);
     s.SellSL = ljInt(S, "SellSL", 0);
     s.buyStoporder = ljInt(S, "buyStoporder", 0);
@@ -242,11 +243,19 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     s.thrsoldqty = ljInt(P, "ThresholdQty", 0);
     s.allowedslippage = ljInt(P, "AllowedSlippage", 0);
     s.normal_bstbid = ljInt(S, "normal_bstbid", 0);
-    s.limit_mktorder = (toLower(P.value("OrdersType", std::string("Limit"))) == "limit") ? 1 : 0;
-    s.leavasis = (toLower(P.value("PriceExecutionRange", std::string("LeaveAsIs"))) == "leaveasis") ? 1 : 0;
+    s.limit_mktorder =
+        (toLower(P.value("OrdersType", std::string("Limit"))) == "limit") ? 1
+                                                                          : 0;
+    s.leavasis = (toLower(P.value("PriceExecutionRange",
+                                  std::string("LeaveAsIs"))) == "leaveasis")
+                     ? 1
+                     : 0;
     s.revertlegs = ljInt(S, "revertlegs", 0);
     s.timetorevertinmilis = ljInt(P, "TimeToRevertBidMs", 0);
-    s.actionforunhedgeqty_nonunhedge_ratiounhedge = (toLower(P.value("UnhedgedAction", std::string("Ratio"))) == "ratio") ? 1 : 0;
+    s.actionforunhedgeqty_nonunhedge_ratiounhedge =
+        (toLower(P.value("UnhedgedAction", std::string("Ratio"))) == "ratio")
+            ? 1
+            : 0;
     s.buystepcycles = ljInt(S, "buystepcycles", 0);
     s.sellstepcycles = ljInt(S, "sellstepcycles", 0);
     s.BuyStep = ljInt(S, "BuyStep", 0);
@@ -257,15 +266,19 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     s.margine = ljInt(S, "margine", 0);
 
     std::vector<TokenDatafromui> tokens;
-    const json *legRatios = (R.contains("LegRatios") && R["LegRatios"].is_array()) ? &R["LegRatios"] : nullptr;
+    const json *legRatios =
+        (R.contains("LegRatios") && R["LegRatios"].is_array()) ? &R["LegRatios"]
+                                                               : nullptr;
 
     for (size_t i = 0; i < L.size(); ++i) {
       const json &lj = L[i];
       TokenDatafromui td{};
       td.token = static_cast<int>(ljInt(lj, "Token", 0));
       std::string sideL = toLower(lj.value("Side", std::string("BUY")));
-      td.b_s = (sideL == "sell" || sideL == "s" || sideL == "-1") ? BuySell::Sell : BuySell::Buy;
-      
+      td.b_s = (sideL == "sell" || sideL == "s" || sideL == "-1")
+                   ? BuySell::Sell
+                   : BuySell::Buy;
+
       int ratio = 1;
       if (legRatios && legRatios->size() > i && (*legRatios)[i].is_number()) {
         ratio = (*legRatios)[i].get<int>();
@@ -291,8 +304,9 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
       td.undrlineToken = static_cast<int>(ljInt(lj, "undrlineToken", 0));
       td.SL = static_cast<int>(ljInt(lj, "SL", 0));
       td.noofentry = static_cast<int>(ljInt(lj, "noofentry", 0));
-      td.trailingslpercent = static_cast<int>(ljInt(lj, "trailingslpercent", 0));
-      
+      td.trailingslpercent =
+          static_cast<int>(ljInt(lj, "trailingslpercent", 0));
+
       int64_t st = ljInt(lj, "starttime", 0), en = ljInt(lj, "endtime", 0);
       std::memcpy(&td.starttime, &st, sizeof(int64_t));
       std::memcpy(&td.endtime, &en, sizeof(int64_t));
@@ -303,10 +317,13 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     auto it = boxStrats_.find(s.strategynumber);
     if (it != boxStrats_.end()) {
       it->second->edit(s, tokens, mode);
-      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy edited strat=" << s.strategynumber << std::endl;
+      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy edited strat="
+                << s.strategynumber << std::endl;
     } else {
-      boxStrats_[s.strategynumber] = new BoxSpreadStrategy(this, s, tokens, mode);
-      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy created strat=" << s.strategynumber << std::endl;
+      boxStrats_[s.strategynumber] =
+          new BoxSpreadStrategy(this, s, tokens, mode);
+      std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy created strat="
+                << s.strategynumber << std::endl;
       it = boxStrats_.find(s.strategynumber);
     }
 
@@ -318,354 +335,12 @@ void MinixStrategy::handleBoxStrategy(const nlohmann::json &root, const std::str
     }
 
     legStrategies_[s.strategynumber] = {s, tokens};
-    strategyJson_[s.strategynumber] = jsonText; // keep the original GUI JSON to echo back
+    strategyJson_[s.strategynumber] =
+        jsonText; // keep the original GUI JSON to echo back
   } catch (const std::exception &e) {
     std::cout << "[handleBoxStrategy] failed: " << e.what() << std::endl;
   }
-}  // try {
-  //   json root = json::parse(jsonText);
-
-  //   // ---------------------------------------------------------------------
-  //   // GUI "external" schema adapter. The connector/GUI may deliver the
-  //   // human-facing strategy layout (capitalised "Strategy"/"Legs"/"Params"/
-  //   // "Ratio") rather than the canonical wire schema ("strategy"/"tokens").
-  //   // Detect it and translate IN PLACE so every dispatch below is unchanged:
-  //   //   Strategy.SubType -> isbox/isconvrev/... (+ "strategytype" string)
-  //   //   Strategy.Status  -> strategystate (running->1, pause/anything
-  //   else->0)
-  //   //   Strategy.IsBidding / Legs[].EnableBid -> mode (1 aggr / 2 bid / 4
-  //   //   all-bid) Legs[]           -> tokens[] (token, b_s from Side, ratio
-  //   from
-  //   //                       Ratio.LegRatios, strikePrice,
-  //   //                       isbiddingleg=EnableBid; lotsize/strike resolved
-  //   via
-  //   //                       getProductDetails since the GUI omits the
-  //   contract
-  //   //                       lot size)
-  //   //   Params           ->
-  //   orderdepth/biddingdepth/allowedslippage/TLots/...
-  //   // ---------------------------------------------------------------------
-
-  //   if (root.contains("Legs") && root["Legs"].is_array() &&
-  //       root.contains("Strategy") && root["Strategy"].is_object()) {
-  //     const json &S = root["Strategy"];
-  //     const json &L = root["Legs"];
-  //     const json P = root.value("Params", json::object());
-  //     const json R = root.value("Ratio", json::object());
-
-  //     // ---- Full dump of EVERY parameter received from the GUI
-  //     ------------- std::cout << ">>> [GUI-RX] ===== ALL RECEIVED PARAMETERS
-  //     ====="
-  //               << std::endl;
-  //     if (S.is_object())
-  //       for (auto &kv : S.items())
-  //         std::cout << ">>> [GUI-RX] Strategy." << kv.key() << " = "
-  //                   << kv.value().dump() << std::endl;
-  //     if (P.is_object())
-  //       for (auto &kv : P.items())
-  //         std::cout << ">>> [GUI-RX] Params." << kv.key() << " = "
-  //                   << kv.value().dump() << std::endl;
-  //     if (R.is_object())
-  //       for (auto &kv : R.items())
-  //         std::cout << ">>> [GUI-RX] Ratio." << kv.key() << " = "
-  //                   << kv.value().dump() << std::endl;
-  //     if (L.is_array())
-  //       for (size_t li = 0; li < L.size(); ++li)
-  //         if (L[li].is_object())
-  //           for (auto &kv : L[li].items())
-  //             std::cout << ">>> [GUI-RX] Legs[" << li << "]." << kv.key()
-  //                       << " = " << kv.value().dump() << std::endl;
-  //     if (root.contains("StrategyUpdates") &&
-  //         root["StrategyUpdates"].is_array()) {
-  //       const auto &su = root["StrategyUpdates"];
-  //       for (size_t i = 0; i < su.size(); ++i)
-  //         std::cout << ">>> [GUI-RX] StrategyUpdates[" << i
-  //                   << "] = " << su[i].dump() << std::endl;
-  //     }
-  //     // Any other top-level keys not in the groups above.
-  //     for (auto &kv : root.items()) {
-  //       const std::string &k = kv.key();
-  //       if (k != "Strategy" && k != "Legs" && k != "Params" && k != "Ratio"
-  //       &&
-  //           k != "StrategyUpdates")
-  //         std::cout << ">>> [GUI-RX] " << k << " = " << kv.value().dump()
-  //                   << std::endl;
-  //     }
-  //     std::cout << ">>> [GUI-RX] ===== END PARAMETERS =====" << std::endl;
-  //     // --------------------------------------------------------------------
-
-  //     // Box is the only supported strategy; everything maps to BOX (dispatch
-  //     // still guards on isbox && 4 legs, so a non-box payload is simply
-  //     ignored
-  //     // downstream).
-  //     const std::string canonType = "BOX";
-
-  //     const std::string statusL =
-  //         toLower(S.value("Status", std::string("pause")));
-  //     const int state =
-  //         (statusL == "running" || statusL == "run" || statusL == "start" ||
-  //          statusL == "active" || statusL == "play" || statusL == "resume")
-  //             ? 1
-  //             : 0;
-
-  //     bool stratBid = S.value("IsBidding", false);
-  //     bool anyLegBid = false, allLegBid = !L.empty();
-  //     for (const auto &lj : L) {
-  //       bool e = lj.value("EnableBid", false);
-  //       anyLegBid |= e;
-  //       allLegBid = allLegBid && e;
-  //     }
-  //     int mode = 1; // AGGRESSIVE
-  //     if (allLegBid && (stratBid || anyLegBid))
-  //       mode = 4; // ALLLEG_BIDDING
-  //     else if (stratBid || anyLegBid)
-  //       mode = 2; // BIDDING
-
-  //     json strat;
-  //     strat["strategynumber"] = ljInt(S, "StrategyId", 0);
-  //     strat["clientid"] = client;
-  //     strat["algoid"] = algoid;
-  //     strat["omsid"] = omsid;
-  //     strat["strategystate"] = state;
-  //     strat["mode"] = mode;
-  //     strat["orderdepth"] = ljInt(P, "OrderDepth", 0);
-  //     strat["biddingdepth"] = ljInt(P, "PriceDepth", 0);
-  //     strat["allowedslippage"] = ljInt(P, "AllowedSlippage", 0);
-  //     strat["marketretries"] = ljInt(P, "MarketRetries", 0);
-  //     strat["timetorevertinmilis"] = ljInt(P, "TimeToRevertBidMs", 0);
-  //     // Buy/sell spread thresholds: GUI B-Pr (user buy spread) / S-Pr (user
-  //     // sell spread). Accept explicit "BPr"/"SPr" (in Params or Strategy);
-  //     else
-  //     // fall back to Ratio.LongBuyPrice / Ratio.ShortSellPrice.
-  //     strat["userbuyspread"] =
-  //         ljInt(P, "BPr", ljInt(S, "BPr", ljInt(R, "LongBuyPrice", 0)));
-  //     strat["usersellspread"] =
-  //         ljInt(P, "SPr", ljInt(S, "SPr", ljInt(R, "ShortSellPrice", 0)));
-  //     strat["allowbiddepth"] = ljInt(P, "AllowedBidDepth", 0);
-  //     strat["TLots"] = ljInt(P, "LotSize", 1);
-  //     strat["limit_mktorder"] =
-  //         (toLower(P.value("OrdersType", std::string("Limit"))) == "limit") ?
-  //         1
-  //                                                                           : 0;
-  //     strat["isbox"] = 1;
-
-  //     const json *legRatios =
-  //         (R.contains("LegRatios") && R["LegRatios"].is_array())
-  //             ? &R["LegRatios"]
-  //             : nullptr;
-  //     json toks = json::array();
-  //     for (size_t i = 0; i < L.size(); ++i) {
-  //       const json &lj = L[i];
-  //       const int tok = static_cast<int>(ljInt(lj, "Token", 0));
-  //       const std::string sideL = toLower(lj.value("Side",
-  //       std::string("BUY"))); const int bs =
-  //           (sideL == "sell" || sideL == "s" || sideL == "-1") ? -1 : 1;
-  //       int ratio = 1;
-  //       if (legRatios && legRatios->size() > i &&
-  //       (*legRatios)[i].is_number())
-  //         ratio = (*legRatios)[i].get<int>();
-  //       else
-  //         ratio = static_cast<int>(ljInt(lj, "Lots", 1));
-  //       int strike = static_cast<int>(ljInt(lj, "strikePrice", 0));
-  //       int lot = 0;
-  //       ProductDetails pd{};
-  //       if (getProductDetails(tok, pd)) {
-  //         lot = pd.lot_size_;
-  //         if (strike <= 0)
-  //           strike = pd.strike_price_;
-  //       }
-  //       if (lot <= 0)
-  //         lot = static_cast<int>(ljInt(P, "LotSize", 1)); // last-ditch
-  //         fallback
-  //       json t;
-  //       t["token"] = tok;
-  //       t["b_s"] = bs;
-  //       t["ratio"] = std::max(1, ratio);
-  //       t["lotsize"] = std::max(1, lot);
-  //       t["strikePrice"] = strike;
-  //       t["isbiddingleg"] = lj.value("EnableBid", false);
-  //       toks.push_back(std::move(t));
-  //     }
-
-  //     json canon;
-  //     canon["action"] = root.value("action", std::string("add"));
-  //     canon["strategytype"] =
-  //         canonType; // consumed by the BOX/CONVREV/... string checks
-  //     canon["strategy"] = std::move(strat);
-  //     canon["tokens"] = std::move(toks);
-  //     std::cout << "[LegStrategy] translated GUI '"
-  //               << S.value("SubType", std::string()) << "' -> " << canonType
-  //               << " legs=" << L.size() << " state=" << state
-  //               << " mode=" << mode << std::endl;
-  //     std::cout << ">>> [GUI-RX] ADAPTER translated GUI SubType='"
-  //               << S.value("SubType", std::string())
-  //               << "' -> canonType=" << canonType
-  //               << " StrategyId=" << ljInt(S, "StrategyId", 0)
-  //               << " legs=" << L.size() << " state=" << state
-  //               << " mode=" << mode << std::endl;
-  //     for (const auto &tk : canon["tokens"])
-  //       std::cout << ">>> [GUI-RX]   token=" << tk.value("token", 0)
-  //                 << " b_s=" << tk.value("b_s", 0)
-  //                 << " ratio=" << tk.value("ratio", 0)
-  //                 << " lotsize=" << tk.value("lotsize", 0)
-  //                 << " strike=" << tk.value("strikePrice", 0)
-  //                 << " bidding=" << tk.value("isbiddingleg", false)
-  //                 << std::endl;
-  //     root = std::move(canon);
-  //   }
-
-  //   const json &js = root.contains("strategy") ? root["strategy"] : root;
-
-  //   StrategyDatafromui s{};
-  //   s.clientid = ljInt(js, "clientid");
-  //   s.algoid = ljInt(js, "algoid");
-  //   s.omsid = ljInt(js, "omsid");
-  //   s.strategynumber = ljInt(js, "strategynumber");
-  //   s.strategytype = ljInt(js, "strategytype");
-  //   s.strategystate = ljInt(js, "strategystate");
-  //   s.userbuyspread = ljInt(js, "userbuyspread");
-  //   s.usersellspread = ljInt(js, "usersellspread");
-  //   s.buySL = ljInt(js, "buySL");
-  //   s.SellSL = ljInt(js, "SellSL");
-  //   s.buyStoporder = ljInt(js, "buyStoporder");
-  //   s.SellStoporder = ljInt(js, "SellStoporder");
-  //   s.buyNlots = ljInt(js, "buyNlots");
-  //   s.sellNlots = ljInt(js, "sellNlots");
-  //   s.TLots = ljInt(js, "TLots");
-  //   s.biddingdepth = ljInt(js, "biddingdepth");
-  //   s.orderdepth = ljInt(js, "orderdepth");
-  //   s.thrsoldqty = ljInt(js, "thrsoldqty");
-  //   s.allowedslippage = ljInt(js, "allowedslippage");
-  //   s.normal_bstbid = ljInt(js, "normal_bstbid");
-  //   s.limit_mktorder = ljInt(js, "limit_mktorder");
-  //   s.leavasis = ljInt(js, "leavasis");
-  //   s.revertlegs = ljInt(js, "revertlegs");
-  //   s.timetorevertinmilis = ljInt(js, "timetorevertinmilis");
-  //   s.actionforunhedgeqty_nonunhedge_ratiounhedge =
-  //       ljInt(js, "actionforunhedgeqty_nonunhedge_ratiounhedge");
-  //   s.buystepcycles = ljInt(js, "buystepcycles");
-  //   s.sellstepcycles = ljInt(js, "sellstepcycles");
-  //   s.BuyStep = ljInt(js, "BuyStep");
-  //   s.SellStep = ljInt(js, "SellStep");
-  //   s.Steplotsquaroff = ljInt(js, "Steplotsquaroff");
-  //   s.stepsenable = ljBool(js, "stepsenable");
-  //   s.flagStepsquaroff = ljBool(js, "flagStepsquaroff");
-  //   s.margine = ljInt(js, "margine");
-
-  //   // Lifecycle action from the GUI: add | start | stop | edit | delete.
-  //   std::string action = root.value("action", "add");
-  //   std::cout << "[LegStrategy] action=" << action
-  //             << " strategynumber=" << s.strategynumber << std::endl;
-
-  //   // Actions that only need the strategynumber (no token payload required).
-  //   // A strategy lives in exactly one map (2-leg vs 3L/4L/6L/conv-rev).
-  //   if (action == "delete") {
-  //     if (auto it = boxStrats_.find(s.strategynumber); it !=
-  //     boxStrats_.end()) {
-  //       it->second->stop();
-  //       it->second->unsubscribeTokens();
-  //       delete it->second;
-  //       boxStrats_.erase(it);
-  //     }
-  //     legStrategies_.erase(s.strategynumber);
-  //     strategyJson_.erase(s.strategynumber);
-  //     std::cout << "[LegStrategy] deleted strat " << s.strategynumber
-  //               << std::endl;
-  //     return;
-  //   }
-  //   if (action == "stop") {
-  //     if (auto it = boxStrats_.find(s.strategynumber); it !=
-  //     boxStrats_.end())
-  //       it->second->stop();
-  //     return;
-  //   }
-  //   if (action == "start") {
-  //     if (auto it = boxStrats_.find(s.strategynumber); it !=
-  //     boxStrats_.end()) {
-  //       it->second->start();
-  //       return;
-  //     }
-  //     // else fall through to (re)create from the full payload below.
-  //   }
-
-  //   std::vector<TokenDatafromui> tokens;
-  //   if (root.contains("tokens")) {
-  //     for (const auto &t : root["tokens"]) {
-  //       TokenDatafromui td{};
-  //       td.token = static_cast<int>(ljInt(t, "token"));
-  //       td.b_s = (ljInt(t, "b_s", 1) < 0) ? BuySell::Sell : BuySell::Buy;
-  //       td.ratio = static_cast<int>(ljInt(t, "ratio"));
-  //       td.lotsize = static_cast<int16_t>(ljInt(t, "lotsize"));
-  //       td.strikePrice = static_cast<int32_t>(ljInt(t, "strikePrice"));
-  //       td.undrlineToken = static_cast<int>(ljInt(t, "undrlineToken"));
-  //       td.isbiddingleg = ljBool(t, "isbiddingleg");
-  //       td.SL = static_cast<int>(ljInt(t, "SL"));
-  //       td.noofentry = static_cast<int>(ljInt(t, "noofentry"));
-  //       td.trailingslpercent = static_cast<int>(ljInt(t,
-  //       "trailingslpercent")); int64_t st = ljInt(t, "starttime"), en =
-  //       ljInt(t, "endtime"); std::memcpy(&td.starttime, &st,
-  //       sizeof(int64_t)); std::memcpy(&td.endtime, &en, sizeof(int64_t));
-  //       tokens.push_back(td);
-  //     }
-  //   }
-
-  //   legStrategies_[s.strategynumber] = {s, tokens};
-  //   for (const auto &td : tokens)
-  //     std::cout << "    token " << td.token << " side "
-  //               << static_cast<int>(td.b_s) << " ratio " << td.ratio << " lot
-  //               "
-  //               << td.lotsize << " bidding " << td.isbiddingleg << std::endl;
-
-  //   // Execution mode (GUI "mode" field: 1 AGGRESSIVE, 2 BIDDING, 4
-  //   // ALLLEG_BIDDING).
-  //   int mode = static_cast<int>(ljInt(js, "mode", 1));
-  //   bool isBox = (ljInt(js, "isbox", 0) != 0) ||
-  //                (root.value("strategytype", std::string()) == "BOX");
-
-  //   // 4-leg box -> BoxSpreadStrategy (the only strategy in this library).
-  //   // Direction is decided live from the market spreads vs the GUI B-Pr/S-Pr
-  //   // thresholds (Model B).
-  //   if (isBox && tokens.size() == 4) {
-  //     std::cout << ">>> [GUI-RX] DISPATCH BoxSpreadStrategy strat="
-  //               << s.strategynumber << " action=" << action << " mode=" <<
-  //               mode
-  //               << " state=" << s.strategystate
-  //               << " orderDepth=" << s.orderdepth
-  //               << " biddingDepth=" << s.biddingdepth << " TLots=" << s.TLots
-  //               << " B-Pr=" << s.userbuyspread << " S-Pr=" <<
-  //               s.usersellspread
-  //               << std::endl;
-  //     auto it = boxStrats_.find(s.strategynumber);
-  //     if (action == "edit" && it != boxStrats_.end())
-  //       it->second->edit(s, tokens, mode);
-  //     else {
-  //       if (it != boxStrats_.end()) {
-  //         delete it->second;
-  //         boxStrats_.erase(it);
-  //       }
-  //       boxStrats_[s.strategynumber] =
-  //           new BoxSpreadStrategy(this, s, tokens, mode);
-  //     }
-  //     strategyJson_[s.strategynumber] =
-  //         jsonText; // keep the original GUI JSON to echo back filled
-  //                   // (BCmp/SCmp/Cost/qty)
-  //     std::cout << ">>> [GUI-RX] BoxSpreadStrategy "
-  //               << (action == "edit" ? "edited" : "created")
-  //               << " strat=" << s.strategynumber << " now tracking "
-  //               << boxStrats_.size() << " box instance(s)" << std::endl;
-  //     return;
-  //   }
-
-  //   std::cout << "[LegStrategy] not a 4-leg box (isbox=" << isBox
-  //             << " legs=" << tokens.size()
-  //             << ") -- ignored (box is the only supported strategy)"
-  //             << std::endl;
-  // } catch (const std::exception &e) {
-  //   std::cout << "[LegStrategy] JSON apply failed: " << e.what() <<
-  //   std::endl;
-  // }
-// }
-
+}
 /**
  * @brief Initialize strategy configuration, subscriptions, and order handles.
  */
@@ -754,6 +429,19 @@ MinixStrategy::~MinixStrategy() {
   boxStrats_.clear();
 }
 
+bool MinixStrategy::subscribeProduct(const int32_t product_id,
+                                     const uint16_t flags) {
+  LOG_DEBUG("[SUB] subscribeProduct product_id=%d flags=%d", product_id, flags);
+  return AlgoBase::subscribeProduct(product_id, flags);
+}
+
+bool MinixStrategy::unSubscribeProduct(const int32_t product_id,
+                                       const uint16_t flags) {
+  LOG_DEBUG("[SUB] unSubscribeProduct product_id=%d flags=%d", product_id,
+            flags);
+  return AlgoBase::unSubscribeProduct(product_id, flags);
+}
+
 // function to squareoff using traderId
 std::string format_time(std::time_t t) {
   std::tm *timeInfo = std::localtime(&t);
@@ -765,6 +453,10 @@ std::string format_time(std::time_t t) {
 }
 
 void MinixStrategy::OnTick(const Quote &event) {
+  LOG_DEBUG("[TICK] OnTick product_id=%d seq=%d ts=%lu ltp=%d",
+            event.header.product_id, event.header.sequence_no,
+            event.header.exchange_timestamp, event.message.ltp_);
+
   // Clock (seconds-of-day*1e9) for the box 1s/EOD timers, derived from the
   // EXCHANGE timestamp (decodes reliably) with event_timestamp as a fallback.
   // This is BEST-EFFORT and only drives timers — it must NOT gate the book
@@ -889,9 +581,10 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     if (jit == strategyJson_.end())
       continue;
 
-    json j = json::parse(jit->second, nullptr, false);
-    if (j.is_discarded() || !j.is_object())
-      continue;
+    json jo = json::parse(jit->second, nullptr, false);
+    int strategyId = ljInt(jo["Strategy"], "StrategyId", 0);
+
+    json j;
 
     const int64_t bcmpP = box->bcmp(); // market BUY spread  (paise)
     const int64_t scmpP = box->scmp(); // market SELL spread (paise)
@@ -904,6 +597,8 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     // Fields the GUI displays. Spreads/cost/PnL go back in RUPEES (float =
     // paise/100); Gap in paise (string). Matches the production
     // ConversionReversal sender.
+    j["StrategyId"] = strategyId;
+    j["Status"] = "Updates";
     j["BCmp"] = static_cast<float>(bcmpP) / 100.0f;
     j["SCmp"] = static_cast<float>(scmpP) / 100.0f;
     j["Cost"] = static_cast<float>(costP) / 100.0f;
@@ -921,20 +616,6 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     j["B-Buy"] = 0;
     j["B-Sell"] = 0;
     // Also fill the StrategyUpdates name/value list (rupees).
-    if (j.contains("StrategyUpdates") && j["StrategyUpdates"].is_array())
-      for (auto &u : j["StrategyUpdates"]) {
-        const std::string nm = u.value("name", std::string());
-        if (nm == "BCmp")
-          u["value"] = static_cast<float>(bcmpP) / 100.0f;
-        else if (nm == "SCmp")
-          u["value"] = static_cast<float>(scmpP) / 100.0f;
-        else if (nm == "Cost")
-          u["value"] = static_cast<float>(costP) / 100.0f;
-        else if (nm == "M2M" || nm == "Net P/L")
-          u["value"] = static_cast<float>(pnlP) / 100.0f;
-        else if (nm == "TrSpread" || nm == "RLP")
-          u["value"] = static_cast<float>(trspP) / 100.0f;
-      }
 
     std::cout << ">>> [BOX_UPD] strat=" << box->number()
               << " BCmp(paise)=" << bcmpP << " SCmp(paise)=" << scmpP
