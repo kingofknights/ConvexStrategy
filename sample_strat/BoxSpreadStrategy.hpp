@@ -70,6 +70,7 @@ public:
   bool valid() const { return valid_; }
   int64_t bcmp() const { return lastBCmp_; } // last market BUY spread (paise) for GUI display
   int64_t scmp() const { return lastSCmp_; } // last market SELL spread (paise) for GUI display
+  int64_t gap() const;
   // Cost shown on the GUI: total transaction cost to TRADE the whole box, computed every
   // tick whether or not it has traded. For each leg: value = LTP * qty (qty = TLots*ratio*
   // lotsize), cost = value * (Rs/crore) / 1e7; summed over all 4 legs. Paise.

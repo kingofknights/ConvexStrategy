@@ -1,0 +1,148 @@
+Ratio Spread & Box — Pricing and PNL Formula Reference
+(Current Market Price, ATP, M2M, RLP, Net PnL — full working)
+
+1. Core Principle (applies to every strategy below)
+A multi-leg strategy doesn't have one single "market price" — it has a combo price built from each leg's live bid/ask, and this combo price is different depending on whether you're entering (buying) the structure or exiting (selling) it. This is because each individual leg has its own bid-ask spread, and those spreads stack up across legs.
+The one rule that drives everything:
+When you Buy something, you pay the Ask. When you Sell something, you receive the Bid.
+Apply this leg-by-leg, then group by direction:
+ ENTER the strategy now  =  Σ (Buy legs × Ask × lots)  −  Σ (Sell legs × Bid × lots)
+
+Value if you EXIT the strategy now  =  Σ (Buy legs × Bid × lots)  −  Σ (Sell legs × Ask × lots)
+    • Entry Cost → buy value 
+    • Exit Value → this is what you'd actually get back today if you squared off a position you're already holding. 
+    • The gap between these two numbers is the round-trip bid-ask cost of the whole structure — this is exactly why "unfavorable price fills" eat into PNL: the wider the individual leg spreads, the bigger this gap, the more it costs to get in and out. 
+Everything below is just this same rule applied to specific strategy shapes.
+
+2. Ratio 2 Leg
+Structure: e.g. Buy 1 lot Option A (say ATM), Sell 2 lots Option B (say OTM) — ratio 1:2.
+To BUY / Enter now:
+Entry Cost = (Option_A_Ask × 1) − (Option_B_Bid × 2)
+To SELL / Exit now (i.e. square off an existing position):
+Exit Value = (Option_A_Bid × 1) − (Option_B_Ask × 2)
+Worked example: Buy 1× 45500 CE, Sell 2× 44000 CE
+Entry Cost = (45500_CE_Ask × 1) − (44000_CE_Bid × 2)
+Exit Value = (45500_CE_Bid × 1) − (44000_CE_Ask × 2)
+
+3. Ratio 3 Leg
+Structure: 3 legs with a defined ratio, e.g. Buy 1 lot @ 45500, Sell 3 lots @ 44000, Buy 2 lots @ 42500.
+To BUY / Enter now:
+Entry Cost = (45500_Ask × 1) + (42500_Ask × 2) − (44000_Bid × 3)
+(Both Buy legs grouped together and subtracted from the Sell leg's credit — Buy legs = cost, Sell leg = credit.)
+To SELL / Exit now:
+Exit Value = (45500_Bid × 1) + (42500_Bid × 2) − (44000_Ask × 3)
+General rule reminder (from our earlier discussion): same-direction legs always get grouped together with the same sign. Two Buy legs → both negative in Entry Cost (both cost you money); never split one as + and one as − just because of leg order — the sign depends only on Buy vs Sell, never on leg position (1st/2nd/3rd).
+
+4. Ratio 4 Leg
+Structure: 4 legs, ratio e.g. r1:r2:r3:r4, each leg tagged Buy or Sell.
+To BUY / Enter now:
+Entry Cost = Σ (Buy legs: Ask × ratio_qty) − Σ (Sell legs: Bid × ratio_qty)
+To SELL / Exit now:
+Exit Value = Σ (Buy legs: Bid × ratio_qty) − Σ (Sell legs: Ask × ratio_qty)
+Same pattern as 2-leg and 3-leg — just more terms in each group. However many legs a strategy has, sort them into "Buy bucket" and "Sell bucket" first, then apply the formula.
+
+5. Box Spread (4 legs: 2 Calls + 2 Puts, 2 strikes)
+Structure (Long Box): K1 = lower strike, K2 = higher strike
+    • Buy Call K1 
+    • Sell Call K2 
+    • Sell Put K1 
+    • Buy Put K2 
+To BUY / Enter now:
+Entry Cost = (Call_K1_Ask + Put_K2_Ask) − (Call_K2_Bid + Put_K1_Bid)
+To SELL / Exit now:
+Exit Value = (Call_K1_Bid + Put_K2_Bid) − (Call_K2_Ask + Put_K1_Ask)
+Worked example: K1=23500, K2=25000
+Entry Cost = (Call_23500_Ask + Put_25000_Ask) − (Call_25000_Bid + Put_23500_Bid)
+Exit Value = (Call_23500_Bid + Put_25000_Bid) − (Call_25000_Ask + Put_23500_Ask)
+Box-specific arbitrage check
+A box always settles at exactly (K2 − K1) at expiry, no matter where the underlying ends up — this is what makes it a pure arbitrage trade (zero directional risk). So the number that actually matters:
+Box Arbitrage Edge = (K2 − K1) − Entry Cost
+    • If Entry Cost < (K2 − K1) → positive edge → profitable arbitrage (you're buying the box cheaper than its guaranteed expiry value). 
+    • If Entry Cost ≥ (K2 − K1) → no edge (or negative) → don't take the trade, or check for a bad fill. 
+This is the exact check to run before confirming any box fill — ties directly to the "unfavorable price fills in box strategies" PNL issue.
+
+6. ATP (Average Traded Price) — per leg
+Once actual fills happen (not live bid/ask anymore, but your real traded prices), ATP is the quantity-weighted average of all fills for that leg:
+ATP = Σ (fill_qty_i × fill_price_i)  /  Σ fill_qty_i
+Example: Buy 1 lot @ 535, then 2 more lots @ 540
+ATP = (1×535 + 2×540) / (1+2) = 1615 / 3 = 538.33
+    • B-ATP = average price of the Buy leg's fills 
+    • S-ATP = average price of the Sell leg's fills 
+ATP is your actual cost basis — different from the live bid/ask formulas above, which are theoretical (what it would cost right now). ATP is what it actually cost you, once filled.
+
+7. M2M (Mark-to-Market) — live, unrealized
+M2M tells you how much profit/loss you're sitting on right now, based on current market price vs. your actual fill price (ATP), for the portion still open.
+M2M (Buy side)  = (Current_LTP − B-ATP) × B-TrQ × lot_size
+M2M (Sell side) = (S-ATP − Current_LTP) × S-TrQ × lot_size
+
+M2M (position) = M2M(Buy side) + M2M(Sell side)
+    • If you bought at 535 and it's now trading at 540 → you're up (540−535) × qty → positive M2M. 
+    • If you sold at 540 and it's now trading at 535 → you're up (540−535) × qty → positive M2M. 
+    • Recalculates on every tick since Current_LTP keeps changing — this is why M2M flickers red/green live. 
+For a multi-leg strategy, total M2M = sum of each individual leg's M2M.
+
+8. RLP (Realized P/L) — booked, locked-in
+RLP is profit/loss from quantity that has already been squared off — i.e., both a matching buy and sell have actually happened and closed out. Unlike M2M, this does not move with the market anymore.
+RLP = Σ [ (Sell_price − Buy_price) × squared_off_qty ]   across all closed portions
+Example: Bought 1 lot @ 535, later sold that same 1 lot @ 545 (squared off)
+RLP = (545 − 535) × 1 = 10 × lot_size
+This 10-point profit is now locked in — it won't change no matter what the market does afterward.
+
+9. Net P/L
+Simply the total of what's booked plus what's still open:
+Net P/L = RLP + M2M
+    • RLP = money already made/lost, locked in 
+    • M2M = money currently being made/lost on what's still open, will keep moving until you exit 
+
+10. Cut P/L (bonus — "what if I exit everything right now")
+Treats the entire open position as if it were squared off instantly at current market (ignores slippage/spread, so it's slightly optimistic vs. reality):
+Cut P/L = RLP + [ (Current_LTP − ATP) × Total_Open_Qty × direction ]
+Compare this to Exit Value (Section 1/2/3/4/5 formulas) — Cut P/L uses LTP (single traded price, optimistic), while Exit Value uses actual Bid/Ask (realistic, accounts for spread cost). Exit Value is the more honest number for decision-making; Cut P/L is a quick single-number estimate.
+
+11. Full Worked Example — Ratio 3 Leg, start to finish
+Setup: Buy 1 lot 45500 CE, Sell 3 lots 44000 CE, Buy 2 lots 42500 CE
+Step 1 — Check Entry Cost before placing (live bid/ask):
+Entry Cost = (45500_Ask × 1) + (42500_Ask × 2) − (44000_Bid × 3)
+→ If this looks favorable, place the order.
+Step 2 — Order fills, now you have actual ATP:
+B-ATP(45500 leg) = actual average fill price for that leg
+B-ATP(42500 leg) = actual average fill price for that leg
+S-ATP(44000 leg) = actual average fill price for that leg
+Step 3 — While position is open, M2M updates live every tick:
+M2M(45500 leg) = (Current_LTP_45500 − B-ATP_45500) × 1 × lot_size
+M2M(42500 leg) = (Current_LTP_42500 − B-ATP_42500) × 2 × lot_size
+M2M(44000 leg) = (S-ATP_44000 − Current_LTP_44000) × 3 × lot_size
+
+Total M2M = sum of all three
+Step 4 — You decide to exit. Check Exit Value (live bid/ask) first:
+Exit Value = (45500_Bid × 1) + (42500_Bid × 2) − (44000_Ask × 3)
+Step 5 — Once exit fills happen, that quantity moves from M2M into RLP:
+RLP(45500 leg) = (Exit_fill_price − B-ATP_45500) × 1 × lot_size
+RLP(42500 leg) = (Exit_fill_price − B-ATP_42500) × 2 × lot_size
+RLP(44000 leg) = (S-ATP_44000 − Exit_fill_price) × 3 × lot_size
+
+Total RLP = sum of all three
+Step 6 — Final Net P/L for the trade:
+Net P/L = Total RLP   (since M2M = 0 now, position fully closed)
+
+12. Quick Reference Table
+What you want to know
+Formula
+Cost to enter now (any strategy)
+Σ(Buy legs × Ask) − Σ(Sell legs × Bid)
+Value if exit now (any strategy)
+Σ(Buy legs × Bid) − Σ(Sell legs × Ask)
+Box arbitrage edge
+(K2 − K1) − Entry Cost
+ATP (per leg)
+Σ(fill_qty × fill_price) / Σfill_qty
+M2M (per leg)
+(LTP − ATP) × Buy_Qty, or (ATP − LTP) × Sell_Qty
+RLP (per leg, on close)
+(Exit_price − ATP) × closed_qty, sign per direction
+Net P/L
+RLP + M2M
+Cut P/L
+RLP + (LTP − ATP) × Open_Qty (single-price estimate)
+
+

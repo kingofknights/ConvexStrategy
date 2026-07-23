@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-16
+
+### Changed
+- Box strategy gap calculation simplified to be based on the absolute difference between the strike prices of the first two legs.
+- Enforced leg ratios to be exactly 1 for all legs (1:1:1:1) in the box strategy.
+- Updated UI broadcast updates for Box Strategy to send the actual calculated `Gap` value instead of the `BCmp` (buy edge) value.
+
+### Fixed
+- Resolved compilation errors of `Ratio2LegStrategy` in `MinixStrategy.cpp` by correctly parsing and passing `entryRatios` and `exitRatios` from GUI JSON.
+
+## [1.3.0] - 2026-07-16
+
+### Added
+- Dedicated `Ratio2LegStrategy` class implementing a 2-leg option ratio spread strategy with real-time spreads, execution modes (aggressive, bidding, all-leg bidding), and PnL calculations.
+- Lifetime event handling, tick/broadcast/order event routing, and UI update channel integration for the new `Ratio 2 Leg` strategy inside `MinixStrategy`.
+- Support for separate entry ratios and exit ratios per leg (e.g. `EntryRatio` / `ExitRatio` keys or arrays from JSON).
+- Simultaneous two-sided bidding (parallel Entry and Exit slice state machines).
+- OrderMap query helpers to safely check filled details on non-default-constructible order instances.
+
+### Changed
+- Updated `sample_strat/CMakeLists.txt` to compile and link `Ratio2LegStrategy.cpp` as part of `SampleAlgo` shared library.
+
 ## [1.2.0] - 2026-07-15
 
 ### Added
