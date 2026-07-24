@@ -40,28 +40,31 @@ ConversionReversalStrategy::ConversionReversalStrategy(MinixStrategy* ms_, uint3
     _lotSize  = details[0].lot_size_ > 0 ? details[0].lot_size_ : 1;
     _tickSize = details[0].tick_size_ > 0 ? details[0].tick_size_ : 5;
 
-    // Default sides:
-    // Conversion: Long Fut (+), Long PE (+), Short CE (-)
-    // Reversion:  Short Fut (-), Short PE (-), Long CE (+)
-    ORDER_SIDE ceSide  = (_stratType == StrategyType::CONVERSION) ? SELL_SIDE : BUY_SIDE;
-    ORDER_SIDE peSide  = (_stratType == StrategyType::CONVERSION) ? BUY_SIDE : SELL_SIDE;
-    ORDER_SIDE futSide = (_stratType == StrategyType::CONVERSION) ? BUY_SIDE : SELL_SIDE;
+    // Long Side (Conversion): Short CE, Long PE, Long Fut
+    // Short Side (Reversion):  Long CE, Short PE, Short Fut
+    ORDER_SIDE longSide[3]  = {SELL_SIDE, BUY_SIDE, BUY_SIDE};
+    ORDER_SIDE shortSide[3] = {BUY_SIDE, SELL_SIDE, SELL_SIDE};
 
-    _biddingOrders._order[0] = std::make_unique<OrderObjectT>(_tokens[0], ceSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
-    _biddingOrders._order[1] = std::make_unique<OrderObjectT>(_tokens[1], peSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
-    _biddingOrders._order[2] = std::make_unique<OrderObjectT>(_tokens[2], futSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+    for (size_t i = 0; i < 3; ++i) {
+        _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+        _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+    }
 }
 
 void ConversionReversalStrategy::ParamUpdate(const nlohmann::json& json_) {
     if (json_.contains("Params")) {
         const auto& parmas = json_["Params"];
 
-        std::string typeStr = parmas.value("StrategyType", "Conversion");
-        _stratType = (typeStr == "Reversion" || typeStr == "reversion") ? StrategyType::REVERSION : StrategyType::CONVERSION;
+        _orderStrike = parmas.value("OrderStrike", 0);
 
-        _orderStrike        = parmas.value("OrderStrike", 0);
-        _quantity           = parmas.value("OrderLot", 0);
-        _totalQuantity      = parmas.value("TotalLot", 0);
+        _longParam._quantity      = parmas.value("LongBuySoQ", parmas.value("OrderLot", 0));
+        _longParam._totalQuantity = parmas.value("LongBuyQty", parmas.value("TotalLot", 0));
+        _longParam._spread        = parmas.value("LongBuyPrice", 0.0F) * 100.0F;
+
+        _shortParam._quantity      = parmas.value("ShortSellSoQ", parmas.value("OrderLot", 0));
+        _shortParam._totalQuantity = parmas.value("ShortSellQty", parmas.value("TotalLot", 0));
+        _shortParam._spread        = parmas.value("ShortSellPrice", 0.0F) * 100.0F;
+
         _marketOrderRetries = parmas.value("MarketOrderRetries", 0U);
     }
 
@@ -107,12 +110,22 @@ void ConversionReversalStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
         return;
     }
 
-    WindRate activeRate = GetBCmp();
-    if (activeRate._valid) {
-        OrderBiddingLogic(_biddingOrders, activeRate, "ConRev");
+    // Long Bidding = Conversion spread
+    WindRate longRate = GetBCmp();
+    if (longRate._valid) {
+        OrderBiddingLogic(_longOrders, _longParam, longRate, "LongConversion");
     } else {
         size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1;
-        _biddingOrders._order[biddingLeg]->cancel_order();
+        _longOrders._order[biddingLeg]->cancel_order();
+    }
+
+    // Short Bidding = Reversion spread
+    WindRate shortRate = GetSCmp();
+    if (shortRate._valid) {
+        OrderBiddingLogic(_shortOrders, _shortParam, shortRate, "ShortReversion");
+    } else {
+        size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1;
+        _shortOrders._order[biddingLeg]->cancel_order();
     }
 }
 
@@ -132,28 +145,33 @@ void ConversionReversalStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
     size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1;
 
-    for (size_t i = 0; i < 3; ++i) {
-        if (resp_.hdr_.uid_.id_ == _biddingOrders._uniqueID[i]) {
-            _biddingOrders._order[i]->handle_confirmation(resp_);
-            _biddingOrders._tradedLot[i] += traded ? lot : 0;
-            _biddingOrders._tradeValue[i] += traded ? value : 0;
-            if (i == biddingLeg && traded) {
-                _biddingOrders._lastBiddingFillPrice = price;
+    auto processResponse = [&](MarketBidding& object_) -> bool {
+        for (size_t i = 0; i < 3; ++i) {
+            if (resp_.hdr_.uid_.id_ == object_._uniqueID[i]) {
+                object_._order[i]->handle_confirmation(resp_);
+                object_._tradedLot[i] += traded ? lot : 0;
+                object_._tradeValue[i] += traded ? value : 0;
+                if (i == biddingLeg && traded) {
+                    object_._lastBiddingFillPrice = price;
+                }
+                return true;
             }
-            break;
         }
-    }
+        return false;
+    };
+
+    processResponse(_longOrders);
+    processResponse(_shortOrders);
 
     if (traded) {
-        SecondOrderBidding(_biddingOrders);
+        SecondOrderBidding(_longOrders, _longParam);
+        SecondOrderBidding(_shortOrders, _shortParam);
     }
 }
 
-// ── Pure Spread Calculation Functions from con_rev_BIDDING.docx ────────────
+// ── Pure Spread Calculations from con_rev_BIDDING.docx ─────────────────────
 
-// 1. Conversion bid in Call (Fut_LTP > Order_Strike)
-// Cur_wind_rate = order_ce_ask - order_pe_ask - future_ask - 1tick + strike_pr
-// FIRST PRICE   = order_ce_ask - 1tick
+// Conversion bid in Call (Fut_LTP > Order_Strike)
 auto ConversionReversalStrategy::CalculateConversionCallWindRate() const -> WindRate {
     int ceAsk  = _qoute[0].message.ask_levels[0].price;
     int peAsk  = _qoute[1].message.ask_levels[0].price;
@@ -168,9 +186,7 @@ auto ConversionReversalStrategy::CalculateConversionCallWindRate() const -> Wind
     return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// 2. Reversion bid in Call (Fut_LTP > Order_Strike)
-// Cur_wind_rate = - order_ce_bid + order_pe_bid + future_bid - strike_pr - 1tick
-// BIDDING PRICE = order_ce_bid + 1tick
+// Reversion bid in Call (Fut_LTP > Order_Strike)
 auto ConversionReversalStrategy::CalculateReversionCallWindRate() const -> WindRate {
     int ceBid  = _qoute[0].message.bid_levels[0].price;
     int peBid  = _qoute[1].message.bid_levels[0].price;
@@ -185,9 +201,7 @@ auto ConversionReversalStrategy::CalculateReversionCallWindRate() const -> WindR
     return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// 3. Conversion bid in Put (Fut_LTP <= Order_Strike)
-// Cur_wind_rate = order_ce_bid - order_pe_bid - future_ask + strike_pr - 1tick
-// BIDDING PRICE = order_pe_bid + 1tick
+// Conversion bid in Put (Fut_LTP <= Order_Strike)
 auto ConversionReversalStrategy::CalculateConversionPutWindRate() const -> WindRate {
     int peBid  = _qoute[1].message.bid_levels[0].price;
     int ceBid  = _qoute[0].message.bid_levels[0].price;
@@ -202,9 +216,7 @@ auto ConversionReversalStrategy::CalculateConversionPutWindRate() const -> WindR
     return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// 4. Reversion bid in Put (Fut_LTP <= Order_Strike)
-// Cur_wind_rate = order_pe_ask - order_ce_ask + future_bid - strike_pr - 1tick
-// FIRST PRICE   = order_pe_ask - 1tick
+// Reversion bid in Put (Fut_LTP <= Order_Strike)
 auto ConversionReversalStrategy::CalculateReversionPutWindRate() const -> WindRate {
     int peAsk  = _qoute[1].message.ask_levels[0].price;
     int ceAsk  = _qoute[0].message.ask_levels[0].price;
@@ -221,65 +233,77 @@ auto ConversionReversalStrategy::CalculateReversionPutWindRate() const -> WindRa
 
 auto ConversionReversalStrategy::GetBCmp() const -> WindRate {
     int futLtp = _qoute[2].message.ltp_;
-    if (futLtp > _orderStrike) {
-        // Fut_LTP > Order_Strike -> Order in Call
-        return (_stratType == StrategyType::CONVERSION) 
-            ? CalculateConversionCallWindRate() 
-            : CalculateReversionCallWindRate();
-    } else {
-        // Fut_LTP <= Order_Strike -> Order in Put
-        return (_stratType == StrategyType::CONVERSION) 
-            ? CalculateConversionPutWindRate() 
-            : CalculateReversionPutWindRate();
-    }
+    return (futLtp > _orderStrike) ? CalculateConversionCallWindRate() : CalculateConversionPutWindRate();
 }
 
 auto ConversionReversalStrategy::GetSCmp() const -> WindRate {
-    return GetBCmp();
+    int futLtp = _qoute[2].message.ltp_;
+    return (futLtp > _orderStrike) ? CalculateReversionCallWindRate() : CalculateReversionPutWindRate();
 }
 
 auto ConversionReversalStrategy::GetStrategyID() const -> uint32_t { return _strategyId; }
 auto ConversionReversalStrategy::GetGap() const -> int { return _gap; }
 
 auto ConversionReversalStrategy::GetBuyTradedQuantity() const -> int {
-    return std::min({_biddingOrders._tradedLot[0], _biddingOrders._tradedLot[1], _biddingOrders._tradedLot[2]});
+    return std::min({_longOrders._tradedLot[0], _longOrders._tradedLot[1], _longOrders._tradedLot[2]});
 }
 auto ConversionReversalStrategy::GetSellTradedQuantity() const -> int {
-    return GetBuyTradedQuantity();
+    return std::min({_shortOrders._tradedLot[0], _shortOrders._tradedLot[1], _shortOrders._tradedLot[2]});
 }
 
 auto ConversionReversalStrategy::GetBATP() const -> double {
-    if (_biddingOrders._tradedLot[0] == 0 || _biddingOrders._tradedLot[1] == 0 || _biddingOrders._tradedLot[2] == 0 || _lotSize == 0) return 0.0;
-    double pCe  = static_cast<double>(_biddingOrders._tradeValue[0]) / static_cast<double>(_biddingOrders._tradedLot[0] * _lotSize);
-    double pPe  = static_cast<double>(_biddingOrders._tradeValue[1]) / static_cast<double>(_biddingOrders._tradedLot[1] * _lotSize);
-    double pFut = static_cast<double>(_biddingOrders._tradeValue[2]) / static_cast<double>(_biddingOrders._tradedLot[2] * _lotSize);
-    return (_stratType == StrategyType::CONVERSION) ? (pFut + pPe - pCe - _orderStrike) : (pCe - pPe - pFut + _orderStrike);
+    if (_longOrders._tradedLot[0] == 0 || _longOrders._tradedLot[1] == 0 || _longOrders._tradedLot[2] == 0 || _lotSize == 0) return 0.0;
+    double pCe  = static_cast<double>(_longOrders._tradeValue[0]) / static_cast<double>(_longOrders._tradedLot[0] * _lotSize);
+    double pPe  = static_cast<double>(_longOrders._tradeValue[1]) / static_cast<double>(_longOrders._tradedLot[1] * _lotSize);
+    double pFut = static_cast<double>(_longOrders._tradeValue[2]) / static_cast<double>(_longOrders._tradedLot[2] * _lotSize);
+    return (pFut + pPe - pCe - _orderStrike);
 }
 
-auto ConversionReversalStrategy::GetSATP() const -> double { return GetBATP(); }
+auto ConversionReversalStrategy::GetSATP() const -> double {
+    if (_shortOrders._tradedLot[0] == 0 || _shortOrders._tradedLot[1] == 0 || _shortOrders._tradedLot[2] == 0 || _lotSize == 0) return 0.0;
+    double pCe  = static_cast<double>(_shortOrders._tradeValue[0]) / static_cast<double>(_shortOrders._tradedLot[0] * _lotSize);
+    double pPe  = static_cast<double>(_shortOrders._tradeValue[1]) / static_cast<double>(_shortOrders._tradedLot[1] * _lotSize);
+    double pFut = static_cast<double>(_shortOrders._tradeValue[2]) / static_cast<double>(_shortOrders._tradedLot[2] * _lotSize);
+    return (pCe - pPe - pFut + _orderStrike);
+}
 
 auto ConversionReversalStrategy::GetRLP() const -> double {
-    int matchedLots = GetBuyTradedQuantity();
-    return GetBATP() * static_cast<double>(matchedLots * _lotSize);
+    int buyLots  = GetBuyTradedQuantity();
+    int sellLots = GetSellTradedQuantity();
+    return static_cast<double>(std::min(buyLots, sellLots)) * (GetSATP() - GetBATP()) * static_cast<double>(_lotSize);
 }
 
 auto ConversionReversalStrategy::GetCutPL() const -> double { return GetRLP(); }
 
 auto ConversionReversalStrategy::GetM2M() const -> int {
-    int openLots = _biddingOrders._tradedLot[0] - GetBuyTradedQuantity();
-    if (openLots <= 0) return 0;
-    double currentSpread = static_cast<double>(GetBCmp()._windRate);
-    return static_cast<int>((currentSpread - GetBATP()) * static_cast<double>(openLots * _lotSize));
+    int buyLots  = GetBuyTradedQuantity();
+    int sellLots = GetSellTradedQuantity();
+    double m2m   = 0.0;
+    if (buyLots > sellLots) {
+        m2m = static_cast<double>(buyLots - sellLots) * (GetBCmp()._windRate - GetBATP()) * static_cast<double>(_lotSize);
+    } else if (sellLots > buyLots) {
+        m2m = static_cast<double>(sellLots - buyLots) * (GetSATP() - GetSCmp()._windRate) * static_cast<double>(_lotSize);
+    }
+    return static_cast<int>(m2m);
 }
 
 auto ConversionReversalStrategy::GetNetPL() const -> double { return GetRLP() + static_cast<double>(GetM2M()); }
 auto ConversionReversalStrategy::GetFLP() const -> int { return 0; }
 auto ConversionReversalStrategy::GetCost() const -> double { return 0.0; }
 
-void ConversionReversalStrategy::OrderBiddingLogic(MarketBidding& object_, WindRate rate_, std::string name_) {
+void ConversionReversalStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_) {
     size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1; // 0 = CE, 1 = PE
 
-    if (object_._tradedLot[biddingLeg] >= _totalQuantity) {
+    int biddingLots = object_._tradedLot[biddingLeg];
+    for (size_t h = 0; h < 3; ++h) {
+        if (h == biddingLeg) continue;
+        if (biddingLots != object_._tradedLot[h]) {
+            SecondOrderBidding(object_, param_);
+            return;
+        }
+    }
+
+    if (biddingLots >= param_._totalQuantity) {
         object_._order[biddingLeg]->cancel_order();
         return;
     }
@@ -289,7 +313,7 @@ void ConversionReversalStrategy::OrderBiddingLogic(MarketBidding& object_, WindR
     int              currentPlacePrice = order->get_open_price();
 
     if (marketPrice > 0 && marketPrice != currentPlacePrice) {
-        int quantity = _quantity * _lotSize;
+        int quantity = param_._quantity * _lotSize;
         auto status  = _ms->update_order(order, _tokens[biddingLeg], marketPrice, quantity, _uid);
         if (status != 0) {
             object_._uniqueID[biddingLeg] = _uid.id_;
@@ -298,7 +322,7 @@ void ConversionReversalStrategy::OrderBiddingLogic(MarketBidding& object_, WindR
     }
 }
 
-void ConversionReversalStrategy::SecondOrderBidding(MarketBidding& object_) {
+void ConversionReversalStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots param_) {
     size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1;
     int    biddingLot = object_._tradedLot[biddingLeg];
 
@@ -315,12 +339,13 @@ void ConversionReversalStrategy::SecondOrderBidding(MarketBidding& object_) {
             fmt::print("[HEDGE RETRY EXHAUSTED ConRev] Terminating strategy & cancelling all orders.\n");
             _active = false;
             for (size_t i = 0; i < 3; ++i) {
-                _biddingOrders._order[i]->cancel_order();
+                _longOrders._order[i]->cancel_order();
+                _shortOrders._order[i]->cancel_order();
             }
             return;
         }
 
-        int              quantity          = std::min(diff, _quantity) * _lotSize;
+        int              quantity          = std::min(diff, param_._quantity) * _lotSize;
         OrderObjectPtrT& order             = object_._order[leg];
         int              currentPlacePrice = order->get_open_price();
 

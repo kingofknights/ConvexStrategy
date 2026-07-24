@@ -19,16 +19,23 @@
 
 class MinixStrategy;
 
-enum class StrategyType {
-    CONVERSION = 1,
-    REVERSION  = 2
-};
-
 class ConversionReversalStrategy {
+  private:
+    enum class StrategyType {
+        CONVERSION = 1,
+        REVERSION  = 2
+    };
+
     struct WindRate {
         int   _biddingPrice = 0;
         float _windRate     = 0.0f;
         bool  _valid        = false;
+    };
+
+    struct ParamLots {
+        int   _totalQuantity = 0;
+        int   _quantity      = 0;
+        float _spread        = 0;
     };
 
     struct MarketBidding {
@@ -52,9 +59,9 @@ class ConversionReversalStrategy {
 
     void OnOrderResponse(const oms_transaction& resp_);
 
-    void OrderBiddingLogic(MarketBidding& object_, WindRate rate_, std::string name_);
+    void OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_);
 
-    void SecondOrderBidding(MarketBidding& object_);
+    void SecondOrderBidding(MarketBidding& object_, ParamLots param_);
 
     [[nodiscard]] auto GetStrategyID() const -> uint32_t;
     [[nodiscard]] auto GetGap() const -> int;
@@ -93,16 +100,17 @@ class ConversionReversalStrategy {
     int      _tickSize   = 0;
     int      _orderStrike = 0;
 
-    StrategyType _stratType = StrategyType::CONVERSION;
-
     Quote _qoute[3]; // 0: CE, 1: PE, 2: FUT
     std::array<int, 3> _tokens = {0, 0, 0};
 
-    MarketBidding _biddingOrders;
+    // Long Bidding = Conversion (Long Fut, Long PE, Short CE)
+    // Short Bidding = Reversion (Short Fut, Short PE, Long CE)
+    MarketBidding _longOrders;
+    MarketBidding _shortOrders;
 
-    int    _totalQuantity      = 0;
-    int    _quantity           = 0;
+    ParamLots _longParam;  // Conversion params
+    ParamLots _shortParam; // Reversion params
+
     size_t _marketOrderRetries = 0;
-
-    bool _isBidding = false;
+    bool   _isBidding           = false;
 };
