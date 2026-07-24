@@ -4,7 +4,6 @@
  */
 #include "MinixStrategy.hpp"
 
-#include "BoxSpreadStrategy.hpp"
 #include "Ratio2Leg/Ratio2LegStrategy.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
@@ -150,202 +149,15 @@ void MinixStrategy::applyLegStrategyJson(const std::string& jsonText) {
         int         strategyId = ljInt(strategy, "StrategyId", 0);
         std::cout << name << " " << status << " " << strategyId << std::endl;
 
-        if (name == "BOX" || name == "Box" || name == "box") {
-            sendStatus(status, strategyId);
-            handleBoxStrategy(root, jsonText);
-        } else if (name == "Ratio2" || name == "ratio2" || name == "RATIO2" ||
-                   name == "Ratio 2 Leg" || name == "ratio 2 leg" ||
-                   name == "Ratio2Leg" || name == "2LegRatio") {
+        if (name == "Ratio2" || name == "ratio2" || name == "RATIO2" ||
+            name == "Ratio 2 Leg" || name == "ratio 2 leg" ||
+            name == "Ratio2Leg" || name == "2LegRatio") {
             sendStatus(status, strategyId);
             handleRatio2LegStrategy(root, jsonText);
         }
 
     } catch (const std::exception& e) {
         std::cout << "applyLegStrategyJson failed: " << e.what() << std::endl;
-    }
-}
-
-void MinixStrategy::handleBoxStrategy(const nlohmann::json& root,
-                                      const std::string&    jsonText) {
-    using aef::infra::ui_cmd::BuySell;
-    using aef::infra::ui_cmd::StrategyDatafromui;
-    using aef::infra::ui_cmd::TokenDatafromui;
-
-    // add the logs in this function
-
-    try {
-        if (!root.contains("Legs") || !root["Legs"].is_array() ||
-            !root.contains("Strategy") || !root["Strategy"].is_object()) {
-            std::cout << "[handleBoxStrategy] missing Strategy or Legs in JSON"
-                      << std::endl;
-            return;
-        }
-
-        const json& S = root["Strategy"];
-        const json& L = root["Legs"];
-        const json  P = root.value("Params", json::object());
-        const json  R = root.value("Ratio", json::object());
-
-        int         strategyId = ljInt(S, "StrategyId", 0);
-        std::string statusL    = toLower(S.value("Status", "pause"));
-
-        // Check for delete/stop cases
-        if (statusL == "cancelled" || statusL == "unsubscribed") {
-            if (auto it = boxStrats_.find(strategyId); it != boxStrats_.end()) {
-                it->second->stop();
-                it->second->unsubscribeTokens();
-                delete it->second;
-                boxStrats_.erase(it);
-            }
-            legStrategies_.erase(strategyId);
-            strategyJson_.erase(strategyId);
-            std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy deleted strat="
-                      << strategyId << std::endl;
-            return;
-        }
-
-        // Determine state (running vs paused)
-        const int state =
-            (statusL == "running" || statusL == "run" || statusL == "start" ||
-             statusL == "active" || statusL == "play" || statusL == "resume" ||
-             statusL == "applied" || statusL == "subscribed")
-                ? 1
-                : 0;
-
-        // Determine mode
-        bool stratBid  = S.value("IsBidding", false);
-        bool anyLegBid = false, allLegBid = !L.empty();
-        for (const auto& lj : L) {
-            bool e = lj.value("EnableBid", false);
-            anyLegBid |= e;
-            allLegBid = allLegBid && e;
-        }
-        int mode = 1;  // AGGRESSIVE
-        if (allLegBid && (stratBid || anyLegBid))
-            mode = 4;  // ALLLEG_BIDDING
-        else if (stratBid || anyLegBid)
-            mode = 2;  // BIDDING
-
-        StrategyDatafromui s{};
-        s.clientid        = client;
-        s.algoid          = algoid;
-        s.omsid           = omsid;
-        s.strategynumber  = strategyId;
-        s.strategytype    = 1;  // BOX
-        s.strategystate   = state;
-        s.userbuyspread   = static_cast<int>(std::round(
-            ljDouble(P, "BPr",
-                       ljDouble(S, "BPr", ljDouble(R, "LongBuyPrice", 0.0))) *
-            100.0));
-        s.usersellspread  = static_cast<int>(std::round(
-            ljDouble(P, "SPr",
-                      ljDouble(S, "SPr", ljDouble(R, "ShortSellPrice", 0.0))) *
-            100.0));
-        s.buySL           = ljInt(S, "buySL", 0);
-        s.SellSL          = ljInt(S, "SellSL", 0);
-        s.buyStoporder    = ljInt(S, "buyStoporder", 0);
-        s.SellStoporder   = ljInt(S, "SellStoporder", 0);
-        s.buyNlots        = ljInt(S, "buyNlots", 0);
-        s.sellNlots       = ljInt(S, "sellNlots", 0);
-        s.TLots           = ljInt(P, "LotSize", 1);
-        s.biddingdepth    = ljInt(P, "PriceDepth", 0);
-        s.orderdepth      = ljInt(P, "OrderDepth", 0);
-        s.thrsoldqty      = ljInt(P, "ThresholdQty", 0);
-        s.allowedslippage = ljInt(P, "AllowedSlippage", 0);
-        s.normal_bstbid   = ljInt(S, "normal_bstbid", 0);
-        s.limit_mktorder =
-            (toLower(P.value("OrdersType", std::string("Limit"))) == "limit") ? 1
-                                                                              : 0;
-        s.leavasis            = (toLower(P.value("PriceExecutionRange",
-                                                 std::string("LeaveAsIs"))) == "leaveasis")
-                                    ? 1
-                                    : 0;
-        s.revertlegs          = ljInt(S, "revertlegs", 0);
-        s.timetorevertinmilis = ljInt(P, "TimeToRevertBidMs", 0);
-        s.actionforunhedgeqty_nonunhedge_ratiounhedge =
-            (toLower(P.value("UnhedgedAction", std::string("Ratio"))) == "ratio")
-                ? 1
-                : 0;
-        s.buystepcycles    = ljInt(S, "buystepcycles", 0);
-        s.sellstepcycles   = ljInt(S, "sellstepcycles", 0);
-        s.BuyStep          = ljInt(S, "BuyStep", 0);
-        s.SellStep         = ljInt(S, "SellStep", 0);
-        s.Steplotsquaroff  = ljInt(S, "Steplotsquaroff", 0);
-        s.stepsenable      = ljBool(S, "stepsenable", false);
-        s.flagStepsquaroff = ljBool(S, "flagStepsquaroff", false);
-        s.margine          = ljInt(S, "margine", 0);
-
-        std::vector<TokenDatafromui> tokens;
-        const json*                  legRatios =
-            (R.contains("LegRatios") && R["LegRatios"].is_array()) ? &R["LegRatios"]
-                                                                                    : nullptr;
-
-        for (size_t i = 0; i < L.size(); ++i) {
-            const json&     lj = L[i];
-            TokenDatafromui td{};
-            td.token          = static_cast<int>(ljInt(lj, "Token", 0));
-            std::string sideL = toLower(lj.value("Side", std::string("BUY")));
-            td.b_s            = (sideL == "sell" || sideL == "s" || sideL == "-1")
-                                    ? BuySell::Sell
-                                    : BuySell::Buy;
-
-            td.ratio = 1;
-
-            int            strike = static_cast<int>(ljInt(lj, "strikePrice", 0));
-            int            lot    = 0;
-            ProductDetails pd{};
-            if (getProductDetails(td.token, pd)) {
-                lot = pd.lot_size_;
-                if (strike <= 0)
-                    strike = pd.strike_price_;
-            }
-            if (lot <= 0) {
-                lot = static_cast<int>(ljInt(P, "LotSize", 1));  // last-ditch fallback
-            }
-            td.lotsize       = std::max((int16_t)1, (int16_t)lot);
-            td.strikePrice   = strike;
-            td.isbiddingleg  = lj.value("EnableBid", false);
-            td.undrlineToken = static_cast<int>(ljInt(lj, "undrlineToken", 0));
-            td.SL            = static_cast<int>(ljInt(lj, "SL", 0));
-            td.noofentry     = static_cast<int>(ljInt(lj, "noofentry", 0));
-            td.trailingslpercent =
-                static_cast<int>(ljInt(lj, "trailingslpercent", 0));
-
-            int64_t st = ljInt(lj, "starttime", 0), en = ljInt(lj, "endtime", 0);
-            std::memcpy(&td.starttime, &st, sizeof(int64_t));
-            std::memcpy(&td.endtime, &en, sizeof(int64_t));
-
-            tokens.push_back(td);
-        }
-
-        auto it = boxStrats_.find(s.strategynumber);
-        if (it != boxStrats_.end()) {
-            it->second->edit(s, tokens, mode);
-            std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy edited strat="
-                      << s.strategynumber << std::endl;
-        } else {
-            boxStrats_[s.strategynumber] =
-                new BoxSpreadStrategy(this, s, tokens, mode);
-            std::cout << ">>> [handleBoxStrategy] BoxSpreadStrategy created strat="
-                      << s.strategynumber << std::endl;
-            it = boxStrats_.find(s.strategynumber);
-            for (auto& tk : tokens) {
-                subscribeProduct(tk.token, flags);
-            }
-        }
-
-        // Explicitly start or stop based on the target state
-        if (state == 1) {
-            it->second->start();
-        } else {
-            it->second->stop();
-        }
-
-        legStrategies_[s.strategynumber] = {s, tokens};
-        strategyJson_[s.strategynumber] =
-            jsonText;  // keep the original GUI JSON to echo back
-    } catch (const std::exception& e) {
-        std::cout << "[handleBoxStrategy] failed: " << e.what() << std::endl;
     }
 }
 
@@ -462,10 +274,6 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
 
 MinixStrategy::~MinixStrategy() {
     log_info("sample_strat : destructor");
-    // Free the box strategies (each prints its own [BOX_PNL]/[BOX_EXEC] summary).
-    for (auto& kv : boxStrats_)
-        delete kv.second;
-    boxStrats_.clear();
     for (auto& kv : ratio2Strats_)
         delete kv.second;
     ratio2Strats_.clear();
@@ -499,10 +307,6 @@ void MinixStrategy::OnTick(const Quote& event) {
               event.header.product_id, event.header.sequence_no,
               event.header.exchange_timestamp, event.message.ltp_);
 
-    // Clock (seconds-of-day*1e9) for the box 1s/EOD timers, derived from the
-    // EXCHANGE timestamp (decodes reliably) with event_timestamp as a fallback.
-    // This is BEST-EFFORT and only drives timers — it must NOT gate the book
-    // update / spread calc.
     auto sodFrom = [](uint64_t ns) -> int64_t {
         uint32_t    s  = static_cast<uint32_t>(ns / 1000000000ULL);
         std::string tt = format_time(
@@ -521,20 +325,11 @@ void MinixStrategy::OnTick(const Quote& event) {
     if (clk >= 0)
         lastTickTs_ = clk;
 
-    // ALWAYS forward the tick: the box computes its market spread from the TBT
-    // book on every tick (the HFT path) and must never depend on the broadcast
-    // feed or on a decodable timestamp. The clock only gates trading/EOD inside
-    // run(), not the spread.
-    for (auto& kv : boxStrats_)
-        kv.second->onTick(event, lastTickTs_);
     for (auto& kv : ratio2Strats_)
         kv.second->OnTick(event, lastTickTs_);
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
-// Decode the OMS transaction code (OMS_API_TRANS_CODES) into a readable event
-// name, and the order side, so the platform log prints human-readable order
-// lifecycle lines instead of raw numeric codes.
 static const char* omsEventName(int code) {
     switch (code) {
         case 1111:
@@ -569,17 +364,10 @@ static const char* omsSideName(int s) {
     return s == 1 ? "BUY" : (s == 2 ? "SELL" : "?");
 }
 
-/**
- * @brief Handle confirmations, trades, and rejects from OMS.
- */
 void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
-    // Forward to every live box (fill tracking / hedge / squareoff).
-    for (auto& kv : boxStrats_)
-        kv.second->onOrderResponse(order_resp);
     for (auto& kv : ratio2Strats_)
         kv.second->OnOrderResponse(order_resp);
 
-    // Readable order-lifecycle log line.
     LOG_DEBUG(
         "[ORDER] RECV %-18s token=%d side=%-4s qty=%d price=%d uid=%d "
         "err=%d reason=%d",
@@ -590,17 +378,12 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
         order_resp.hdr_.uid_.composite_id_.request_id,
         order_resp.hdr_.error_code, order_resp.hdr_.reason_code);
 
-    // Keep the portfolio order manager in sync (positions/PnL bookkeeping).
     portfolio_mgr_.on_order_response(order_resp);
 }
 
-/**
- * @brief Periodic hook invoked by the engine thread.
- */
 int  count       = 0;
 bool orderPlaced = 0;
 int  MinixStrategy::doWork() {
-    // Push live market spreads (BCmp/SCmp) to the GUI roughly once per second.
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
                    .count();
@@ -611,72 +394,7 @@ int  MinixStrategy::doWork() {
     return 0;
 }
 
-/**
- * @brief Every ~1s, echo each strategy's ORIGINAL GUI JSON back to the GUI with
- * the live fields filled in: StrategyUpdates name/value for "BCmp" (market buy
- * spread), "SCmp" (market sell spread) and "Cost" (realized cost to build the
- * spread), plus a top-level "TotalQtyTraded". All spread/cost values are in
- * PAISE (GUI /100 for its rupee display). Sent with the same chunked framing
- * the GUI uses, message_code 8100 (UPDATE_FROM_STRATEGY).
- */
 void MinixStrategy::sendStrategySpreadsToUI() {
-    for (auto& kv : boxStrats_) {
-        BoxSpreadStrategy* box = kv.second;
-        if (!box || !box->valid())
-            continue;
-        auto jit = strategyJson_.find(box->number());
-        if (jit == strategyJson_.end())
-            continue;
-
-        json jo         = json::parse(jit->second, nullptr, false);
-        int  strategyId = ljInt(jo["Strategy"], "StrategyId", 0);
-
-        json j;
-
-        const int64_t bcmpP = box->bcmp();  // market BUY spread  (paise)
-        const int64_t scmpP = box->scmp();  // market SELL spread (paise)
-        const int64_t costP = box->cost();  // net cash to build the spread (paise)
-        const int64_t trspP =
-            box->tradedSpread();               // executed (traded) spread so far (paise)
-        const int64_t pnlP = box->pnlPaise();  // realized + MtM PnL (paise)
-        const int64_t qty  = box->tradedQty();
-
-        // Fields the GUI displays. Spreads/cost/PnL go back in RUPEES (float =
-        // paise/100); Gap in paise (string). Matches the production
-        // ConversionReversal sender.
-        j["StrategyId"] = strategyId;
-        j["Status"]     = "Updates";
-        j["BCmp"]       = static_cast<float>(bcmpP) / 100.0f;
-        j["SCmp"]       = static_cast<float>(scmpP) / 100.0f;
-        j["Cost"]       = static_cast<float>(costP) / 100.0f;
-        j["Gap"]        = std::to_string(box->gap());
-        j["B-TrQ"]      = qty;
-        j["S-TrQ"]      = qty;
-        j["M2M"]        = static_cast<float>(pnlP) / 100.0f;  // mark-to-market PnL (rupees)
-        j["Net P/L"]    = static_cast<float>(pnlP) / 100.0f;  // net PnL (rupees)
-        j["RLP"] =
-            static_cast<float>(trspP) / 100.0f;  // realized (traded) spread (rupees)
-        j["TrSpread"] = static_cast<float>(trspP) /
-                        100.0f;  // executed spread, comparable to B-Pr/S-Pr
-        j["B-ATP"]  = 0.0;
-        j["S-ATP"]  = 0.0;
-        j["B-Buy"]  = 0;
-        j["B-Sell"] = 0;
-        // Also fill the StrategyUpdates name/value list (rupees).
-
-        std::cout << ">>> [BOX_UPD] strat=" << box->number()
-                  << " BCmp(paise)=" << bcmpP << " SCmp(paise)=" << scmpP
-                  << " Cost(paise)=" << costP << " tradedSpread(paise)=" << trspP
-                  << " pnl(paise)=" << pnlP << " boxes=" << box->boxesTraded()
-                  << " qty=" << qty << "  -> GUI(rs) BCmp=" << (bcmpP / 100.0)
-                  << " SCmp=" << (scmpP / 100.0) << " books=" << box->bookStatus()
-                  << std::endl;
-        std::cout << ">>> [BOX_LEGS] strat=" << box->number() << box->spreadDetail()
-                  << std::endl;
-
-        sendJsonChunkedToUI(9612, j.dump());  // GUI listens on 9612 for the echo (same code it sent)
-    }
-
     for (auto& kv : ratio2Strats_) {
         Ratio2LegStrategy* ratio = kv.second;
         json               j;
@@ -700,23 +418,12 @@ void MinixStrategy::sendStrategySpreadsToUI() {
         j["B-Buy"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
         j["B-Sell"]     = static_cast<float>(ratio->GetSATP()) / 100.0F;
 
-        sendJsonChunkedToUI(9612, j.dump());  // GUI listens on 9612 for the echo (same code it sent)
+        sendJsonChunkedToUI(9612, j.dump());
     }
 }
 
-/**
- * @brief Send a JSON payload to the GUI using the SAME framing the connector
- * uses to send TO us (sendStrategyConfig): one metadata packet
- * {"packet_count":N,"timestamp":..} followed by N raw 1500-byte UTF-8 slices,
- * all with the given message_code.
- */
 void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
                                         const std::string& payload) {
-    // Framing matched to the production ConversionReversal sender: one metadata
-    // packet
-    // {"packet_count":N,"timestamp":<ms>} then N 1500-byte chunks, all on
-    // message_code (9612), interface_id 22, message_length 1520, timestamp =
-    // current_ts.
     constexpr size_t max_chunk_size = 1500;
     int32_t          current_ts     = static_cast<int32_t>(
         std::chrono::system_clock::now().time_since_epoch().count() / 1000000);
@@ -725,7 +432,6 @@ void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
     if (packet_count < 1)
         packet_count = 1;
 
-    // 1) metadata packet
     {
         aef::infra::ui_cmd::UIStruct ui{};
         ui.header.message_code   = message_code;
@@ -741,7 +447,6 @@ void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
         std::memcpy(ui.message, h.c_str(), std::min(h.size(), max_chunk_size));
         sentoUI(ui);
     }
-    // 2) data chunks
     for (int i = 0; i < packet_count; i++) {
         std::string chunk =
             payload.substr(static_cast<size_t>(i) * max_chunk_size, max_chunk_size);
@@ -757,20 +462,11 @@ void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
     }
 }
 
-/**
- * @brief Run timer-driven tasks at coarse intervals.
- */
 void MinixStrategy::onBcastData(
     const aef::infra::product::product_data& product_details_) {
-    // Clock for the boxes' 1s/EOD timers, set to the CURRENT tick's market
-    // time-of-day (seconds-of-day*1e9) derived from the broadcast LastTradeTime.
-    // OnTick uses the same units, so a TBT feed (when present) and the broadcast
-    // feed drive one chronological clock; a broadcast-only feed still advances
-    // EOD/1s timers. (Not a running max: the clock must reflect the current tick
-    // so the EOD anchor lands at the open, not late.)
     if (product_details_.LastTradeTime > 0) {
         std::time_t bt = static_cast<std::time_t>(product_details_.LastTradeTime) +
-                         315513000;  // NSE 1980-epoch -> Unix
+                         315513000;
         std::string tt = format_time(bt);
         if (tt.size() >= 8 && tt >= "09:14:00" && tt <= "15:31:00")
             lastTickTs_ =
@@ -779,8 +475,6 @@ void MinixStrategy::onBcastData(
                                       (tt[6] - '0') * 10 + (tt[7] - '0'))) *
                 1000000000LL;
     }
-    for (auto& kv : boxStrats_)
-        kv.second->onBcast(product_details_, lastTickTs_);
     for (auto& kv : ratio2Strats_)
         kv.second->OnBcast(product_details_, lastTickTs_);
 }
