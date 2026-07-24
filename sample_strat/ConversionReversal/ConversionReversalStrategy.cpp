@@ -40,8 +40,9 @@ ConversionReversalStrategy::ConversionReversalStrategy(MinixStrategy* ms_, uint3
     _lotSize  = details[0].lot_size_ > 0 ? details[0].lot_size_ : 1;
     _tickSize = details[0].tick_size_ > 0 ? details[0].tick_size_ : 5;
 
-    // Default sides for Conversion: Long Fut (+), Long PE (+), Short CE (-)
-    // Default sides for Reversion: Short Fut (-), Short PE (-), Long CE (+)
+    // Default sides:
+    // Conversion: Long Fut (+), Long PE (+), Short CE (-)
+    // Reversion:  Short Fut (-), Short PE (-), Long CE (+)
     ORDER_SIDE ceSide  = (_stratType == StrategyType::CONVERSION) ? SELL_SIDE : BUY_SIDE;
     ORDER_SIDE peSide  = (_stratType == StrategyType::CONVERSION) ? BUY_SIDE : SELL_SIDE;
     ORDER_SIDE futSide = (_stratType == StrategyType::CONVERSION) ? BUY_SIDE : SELL_SIDE;
@@ -49,8 +50,6 @@ ConversionReversalStrategy::ConversionReversalStrategy(MinixStrategy* ms_, uint3
     _biddingOrders._order[0] = std::make_unique<OrderObjectT>(_tokens[0], ceSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     _biddingOrders._order[1] = std::make_unique<OrderObjectT>(_tokens[1], peSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     _biddingOrders._order[2] = std::make_unique<OrderObjectT>(_tokens[2], futSide, _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
-
-    fmt::print("ConversionReversal Strategy Init ID {}\n", _strategyId);
 }
 
 void ConversionReversalStrategy::ParamUpdate(const nlohmann::json& json_) {
@@ -60,24 +59,10 @@ void ConversionReversalStrategy::ParamUpdate(const nlohmann::json& json_) {
         std::string typeStr = parmas.value("StrategyType", "Conversion");
         _stratType = (typeStr == "Reversion" || typeStr == "reversion") ? StrategyType::REVERSION : StrategyType::CONVERSION;
 
-        _orderStrike          = parmas.value("OrderStrike", 0);
-        _quantity             = parmas.value("OrderLot", 0);
-        _totalQuantity        = parmas.value("TotalLot", 0);
-
-        _upperBand            = parmas.value("UpperBand", 0);
-        _lowerBand            = parmas.value("LowerBand", 0);
-
-        _upperCeLPP           = parmas.value("UpperCE_LPP", 0);
-        _lowerCeLPP           = parmas.value("LowerCE_LPP", 0);
-        _upperPeLPP           = parmas.value("UpperPE_LPP", 0);
-        _lowerPeLPP           = parmas.value("LowerPE_LPP", 0);
-        _upperFutLPP          = parmas.value("UpperFut_LPP", 0);
-        _lowerFutLPP          = parmas.value("LowerFut_LPP", 0);
-
-        _marketOrderRetries   = parmas.value("MarketOrderRetries", 0U);
-        _allowedSlippage      = parmas.value("AllowedSlippage", 0) * 100;
-        _exitFutureModTimeSec = parmas.value("ExitFutureModTimeSec", 0);
-        _exitOptionModTimeSec = parmas.value("ExitOptionModTimeSec", 0);
+        _orderStrike        = parmas.value("OrderStrike", 0);
+        _quantity           = parmas.value("OrderLot", 0);
+        _totalQuantity      = parmas.value("TotalLot", 0);
+        _marketOrderRetries = parmas.value("MarketOrderRetries", 0U);
     }
 
     if (json_.contains("Legs")) {
@@ -126,7 +111,6 @@ void ConversionReversalStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
     if (activeRate._valid) {
         OrderBiddingLogic(_biddingOrders, activeRate, "ConRev");
     } else {
-        // LPP protection or invalid state -> cancel bidding order
         size_t biddingLeg = (_qoute[2].message.ltp_ > _orderStrike) ? 0 : 1;
         _biddingOrders._order[biddingLeg]->cancel_order();
     }
@@ -165,119 +149,85 @@ void ConversionReversalStrategy::OnOrderResponse(const oms_transaction& resp_) {
     }
 }
 
-// ── Formulas from con_rev_BIDDING.docx ─────────────────────────────────────
+// ── Pure Spread Calculation Functions from con_rev_BIDDING.docx ────────────
 
-// Case 1: Conversion bid in Call (Fut_LTP > Order_Strike)
+// 1. Conversion bid in Call (Fut_LTP > Order_Strike)
+// Cur_wind_rate = order_ce_ask - order_pe_ask - future_ask - 1tick + strike_pr
+// FIRST PRICE   = order_ce_ask - 1tick
 auto ConversionReversalStrategy::CalculateConversionCallWindRate() const -> WindRate {
     int ceAsk  = _qoute[0].message.ask_levels[0].price;
     int peAsk  = _qoute[1].message.ask_levels[0].price;
     int futAsk = _qoute[2].message.ask_levels[0].price;
 
-    // LPP / Band Protection Check
-    if ((_lowerCeLPP > 0 && ceAsk < _lowerCeLPP) ||
-        (_lowerPeLPP > 0 && peAsk < _lowerPeLPP) ||
-        (_upperPeLPP > 0 && peAsk > _upperPeLPP) ||
-        (_upperFutLPP > 0 && futAsk > _upperFutLPP) ||
-        (_lowerFutLPP > 0 && futAsk < _lowerFutLPP)) {
+    if (ceAsk <= 0 || peAsk <= 0 || futAsk <= 0) {
         return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
     }
 
-    if (ceAsk > 0 && (_upperBand == 0 || ceAsk < _upperBand)) {
-        float windRate = static_cast<float>(ceAsk - peAsk - futAsk - _tickSize + _orderStrike);
-        int biddingPrice = ceAsk - _tickSize;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    } else {
-        float windRate = static_cast<float>(_upperBand - peAsk - futAsk + _orderStrike);
-        int biddingPrice = _upperBand;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    }
+    float windRate     = static_cast<float>(ceAsk - peAsk - futAsk - _tickSize + _orderStrike);
+    int   biddingPrice = ceAsk - _tickSize;
+    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// Case 2: Reversion bid in Call (Fut_LTP > Order_Strike)
+// 2. Reversion bid in Call (Fut_LTP > Order_Strike)
+// Cur_wind_rate = - order_ce_bid + order_pe_bid + future_bid - strike_pr - 1tick
+// BIDDING PRICE = order_ce_bid + 1tick
 auto ConversionReversalStrategy::CalculateReversionCallWindRate() const -> WindRate {
     int ceBid  = _qoute[0].message.bid_levels[0].price;
     int peBid  = _qoute[1].message.bid_levels[0].price;
     int futBid = _qoute[2].message.bid_levels[0].price;
 
-    // LPP Protection Check
-    if ((_upperBand > 0 && ceBid > _upperBand) ||
-        (_upperPeLPP > 0 && peBid > _upperPeLPP) ||
-        (_upperFutLPP > 0 && futBid > _upperFutLPP) ||
-        (_lowerFutLPP > 0 && futBid < _lowerFutLPP)) {
+    if (ceBid <= 0 || peBid <= 0 || futBid <= 0) {
         return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
     }
 
-    if (ceBid > _lowerBand) {
-        float windRate = static_cast<float>(-ceBid + peBid + futBid - _orderStrike - _tickSize);
-        int biddingPrice = ceBid + _tickSize;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    } else {
-        float windRate = static_cast<float>(-_lowerBand + peBid + futBid - _orderStrike);
-        int biddingPrice = _lowerBand;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    }
+    float windRate     = static_cast<float>(-ceBid + peBid + futBid - _orderStrike - _tickSize);
+    int   biddingPrice = ceBid + _tickSize;
+    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// Case 3: Conversion bid in Put (Fut_LTP <= Order_Strike)
+// 3. Conversion bid in Put (Fut_LTP <= Order_Strike)
+// Cur_wind_rate = order_ce_bid - order_pe_bid - future_ask + strike_pr - 1tick
+// BIDDING PRICE = order_pe_bid + 1tick
 auto ConversionReversalStrategy::CalculateConversionPutWindRate() const -> WindRate {
     int peBid  = _qoute[1].message.bid_levels[0].price;
     int ceBid  = _qoute[0].message.bid_levels[0].price;
     int futAsk = _qoute[2].message.ask_levels[0].price;
 
-    // LPP Protection Check
-    if ((_upperBand > 0 && peBid > _upperBand) ||
-        (_upperCeLPP > 0 && ceBid > _upperCeLPP) ||
-        (_lowerFutLPP > 0 && futAsk < _lowerFutLPP) ||
-        (_upperFutLPP > 0 && futAsk > _upperFutLPP)) {
+    if (peBid <= 0 || ceBid <= 0 || futAsk <= 0) {
         return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
     }
 
-    if (peBid > _lowerBand) {
-        float windRate = static_cast<float>(ceBid - peBid - futAsk + _orderStrike - _tickSize);
-        int biddingPrice = peBid + _tickSize;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    } else {
-        float windRate = static_cast<float>(-_lowerBand + ceBid - futAsk + _orderStrike);
-        int biddingPrice = _lowerBand;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    }
+    float windRate     = static_cast<float>(ceBid - peBid - futAsk + _orderStrike - _tickSize);
+    int   biddingPrice = peBid + _tickSize;
+    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
-// Case 4: Reversion bid in Put (Fut_LTP <= Order_Strike)
+// 4. Reversion bid in Put (Fut_LTP <= Order_Strike)
+// Cur_wind_rate = order_pe_ask - order_ce_ask + future_bid - strike_pr - 1tick
+// FIRST PRICE   = order_pe_ask - 1tick
 auto ConversionReversalStrategy::CalculateReversionPutWindRate() const -> WindRate {
     int peAsk  = _qoute[1].message.ask_levels[0].price;
     int ceAsk  = _qoute[0].message.ask_levels[0].price;
     int futBid = _qoute[2].message.bid_levels[0].price;
 
-    // LPP Protection Check
-    if ((_lowerPeLPP > 0 && peAsk < _lowerPeLPP) ||
-        (_lowerCeLPP > 0 && ceAsk < _lowerCeLPP) ||
-        (_upperCeLPP > 0 && ceAsk > _upperCeLPP) ||
-        (_upperFutLPP > 0 && futBid > _upperFutLPP) ||
-        (_lowerFutLPP > 0 && futBid < _lowerFutLPP)) {
+    if (peAsk <= 0 || ceAsk <= 0 || futBid <= 0) {
         return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
     }
 
-    if (peAsk > 0 && (_upperBand == 0 || peAsk < _upperBand)) {
-        float windRate = static_cast<float>(peAsk - ceAsk + futBid - _orderStrike - _tickSize);
-        int biddingPrice = peAsk - _tickSize;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    } else {
-        float windRate = static_cast<float>(_upperBand - ceAsk + futBid - _orderStrike);
-        int biddingPrice = _upperBand;
-        return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-    }
+    float windRate     = static_cast<float>(peAsk - ceAsk + futBid - _orderStrike - _tickSize);
+    int   biddingPrice = peAsk - _tickSize;
+    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
 }
 
 auto ConversionReversalStrategy::GetBCmp() const -> WindRate {
     int futLtp = _qoute[2].message.ltp_;
     if (futLtp > _orderStrike) {
-        // Bidding in Call
+        // Fut_LTP > Order_Strike -> Order in Call
         return (_stratType == StrategyType::CONVERSION) 
             ? CalculateConversionCallWindRate() 
             : CalculateReversionCallWindRate();
     } else {
-        // Bidding in Put
+        // Fut_LTP <= Order_Strike -> Order in Put
         return (_stratType == StrategyType::CONVERSION) 
             ? CalculateConversionPutWindRate() 
             : CalculateReversionPutWindRate();

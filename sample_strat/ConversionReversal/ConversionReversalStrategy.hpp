@@ -24,22 +24,7 @@ enum class StrategyType {
     REVERSION  = 2
 };
 
-enum class ExitType {
-    OPPOSITE_BEST            = 1,
-    MID_BUY_SELL             = 2,
-    BEST_PRICE               = 3,
-    MARKET_OPPOSITE_PLUS_PCT = 4
-};
-
 class ConversionReversalStrategy {
-    struct TokenInfo {
-        int        _token = 0;
-        ORDER_SIDE _side  = BUY_SIDE;
-        bool       _isCE  = false;
-        bool       _isPE  = false;
-        bool       _isFut = false;
-    };
-
     struct WindRate {
         int   _biddingPrice = 0;
         float _windRate     = 0.0f;
@@ -91,6 +76,7 @@ class ConversionReversalStrategy {
     [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
 
+    // Pure spread calculations directly from con_rev_BIDDING.docx
     [[nodiscard]] auto CalculateConversionCallWindRate() const -> WindRate;
     [[nodiscard]] auto CalculateReversionCallWindRate() const -> WindRate;
     [[nodiscard]] auto CalculateConversionPutWindRate() const -> WindRate;
@@ -108,23 +94,6 @@ class ConversionReversalStrategy {
     int      _orderStrike = 0;
 
     StrategyType _stratType = StrategyType::CONVERSION;
-    ExitType     _exitTypeFuture = ExitType::OPPOSITE_BEST;
-    ExitType     _exitTypeOption = ExitType::OPPOSITE_BEST;
-
-    int _exitFutureModTimeSec = 0;
-    int _exitOptionModTimeSec = 0;
-
-    // Price Bands
-    int _upperBand = 0;
-    int _lowerBand = 0;
-
-    // LPP Protection Bounds
-    int _upperCeLPP = 0;
-    int _lowerCeLPP = 0;
-    int _upperPeLPP = 0;
-    int _lowerPeLPP = 0;
-    int _upperFutLPP = 0;
-    int _lowerFutLPP = 0;
 
     Quote _qoute[3]; // 0: CE, 1: PE, 2: FUT
     std::array<int, 3> _tokens = {0, 0, 0};
@@ -134,7 +103,6 @@ class ConversionReversalStrategy {
     int    _totalQuantity      = 0;
     int    _quantity           = 0;
     size_t _marketOrderRetries = 0;
-    int    _allowedSlippage    = 0;
 
     bool _isBidding = false;
 };
