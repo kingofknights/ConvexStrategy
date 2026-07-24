@@ -1,4 +1,6 @@
 add_library(SampleAlgo SHARED MinixStrategy.cpp BoxSpreadStrategy.cpp Ratio2Leg/Ratio2LegStrategy.cpp
+                              Ratio3Leg/Ratio3LegStrategy.cpp
+                              Ratio4Leg/Ratio4LegStrategy.cpp
                               order_instance.cpp
                               PortfolioOrderManager.cpp)
 
@@ -11,6 +13,8 @@ set_target_properties(
 
 target_include_directories(SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
                                               ${CMAKE_CURRENT_SOURCE_DIR}/Ratio2Leg
+                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio3Leg
+                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio4Leg
                                               ${PROJECT_SOURCE_DIR})
 
 # target_link_libraries(SampleAlgo AlgoBase #                   fmt::fmt

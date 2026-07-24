@@ -21,6 +21,8 @@
 
 class BoxSpreadStrategy;  // 4-leg box strategy (the only strategy in this library)
 class Ratio2LegStrategy;
+class Ratio3LegStrategy;
+class Ratio4LegStrategy;
 
 /**
  * @brief Strategy entry point loaded by the engine as libSampleAlgo.so.
@@ -35,6 +37,8 @@ class Ratio2LegStrategy;
 class MinixStrategy : public AlgoBase {
     friend class BoxSpreadStrategy;
     friend class Ratio2LegStrategy;
+    friend class Ratio3LegStrategy;
+    friend class Ratio4LegStrategy;
 
   public:
     MinixStrategy(AlgoBase::ContextHandle context);
