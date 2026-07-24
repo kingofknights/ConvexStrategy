@@ -46,6 +46,7 @@ class Ratio2LegStrategy {
         uint32_t        _uniqueID[2]   = {0, 0};
         int32_t         _tradedLot[2]  = {0, 0};
         uint64_t        _tradeValue[2] = {0, 0};
+        int32_t         _lastBiddingFillPrice = 0;
         WindRate        _windRate;
     };
 
@@ -82,8 +83,11 @@ class Ratio2LegStrategy {
   protected:
     [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
+    [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
+    [[nodiscard]] auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int;
 
-    [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_, int quantity_) -> bool;
+    [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
+    [[nodiscard]] auto CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
 
   private:
     MinixStrategy* _ms;
@@ -112,6 +116,9 @@ class Ratio2LegStrategy {
     size_t _minTickChange = 0;
     size_t _orderDepth    = 0;
     size_t _priceDepth    = 0;
+    size_t _allowedBidDepth = 0;
+    int    _thresholdQty   = 0;
+    int    _allowedSlippage = 0;
     int    _tradeGear     = 0;
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
