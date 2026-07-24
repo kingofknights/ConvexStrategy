@@ -429,9 +429,7 @@ void Ratio2LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
     int              currentPlacePrice = order->get_open_price();
 
     ORDER_SIDE hedgeMarketSide = order->get_side() == BUY_SIDE ? SELL_SIDE : BUY_SIDE;
-    int        basePrice       = GetPrice(_qoute[leg], hedgeMarketSide, 0);
-    int        priceOffset     = _tradeGear * _tickSize;
-    int        marketPrice     = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
+    int        marketPrice     = GetPrice(_qoute[leg], hedgeMarketSide, 0);
 
     if (marketPrice > 0 && marketPrice != currentPlacePrice) {
         auto status = _ms->update_order(order, _tokens[leg], marketPrice, quantity, _uid);
