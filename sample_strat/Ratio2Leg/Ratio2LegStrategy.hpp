@@ -47,6 +47,7 @@ class Ratio2LegStrategy {
         int32_t         _tradedLot[2]  = {0, 0};
         uint64_t        _tradeValue[2] = {0, 0};
         int32_t         _lastBiddingFillPrice = 0;
+        size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;
     };
 
@@ -120,6 +121,7 @@ class Ratio2LegStrategy {
     int    _thresholdQty   = 0;
     int    _allowedSlippage = 0;
     int    _tradeGear     = 0;
+    size_t _marketOrderRetries = 0;
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;

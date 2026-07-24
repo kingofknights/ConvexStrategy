@@ -98,14 +98,17 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _shortParam._totalQuantity = parmas.value("ShortSellQty", 0);
         _shortParam._spread        = parmas.value("ShortSellPrice", 0.0F) * 100.0F;
 
-        _minTickChange = parmas.value("TickSize", 0U);
-        _orderDepth    = parmas.value("OrderDepth", 1U);
-        _priceDepth    = parmas.value("PriceDepth", 1U);
+        _minTickChange   = parmas.value("TickSize", 0U);
+        _orderDepth      = parmas.value("OrderDepth", 1U);
+        _priceDepth      = parmas.value("PriceDepth", 1U);
         _allowedBidDepth = parmas.value("AllowedBidDepth", 1U);
-        _thresholdQty   = parmas.value("ThresholdQty", 100);
-        _allowedSlippage = parmas.value("AllowedSlippage", 0) * 100;
-        _orderDepth    = std::min<size_t>(_orderDepth, 5U);
-        _priceDepth    = std::min<size_t>(_priceDepth, 5U);
+        _thresholdQty    = parmas.value("ThresholdQty", 100);
+        _allowedSlippage    = parmas.value("AllowedSlippage", 0) * 100;
+        _tradeGear          = parmas.value("TradeGear", 0);
+        _marketOrderRetries = parmas.value("MarketOrderRetries", 0U);
+        
+        _orderDepth      = std::min<size_t>(_orderDepth, 5U);
+        _priceDepth      = std::min<size_t>(_priceDepth, 5U);
         _allowedBidDepth = std::min<size_t>(_allowedBidDepth, 5U);
 
         fmt::print(" Params  _longParam._quantity        {}  _longParam._totalQuantity  {}  _longParam._spread         {}  _shortParam._quantity      {}  _shortParam._totalQuantity {}  _shortParam._spread        {}\n",
@@ -189,9 +192,9 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
     auto checkSlippage = [&](MarketBidding& object_) {
         if (traded && object_._lastBiddingFillPrice > 0 && _allowedSlippage > 0) {
-            double p0 = _biddingLeg == 0 ? object_._lastBiddingFillPrice : price;
-            double p1 = _biddingLeg == 1 ? object_._lastBiddingFillPrice : price;
-            double executedSpread = (p0 * _ratio[1]) - (p1 * _ratio[0]);
+            double leg0FillPrice = _biddingLeg == 0 ? object_._lastBiddingFillPrice : price;
+            double leg1FillPrice = _biddingLeg == 1 ? object_._lastBiddingFillPrice : price;
+            double executedSpread = (leg0FillPrice * _ratio[1]) - (leg1FillPrice * _ratio[0]);
             double slippage = 0.0;
             if (&object_ == &_longOrders) {
                 slippage = executedSpread - _longParam._spread;
@@ -237,25 +240,25 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 }
 
 auto Ratio2LegStrategy::GetBCmp() const -> WindRate {
-    int first  = GetPrice(_qoute[0], _shortSide[0], 0);
-    int second = GetPrice(_qoute[1], _shortSide[1], 0);
+    int leg0Price = GetPrice(_qoute[0], _shortSide[0], 0);
+    int leg1Price = GetPrice(_qoute[1], _shortSide[1], 0);
     return WindRate{
         ._price = {
-            first,
-            second,
+            leg0Price,
+            leg1Price,
         },
-        ._spread = static_cast<float>((first * _ratio[1]) - (second * _ratio[0])),
+        ._spread = static_cast<float>((leg0Price * _ratio[1]) - (leg1Price * _ratio[0])),
     };
 }
 auto Ratio2LegStrategy::GetSCmp() const -> WindRate {
-    int first  = GetPrice(_qoute[0], _longSide[0], 0);
-    int second = GetPrice(_qoute[1], _longSide[1], 0);
+    int leg0Price = GetPrice(_qoute[0], _longSide[0], 0);
+    int leg1Price = GetPrice(_qoute[1], _longSide[1], 0);
     return WindRate{
         ._price = {
-            first,
-            second,
+            leg0Price,
+            leg1Price,
         },
-        ._spread = static_cast<float>((first * _ratio[1]) - (second * _ratio[0])),
+        ._spread = static_cast<float>((leg0Price * _ratio[1]) - (leg1Price * _ratio[0])),
     };
 }
 
@@ -264,55 +267,58 @@ auto Ratio2LegStrategy::GetStrategyID() const -> uint32_t { return _strategyId; 
 auto Ratio2LegStrategy::GetGap() const -> int { return _gap; }
 
 auto Ratio2LegStrategy::GetBuyTradedQuantity() const -> int {
-    int first      = _longOrders._tradedLot[0] / _ratio[0];
-    int second     = _longOrders._tradedLot[1] / _ratio[1];
-    int totalPacks = std::min(first, second);
+    int leg0TradedPacks = _longOrders._tradedLot[0] / _ratio[0];
+    int leg1TradedPacks = _longOrders._tradedLot[1] / _ratio[1];
+    int totalPacks      = std::min(leg0TradedPacks, leg1TradedPacks);
     return totalPacks;
 }
 
 auto Ratio2LegStrategy::GetSellTradedQuantity() const -> int {
-    int first      = _shortOrders._tradedLot[0] / _ratio[0];
-    int second     = _shortOrders._tradedLot[1] / _ratio[1];
-    int totalPacks = std::min(first, second);
+    int leg0TradedPacks = _shortOrders._tradedLot[0] / _ratio[0];
+    int leg1TradedPacks = _shortOrders._tradedLot[1] / _ratio[1];
+    int totalPacks      = std::min(leg0TradedPacks, leg1TradedPacks);
     return totalPacks;
 }
 
 auto Ratio2LegStrategy::GetBATP() const -> double {
-    uint64_t firstValue  = _longOrders._tradeValue[0];
-    uint64_t secondValue = _longOrders._tradeValue[1];
-    uint64_t firstLot    = static_cast<uint64_t>(_longOrders._tradedLot[0]);
-    uint64_t secondLot   = static_cast<uint64_t>(_longOrders._tradedLot[1]);
+    uint64_t leg0TradedValue = _longOrders._tradeValue[0];
+    uint64_t leg1TradedValue = _longOrders._tradeValue[1];
+    uint64_t leg0TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[0]);
+    uint64_t leg1TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[1]);
 
-    if (firstLot == 0 or secondLot == 0 or _lotSize == 0) {
+    if (leg0TradedLots == 0 or leg1TradedLots == 0 or _lotSize == 0) {
         return 0.0;
     }
-    double longAvgPrice  = static_cast<double>(firstValue) / static_cast<double>(firstLot * _lotSize);
-    double shortAvgPrice = static_cast<double>(secondValue) / static_cast<double>(secondLot * _lotSize);
-    return shortAvgPrice - longAvgPrice;
+    double leg0AveragePrice = static_cast<double>(leg0TradedValue) / static_cast<double>(leg0TradedLots * _lotSize);
+    double leg1AveragePrice = static_cast<double>(leg1TradedValue) / static_cast<double>(leg1TradedLots * _lotSize);
+    return (leg0AveragePrice * _ratio[1]) - (leg1AveragePrice * _ratio[0]);
 }
 
 auto Ratio2LegStrategy::GetSATP() const -> double {
-    uint64_t firstValue  = _shortOrders._tradeValue[0];
-    uint64_t secondValue = _shortOrders._tradeValue[1];
-    uint64_t firstLot    = static_cast<uint64_t>(_shortOrders._tradedLot[0]);
-    uint64_t secondLot   = static_cast<uint64_t>(_shortOrders._tradedLot[1]);
+    uint64_t leg0TradedValue = _shortOrders._tradeValue[0];
+    uint64_t leg1TradedValue = _shortOrders._tradeValue[1];
+    uint64_t leg0TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[0]);
+    uint64_t leg1TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[1]);
 
-    if (firstLot == 0 or secondLot == 0 or _lotSize == 0) {
+    if (leg0TradedLots == 0 or leg1TradedLots == 0 or _lotSize == 0) {
         return 0.0;
     }
-    double longAvgPrice  = static_cast<double>(firstValue) / static_cast<double>(firstLot * _lotSize);
-    double shortAvgPrice = static_cast<double>(secondValue) / static_cast<double>(secondLot * _lotSize);
-    return shortAvgPrice - longAvgPrice;
+    double leg0AveragePrice = static_cast<double>(leg0TradedValue) / static_cast<double>(leg0TradedLots * _lotSize);
+    double leg1AveragePrice = static_cast<double>(leg1TradedValue) / static_cast<double>(leg1TradedLots * _lotSize);
+    return (leg0AveragePrice * _ratio[1]) - (leg1AveragePrice * _ratio[0]);
 }
 
 auto Ratio2LegStrategy::GetRLP() const -> double {
-    int buyPacks     = GetBuyTradedQuantity();
-    int sellPacks    = GetSellTradedQuantity();
-    int matchedPacks = std::min(buyPacks, sellPacks);
-    if (matchedPacks == 0) {
-        return 0.0;
+    int buyPacks  = GetBuyTradedQuantity();
+    int sellPacks = GetSellTradedQuantity();
+
+    double realizedPnL = static_cast<double>(std::min(buyPacks, sellPacks)) * (GetSATP() - GetBATP()) * static_cast<double>(_lotSize);
+    if (buyPacks == sellPacks && buyPacks > 0) {
+        double totalSellValue = static_cast<double>(sellPacks * _lotSize) * GetSATP();
+        double totalBuyValue  = static_cast<double>(buyPacks * _lotSize) * GetBATP();
+        realizedPnL           = totalSellValue - totalBuyValue;
     }
-    return (GetSATP() - GetBATP()) * static_cast<double>(matchedPacks * _lotSize);
+    return realizedPnL;
 }
 
 auto Ratio2LegStrategy::GetCutPL() const -> double {
@@ -323,19 +329,15 @@ auto Ratio2LegStrategy::GetM2M() const -> int {
     int buyPacks  = GetBuyTradedQuantity();
     int sellPacks = GetSellTradedQuantity();
 
-    int openLongPacks  = std::max(0, buyPacks - sellPacks);
-    int openShortPacks = std::max(0, sellPacks - buyPacks);
-
-    double m2m = 0.0;
-    if (openLongPacks > 0) {
-        double currentLongSpread = static_cast<double>(GetBCmp()._spread);
-        m2m += (currentLongSpread - GetBATP()) * static_cast<double>(openLongPacks * _lotSize);
+    double markToMarketPnL = 0.0;
+    if (buyPacks > sellPacks) {
+        double currentMarketSpread = static_cast<double>(GetBCmp()._spread);
+        markToMarketPnL            = static_cast<double>(buyPacks - sellPacks) * (currentMarketSpread - GetBATP()) * static_cast<double>(_lotSize);
+    } else if (sellPacks > buyPacks) {
+        double currentMarketSpread = static_cast<double>(GetSCmp()._spread);
+        markToMarketPnL            = static_cast<double>(sellPacks - buyPacks) * (GetSATP() - currentMarketSpread) * static_cast<double>(_lotSize);
     }
-    if (openShortPacks > 0) {
-        double currentShortSpread = static_cast<double>(GetSCmp()._spread);
-        m2m += (GetSATP() - currentShortSpread) * static_cast<double>(openShortPacks * _lotSize);
-    }
-    return static_cast<int>(m2m);
+    return static_cast<int>(markToMarketPnL);
 }
 
 auto Ratio2LegStrategy::GetNetPL() const -> double {
@@ -378,7 +380,9 @@ void Ratio2LegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots para
 
     OrderObjectPtrT& order = object_._order[_biddingLeg];
 
-    int marketPrice       = GetPrice(_qoute[_biddingLeg], order->get_side(), 0);
+    int basePrice         = GetPrice(_qoute[_biddingLeg], order->get_side(), 0);
+    int priceOffset       = _tradeGear * _tickSize;
+    int marketPrice       = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
     int currentPlacePrice = order->get_open_price();
     int diff              = std::abs(currentPlacePrice - marketPrice);
     int quantity          = param_._quantity * _lotSize * _ratio[_biddingLeg];
@@ -404,27 +408,38 @@ void Ratio2LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
     int    secondTradedLots = object_._tradedLot[1] / _ratio[1];
     int    diff             = firstTradedLots - secondTradedLots;
     if (diff <= 0) {
+        object_._hedgeRetryCount = 0;
         return;
     }
 
-    fmt::print("{} first {} second {} leg {}\n", __FUNCTION__, firstTradedLots, secondTradedLots, leg);
+    if (_marketOrderRetries > 0 && object_._hedgeRetryCount >= _marketOrderRetries) {
+        fmt::print("[HEDGE RETRY EXHAUSTED] Retry count {} >= MarketOrderRetries {}. Terminating strategy & cancelling all orders.\n",
+                   object_._hedgeRetryCount, _marketOrderRetries);
+        _active = false;
+        _longOrders._order[0]->cancel_order();
+        _longOrders._order[1]->cancel_order();
+        _shortOrders._order[0]->cancel_order();
+        _shortOrders._order[1]->cancel_order();
+        return;
+    }
+
+    fmt::print("{} first {} second {} leg {} retryCount {}\n", __FUNCTION__, firstTradedLots, secondTradedLots, leg, object_._hedgeRetryCount);
     int              quantity          = std::min(diff, param_._quantity) * _lotSize * _ratio[leg];
     OrderObjectPtrT& order             = object_._order[leg];
     int              currentPlacePrice = order->get_open_price();
-    if (currentPlacePrice == 0) {
-        auto status = _ms->update_order(order, _tokens[leg], object_._windRate._price[leg], quantity, _uid);
+
+    ORDER_SIDE hedgeMarketSide = order->get_side() == BUY_SIDE ? SELL_SIDE : BUY_SIDE;
+    int        basePrice       = GetPrice(_qoute[leg], hedgeMarketSide, 0);
+    int        priceOffset     = _tradeGear * _tickSize;
+    int        marketPrice     = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
+
+    if (marketPrice > 0 && marketPrice != currentPlacePrice) {
+        auto status = _ms->update_order(order, _tokens[leg], marketPrice, quantity, _uid);
         if (status != 0) {
-            fmt::print("#1 placing second order side {} price {} quantity {}\n", static_cast<int>(order->get_side()), currentPlacePrice, quantity);
+            fmt::print("{} placing hedge order side {} price {} quantity {} (retry {})\n", 
+                       __FUNCTION__, static_cast<int>(order->get_side()), marketPrice, quantity, object_._hedgeRetryCount + 1);
             object_._uniqueID[leg] = _uid.id_;
-        }
-    } else {
-        int marketPrice = order->get_side() == BUY_SIDE ? _qoute[leg].message.ask_levels[0].price : _qoute[leg].message.bid_levels[0].price;
-        if (marketPrice != currentPlacePrice) {
-            auto status = _ms->update_order(order, _tokens[leg], marketPrice, quantity, _uid);
-            if (status != 0) {
-                fmt::print("#2 placing second order side {} price {} quantity {}\n", static_cast<int>(order->get_side()), marketPrice, quantity);
-                object_._uniqueID[leg] = _uid.id_;
-            }
+            object_._hedgeRetryCount++;
         }
     }
 }
