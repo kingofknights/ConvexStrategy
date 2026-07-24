@@ -25,6 +25,7 @@ class Ratio3LegStrategy;
 class Ratio4LegStrategy;
 class Ratio5LegStrategy;
 class Ratio6LegStrategy;
+class ConversionReversalStrategy;
 
 /**
  * @brief Strategy entry point loaded by the engine as libSampleAlgo.so.
@@ -43,6 +44,7 @@ class MinixStrategy : public AlgoBase {
     friend class Ratio4LegStrategy;
     friend class Ratio5LegStrategy;
     friend class Ratio6LegStrategy;
+    friend class ConversionReversalStrategy;
 
   public:
     MinixStrategy(AlgoBase::ContextHandle context);

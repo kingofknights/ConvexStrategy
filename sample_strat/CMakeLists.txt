@@ -3,6 +3,7 @@ add_library(SampleAlgo SHARED MinixStrategy.cpp BoxSpreadStrategy.cpp Ratio2Leg/
                               Ratio4Leg/Ratio4LegStrategy.cpp
                               Ratio5Leg/Ratio5LegStrategy.cpp
                               Ratio6Leg/Ratio6LegStrategy.cpp
+                              ConversionReversal/ConversionReversalStrategy.cpp
                               order_instance.cpp
                               PortfolioOrderManager.cpp)
 
@@ -19,6 +20,7 @@ target_include_directories(SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
                                               ${CMAKE_CURRENT_SOURCE_DIR}/Ratio4Leg
                                               ${CMAKE_CURRENT_SOURCE_DIR}/Ratio5Leg
                                               ${CMAKE_CURRENT_SOURCE_DIR}/Ratio6Leg
+                                              ${CMAKE_CURRENT_SOURCE_DIR}/ConversionReversal
                                               ${PROJECT_SOURCE_DIR})
 
 # target_link_libraries(SampleAlgo AlgoBase #                   fmt::fmt
