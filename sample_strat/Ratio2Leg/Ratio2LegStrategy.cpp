@@ -62,7 +62,9 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         size_t      legId = item.value("LegID", 0U);
         bool        bid   = item.value("EnableBid", false);
 
-        _biddingLeg = bid ? legId - 1 : _biddingLeg;
+        if (bid && legId > 0) {
+            _biddingLeg = legId - 1;
+        }
         legsInfo.push_back(TokenInfo{
             ._token = token,
             ._side  = side == "BUY" ? BUY_SIDE : SELL_SIDE,
@@ -70,6 +72,7 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         });
         fmt::print(" ID {} Token {} Side {} bid {}\n", legId, token, side, bid);
     }
+    _biddingLeg = std::min(_biddingLeg, static_cast<size_t>(1));
 
     // ── Ratio (nested under "Ratio" object) ───────────────────────────────────
     // NOTE: "LegRatios" lives at json_["Ratio"]["LegRatios"], NOT top-level.

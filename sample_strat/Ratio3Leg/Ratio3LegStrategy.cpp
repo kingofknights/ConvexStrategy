@@ -53,7 +53,7 @@ void Ratio3LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         size_t      legId = item.value("LegID", 0U);
         bool        bid   = item.value("EnableBid", false);
 
-        if (bid) {
+        if (bid && legId > 0) {
             _biddingLeg = legId - 1;
         }
         legsInfo.push_back(TokenInfo{
@@ -62,6 +62,7 @@ void Ratio3LegStrategy::ParamUpdate(const nlohmann::json& json_) {
             ._bid   = bid,
         });
     }
+    _biddingLeg = std::min(_biddingLeg, static_cast<size_t>(2));
 
     // ── Ratio (nested under "Ratio" object) ───────────────────────────────────
     std::vector<int> ratio;
