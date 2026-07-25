@@ -23,26 +23,26 @@ ButterflyStrategy::ButterflyStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
     _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
     _uid.composite_id_.strategy_id = strategyId_;
 
-    for (size_t i = 0; i < _numLegs; ++i) {
-        if (_tokens[i] > 0) {
-            _ms->subscribeProduct(_tokens[i], _ms->flags);
+    for (int token : _tokens) {
+        if (token > 0) {
+            _ms->subscribeProduct(token, _ms->flags);
         }
     }
 
-    ProductDetails details[4];
-    for (size_t i = 0; i < _numLegs; ++i) {
+    ProductDetails details[3];
+    for (size_t i = 0; i < 3; ++i) {
         if (_tokens[i] > 0) {
             ms_->getProductDetails(_tokens[i], details[i]);
         }
     }
 
-    if (_numLegs >= 2 && details[0].strike_price_ > 0 && details[1].strike_price_ > 0) {
+    if (details[0].strike_price_ > 0 && details[1].strike_price_ > 0) {
         _gap = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
     }
     _lotSize  = details[0].lot_size_ > 0 ? details[0].lot_size_ : 1;
     _tickSize = details[0].tick_size_ > 0 ? details[0].tick_size_ : 5;
 
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], _longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
         _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], _shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     }
@@ -69,8 +69,7 @@ void ButterflyStrategy::ParamUpdate(const nlohmann::json& json_) {
         });
     }
 
-    _numLegs = std::min<size_t>(std::max<size_t>(legsInfo.size(), 3U), 4U);
-    _biddingLeg = std::min(_biddingLeg, _numLegs - 1);
+    _biddingLeg = std::min(_biddingLeg, static_cast<size_t>(2));
 
     // ── Ratio (nested under "Ratio" object) ───────────────────────────────────
     std::vector<int> ratio;
@@ -81,9 +80,9 @@ void ButterflyStrategy::ParamUpdate(const nlohmann::json& json_) {
     }
 
     // Default Butterfly ratio: 1:2:1 for 3 legs
-    std::array<int, 4> defaultRatios = {1, 2, 1, 1};
+    std::array<int, 3> defaultRatios = {1, 2, 1};
 
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         if (i < legsInfo.size()) {
             TokenInfo info = legsInfo[i];
             _tokens[i]     = info._token;
@@ -132,7 +131,7 @@ void ButterflyStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
     int  token  = event_.header.product_id;
     bool status = false;
     size_t index = 0;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         if (token == _tokens[i]) {
             status = true;
             index  = i;
@@ -149,7 +148,7 @@ void ButterflyStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
 
     auto evaluateBidding = [&](MarketBidding& object_, ParamLots& param_, WindRate rate_, std::string name_) {
         bool hedgeLegsOk = true;
-        for (size_t h = 0; h < _numLegs; ++h) {
+        for (size_t h = 0; h < 3; ++h) {
             if (h == _biddingLeg) continue;
             ORDER_SIDE hedgeSide = object_._order[h]->get_side();
             bool orderOk = CheckOrderDepth(_qoute[h], _orderDepth, hedgeSide);
@@ -202,7 +201,7 @@ void ButterflyStrategy::OnOrderResponse(const oms_transaction& resp_) {
     auto checkSlippage = [&](MarketBidding& object_) {
         if (traded && object_._lastBiddingFillPrice > 0 && _allowedSlippage > 0) {
             double executedSpread = 0.0;
-            for (size_t i = 0; i < _numLegs; ++i) {
+            for (size_t i = 0; i < 3; ++i) {
                 double avgPrice = static_cast<double>(object_._tradeValue[i]) / (object_._tradedLot[i] > 0 ? object_._tradedLot[i] * _lotSize : 1);
                 if (object_._order[i]->get_side() == BUY_SIDE) {
                     executedSpread += avgPrice * _ratio[i];
@@ -220,7 +219,7 @@ void ButterflyStrategy::OnOrderResponse(const oms_transaction& resp_) {
             if (slippage > _allowedSlippage) {
                 fmt::print("[SLIPPAGE Butterfly] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", slippage, _allowedSlippage);
                 _active = false;
-                for (size_t i = 0; i < _numLegs; ++i) {
+                for (size_t i = 0; i < 3; ++i) {
                     _longOrders._order[i]->cancel_order();
                     _shortOrders._order[i]->cancel_order();
                 }
@@ -243,7 +242,7 @@ void ButterflyStrategy::OnOrderResponse(const oms_transaction& resp_) {
         return false;
     };
 
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         if (processOrderResponse(_longOrders, i) || processOrderResponse(_shortOrders, i)) {
             break;
         }
@@ -258,7 +257,7 @@ void ButterflyStrategy::OnOrderResponse(const oms_transaction& resp_) {
 auto ButterflyStrategy::GetBCmp() const -> WindRate {
     WindRate rate;
     float spread = 0.0f;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         int legPrice = GetPrice(_qoute[i], _shortSide[i], 0);
         rate._price[i] = legPrice;
         if (_longSide[i] == BUY_SIDE) {
@@ -274,7 +273,7 @@ auto ButterflyStrategy::GetBCmp() const -> WindRate {
 auto ButterflyStrategy::GetSCmp() const -> WindRate {
     WindRate rate;
     float spread = 0.0f;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         int legPrice = GetPrice(_qoute[i], _longSide[i], 0);
         rate._price[i] = legPrice;
         if (_shortSide[i] == SELL_SIDE) {
@@ -292,7 +291,7 @@ auto ButterflyStrategy::GetGap() const -> int { return _gap; }
 
 auto ButterflyStrategy::GetBuyTradedQuantity() const -> int {
     int totalPacks = 999999;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         int packs = _longOrders._tradedLot[i] / (_ratio[i] > 0 ? _ratio[i] : 1);
         totalPacks = std::min(totalPacks, packs);
     }
@@ -301,7 +300,7 @@ auto ButterflyStrategy::GetBuyTradedQuantity() const -> int {
 
 auto ButterflyStrategy::GetSellTradedQuantity() const -> int {
     int totalPacks = 999999;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         int packs = _shortOrders._tradedLot[i] / (_ratio[i] > 0 ? _ratio[i] : 1);
         totalPacks = std::min(totalPacks, packs);
     }
@@ -309,12 +308,12 @@ auto ButterflyStrategy::GetSellTradedQuantity() const -> int {
 }
 
 auto ButterflyStrategy::GetBATP() const -> double {
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         if (_longOrders._tradedLot[i] == 0 || _lotSize == 0) return 0.0;
     }
 
     double spread = 0.0;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         double avgPrice = static_cast<double>(_longOrders._tradeValue[i]) / static_cast<double>(_longOrders._tradedLot[i] * _lotSize);
         if (_longSide[i] == BUY_SIDE) {
             spread += avgPrice * _ratio[i];
@@ -326,12 +325,12 @@ auto ButterflyStrategy::GetBATP() const -> double {
 }
 
 auto ButterflyStrategy::GetSATP() const -> double {
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         if (_shortOrders._tradedLot[i] == 0 || _lotSize == 0) return 0.0;
     }
 
     double spread = 0.0;
-    for (size_t i = 0; i < _numLegs; ++i) {
+    for (size_t i = 0; i < 3; ++i) {
         double avgPrice = static_cast<double>(_shortOrders._tradeValue[i]) / static_cast<double>(_shortOrders._tradedLot[i] * _lotSize);
         if (_shortSide[i] == SELL_SIDE) {
             spread += avgPrice * _ratio[i];
@@ -378,7 +377,7 @@ auto ButterflyStrategy::GetCost() const -> double { return 0.0; }
 
 void ButterflyStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_) {
     int biddingPacks = object_._tradedLot[_biddingLeg] / (_ratio[_biddingLeg] > 0 ? _ratio[_biddingLeg] : 1);
-    for (size_t h = 0; h < _numLegs; ++h) {
+    for (size_t h = 0; h < 3; ++h) {
         if (h == _biddingLeg) continue;
         int hedgePacks = object_._tradedLot[h] / (_ratio[h] > 0 ? _ratio[h] : 1);
         if (biddingPacks != hedgePacks) {
@@ -413,7 +412,7 @@ void ButterflyStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots para
 void ButterflyStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots param_) {
     int biddingPacks = object_._tradedLot[_biddingLeg] / (_ratio[_biddingLeg] > 0 ? _ratio[_biddingLeg] : 1);
 
-    for (size_t leg = 0; leg < _numLegs; ++leg) {
+    for (size_t leg = 0; leg < 3; ++leg) {
         if (leg == _biddingLeg) continue;
         int hedgePacks = object_._tradedLot[leg] / (_ratio[leg] > 0 ? _ratio[leg] : 1);
         int diff       = biddingPacks - hedgePacks;
@@ -425,7 +424,7 @@ void ButterflyStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
         if (_marketOrderRetries > 0 && object_._hedgeRetryCount >= _marketOrderRetries) {
             fmt::print("[HEDGE RETRY EXHAUSTED Butterfly] Terminating strategy & cancelling all orders.\n");
             _active = false;
-            for (size_t i = 0; i < _numLegs; ++i) {
+            for (size_t i = 0; i < 3; ++i) {
                 _longOrders._order[i]->cancel_order();
                 _shortOrders._order[i]->cancel_order();
             }

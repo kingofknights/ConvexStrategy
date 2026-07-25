@@ -26,11 +26,10 @@ class ButterflyStrategy {
         int        _token = 0;
         ORDER_SIDE _side  = BUY_SIDE;
         bool       _bid   = false;
-        int        _ratio = 1;
     };
 
     struct WindRate {
-        int   _price[4] = {0, 0, 0, 0};
+        int   _price[3] = {0, 0, 0};
         float _spread   = 0.0f;
     };
 
@@ -41,10 +40,10 @@ class ButterflyStrategy {
     };
 
     struct MarketBidding {
-        OrderObjectPtrT _order[4];
-        uint32_t        _uniqueID[4]   = {0, 0, 0, 0};
-        int32_t         _tradedLot[4]  = {0, 0, 0, 0};
-        uint64_t        _tradeValue[4] = {0, 0, 0, 0};
+        OrderObjectPtrT _order[3];
+        uint32_t        _uniqueID[3]   = {0, 0, 0};
+        int32_t         _tradedLot[3]  = {0, 0, 0};
+        uint64_t        _tradeValue[3] = {0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;
@@ -99,13 +98,12 @@ class ButterflyStrategy {
     int      _lotSize    = 0;
     int      _tickSize   = 0;
     size_t   _biddingLeg = 0;
-    size_t   _numLegs    = 3;
 
-    Quote                     _qoute[4];
-    std::array<int, 4>        _ratio     = {1, 2, 1, 0};
-    std::array<int, 4>        _tokens    = {0, 0, 0, 0};
-    std::array<ORDER_SIDE, 4> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE, BUY_SIDE};
-    std::array<ORDER_SIDE, 4> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE, SELL_SIDE};
+    Quote                     _qoute[3];
+    std::array<int, 3>        _ratio     = {1, 2, 1};
+    std::array<int, 3>        _tokens    = {0, 0, 0};
+    std::array<ORDER_SIDE, 3> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
+    std::array<ORDER_SIDE, 3> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
 
     MarketBidding _longOrders;
     MarketBidding _shortOrders;
