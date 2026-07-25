@@ -24,6 +24,7 @@ class Ratio3LegStrategy;
 class Ratio4LegStrategy;
 class Ratio5LegStrategy;
 class Ratio6LegStrategy;
+class ButterflyStrategy;
 class ConversionReversalStrategy;
 class BoxSpreadStrategy;
 
@@ -36,6 +37,7 @@ class MinixStrategy : public AlgoBase {
     friend class Ratio4LegStrategy;
     friend class Ratio5LegStrategy;
     friend class Ratio6LegStrategy;
+    friend class ButterflyStrategy;
     friend class ConversionReversalStrategy;
     friend class BoxSpreadStrategy;
 
@@ -69,6 +71,7 @@ class MinixStrategy : public AlgoBase {
     void handleRatio4LegStrategy(const nlohmann::json& root, const std::string& jsonText);
     void handleRatio5LegStrategy(const nlohmann::json& root, const std::string& jsonText);
     void handleRatio6LegStrategy(const nlohmann::json& root, const std::string& jsonText);
+    void handleButterflyStrategy(const nlohmann::json& root, const std::string& jsonText);
 
     // Once per ~1s, echo strategy updates back to the GUI.
     void sendStrategySpreadsToUI();
@@ -91,6 +94,7 @@ class MinixStrategy : public AlgoBase {
     std::map<int32_t, Ratio4LegStrategy*> ratio4Strats_;
     std::map<int32_t, Ratio5LegStrategy*> ratio5Strats_;
     std::map<int32_t, Ratio6LegStrategy*> ratio6Strats_;
+    std::map<int32_t, ButterflyStrategy*> butterflyStrats_;
     std::map<int32_t, std::string>        strategyJson_;
     long long                             lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI
 

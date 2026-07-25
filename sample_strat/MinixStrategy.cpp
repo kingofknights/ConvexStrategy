@@ -9,6 +9,7 @@
 #include "Ratio4Leg/Ratio4LegStrategy.hpp"
 #include "Ratio5Leg/Ratio5LegStrategy.hpp"
 #include "Ratio6Leg/Ratio6LegStrategy.hpp"
+#include "Butterfly/ButterflyStrategy.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 
@@ -178,6 +179,10 @@ void MinixStrategy::applyLegStrategyJson(const std::string& jsonText) {
                    name == "Ratio6Leg" || name == "6LegRatio") {
             sendStatus(status, strategyId);
             handleRatio6LegStrategy(root, jsonText);
+        } else if (name == "Butterfly" || name == "butterfly" || name == "BUTTERFLY" ||
+                   name == "ButterflyStrategy" || name == "Fly") {
+            sendStatus(status, strategyId);
+            handleButterflyStrategy(root, jsonText);
         }
 
     } catch (const std::exception& e) {
@@ -325,6 +330,34 @@ void MinixStrategy::handleRatio6LegStrategy(const nlohmann::json& root, const st
         std::cout << "[handleRatio6LegStrategy] failed: " << e.what() << std::endl;
     }
 }
+
+void MinixStrategy::handleButterflyStrategy(const nlohmann::json& root, const std::string& jsonText) {
+    try {
+        auto strategy             = root["Strategy"];
+        auto status               = strategy["Status"].get<std::string>();
+        int  strategyID           = strategy["StrategyId"].get<int>();
+        strategyJson_[strategyID] = jsonText;
+        if (status == "Subscribed") {
+            auto iterator = butterflyStrats_.find(strategyID);
+            if (iterator == butterflyStrats_.end()) {
+                butterflyStrats_[strategyID] = new ButterflyStrategy(this, strategyID, root);
+            }
+        } else if (status == "Applied") {
+            auto iterator = butterflyStrats_.find(strategyID);
+            if (iterator != butterflyStrats_.end()) {
+                iterator->second->ParamUpdate(root);
+            }
+        } else if (status == "Unsubscribed" || status == "Cancelled") {
+            auto iterator = butterflyStrats_.find(strategyID);
+            if (iterator != butterflyStrats_.end()) {
+                delete iterator->second;
+                butterflyStrats_.erase(iterator);
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "[handleButterflyStrategy] failed: " << e.what() << std::endl;
+    }
+}
 /**
  * @brief Initialize strategy configuration, subscriptions, and order handles.
  */
@@ -412,11 +445,13 @@ MinixStrategy::~MinixStrategy() {
     for (auto& kv : ratio4Strats_) delete kv.second;
     for (auto& kv : ratio5Strats_) delete kv.second;
     for (auto& kv : ratio6Strats_) delete kv.second;
+    for (auto& kv : butterflyStrats_) delete kv.second;
     ratio2Strats_.clear();
     ratio3Strats_.clear();
     ratio4Strats_.clear();
     ratio5Strats_.clear();
     ratio6Strats_.clear();
+    butterflyStrats_.clear();
 }
 
 bool MinixStrategy::subscribeProduct(const int32_t  product_id,
@@ -470,6 +505,7 @@ void MinixStrategy::OnTick(const Quote& event) {
     for (auto& kv : ratio4Strats_) kv.second->OnTick(event, lastTickTs_);
     for (auto& kv : ratio5Strats_) kv.second->OnTick(event, lastTickTs_);
     for (auto& kv : ratio6Strats_) kv.second->OnTick(event, lastTickTs_);
+    for (auto& kv : butterflyStrats_) kv.second->OnTick(event, lastTickTs_);
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
@@ -513,6 +549,7 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
     for (auto& kv : ratio4Strats_) kv.second->OnOrderResponse(order_resp);
     for (auto& kv : ratio5Strats_) kv.second->OnOrderResponse(order_resp);
     for (auto& kv : ratio6Strats_) kv.second->OnOrderResponse(order_resp);
+    for (auto& kv : butterflyStrats_) kv.second->OnOrderResponse(order_resp);
 
     LOG_DEBUG(
         "[ORDER] RECV %-18s token=%d side=%-4s qty=%d price=%d uid=%d "
@@ -569,6 +606,7 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     for (auto& kv : ratio4Strats_) sendRatioUI(kv.second);
     for (auto& kv : ratio5Strats_) sendRatioUI(kv.second);
     for (auto& kv : ratio6Strats_) sendRatioUI(kv.second);
+    for (auto& kv : butterflyStrats_) sendRatioUI(kv.second);
 }
 
 void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
@@ -629,6 +667,7 @@ void MinixStrategy::onBcastData(
     for (auto& kv : ratio4Strats_) kv.second->OnBcast(product_details_, lastTickTs_);
     for (auto& kv : ratio5Strats_) kv.second->OnBcast(product_details_, lastTickTs_);
     for (auto& kv : ratio6Strats_) kv.second->OnBcast(product_details_, lastTickTs_);
+    for (auto& kv : butterflyStrats_) kv.second->OnBcast(product_details_, lastTickTs_);
 }
 
 /**
