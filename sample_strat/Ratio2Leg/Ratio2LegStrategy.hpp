@@ -102,7 +102,6 @@ class Ratio2LegStrategy {
     size_t   _biddingLeg = 0;
 
     Quote                     _qoute[2];
-    std::array<int, 2>        _ratio     = {1, 1};
     std::array<int, 2>        _tokens    = {0, 0};
     std::array<ORDER_SIDE, 2> _longSide  = {BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 2> _shortSide = {SELL_SIDE, BUY_SIDE};

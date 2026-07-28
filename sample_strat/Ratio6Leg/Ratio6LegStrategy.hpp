@@ -100,7 +100,6 @@ class Ratio6LegStrategy {
     size_t   _biddingLeg = 0;
 
     Quote                     _qoute[6];
-    std::array<int, 6>        _ratio     = {1, 1, 1, 1, 1, 1};
     std::array<int, 6>        _tokens    = {0, 0, 0, 0, 0, 0};
     std::array<ORDER_SIDE, 6> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 6> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE};

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-07-28
+
+### Changed
+- Removed all `_ratio` logic and references from 2-leg, 3-leg, 4-leg, 5-leg, and 6-leg ratio strategy files ([Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp), [Ratio3LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio3Leg/Ratio3LegStrategy.cpp), [Ratio4LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio4Leg/Ratio4LegStrategy.cpp), [Ratio5LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio5Leg/Ratio5LegStrategy.cpp), [Ratio6LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio6Leg/Ratio6LegStrategy.cpp)) as all leg ratios are fixed to 1:1:1:1.
+- Updated `GetBCmp()` and `GetSCmp()` in all N-leg ratio strategies to compute the spread dynamically using the leg's side (Buy side is negative (`-GetPrice()`), Sell side is positive (`+GetPrice()`)). Other math functions (slippage, BATP, SATP) remain simple subtraction.
+
+### Fixed
+- Fixed compilation errors in [Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp) by replacing undeclared identifiers `hedgeLeg` and `_` with the correct private member variable `_hedgeLeg`.
+
+## [1.3.3] - 2026-07-27
+
+### Added
+- Integrated `BoxSpreadStrategy` calling and routing inside `MinixStrategy` (`applyLegStrategyJson`, `OnTick`, `onBcastData`, `OnOrderResponse`, and `sendStrategySpreadsToUI`).
+
+## [1.3.2] - 2026-07-27
+
+### Changed
+- Refactored `OrderBiddingLogic` in `Ratio2LegStrategy`, `Ratio3LegStrategy`, `Ratio4LegStrategy`, `Ratio5LegStrategy`, `Ratio6LegStrategy`, and `ButterflyStrategy` to use early returns for tick-change check and quantity validations instead of nested conditionals.
+
 ## [1.3.1] - 2026-07-16
 
 ### Changed
