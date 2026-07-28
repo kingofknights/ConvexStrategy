@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Fixed compilation errors in [Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp) by replacing undeclared identifiers `hedgeLeg` and `_` with the correct private member variable `_hedgeLeg`.
+- Fixed bidding/hedge leg index references (hardcoded to 0/1) and lot size scaling in `GetCost()` in [Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp).
 
 ## [1.3.3] - 2026-07-27
 
