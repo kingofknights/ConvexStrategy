@@ -83,8 +83,8 @@ class Ratio3LegStrategy {
     [[nodiscard]] auto GetBCmp() const -> WindRate;
     [[nodiscard]] auto GetSCmp() const -> WindRate;
     [[nodiscard]] auto GetFLP() const -> int;
-    [[nodiscard]] auto GetBuyTradedQuantity() const -> int;
-    [[nodiscard]] auto GetSellTradedQuantity() const -> int;
+    [[nodiscard]] auto GetLongTradedLots() const -> int;
+    [[nodiscard]] auto GetShortTradedLots() const -> int;
     [[nodiscard]] auto GetBATP() const -> double;
     [[nodiscard]] auto GetSATP() const -> double;
     [[nodiscard]] auto GetRLP() const -> double;

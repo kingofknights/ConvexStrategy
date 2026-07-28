@@ -587,8 +587,8 @@ void MinixStrategy::sendStrategySpreadsToUI() {
         j["Cost"]       = static_cast<float>(ratio->GetCost()) / 100.0F;
         j["FLP"]        = static_cast<float>(ratio->GetFLP()) / 100.0F;
         j["Gap"]        = ratio->GetGap();
-        j["B-TrQ"]      = ratio->GetBuyTradedQuantity();
-        j["S-TrQ"]      = ratio->GetSellTradedQuantity();
+        j["B-TrQ"]      = ratio->GetLongTradedLots();
+        j["S-TrQ"]      = ratio->GetShortTradedLots();
         j["M2M"]        = static_cast<float>(ratio->GetM2M()) / 100.0F;
         j["Net P/L"]    = static_cast<float>(ratio->GetNetPL()) / 100.0F;
         j["RLP"]        = static_cast<float>(ratio->GetRLP()) / 100.0F;

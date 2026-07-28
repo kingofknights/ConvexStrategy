@@ -299,7 +299,7 @@ auto ButterflyStrategy::GetSCmp() const -> WindRate {
 auto ButterflyStrategy::GetStrategyID() const -> uint32_t { return _strategyId; }
 auto ButterflyStrategy::GetGap() const -> int { return _gap; }
 
-auto ButterflyStrategy::GetBuyTradedQuantity() const -> int {
+auto ButterflyStrategy::GetLongTradedLots() const -> int {
     int totalPacks = 999999;
     for (size_t i = 0; i < 3; ++i) {
         int packs = _longOrders._tradedLot[i] / (_ratio[i] > 0 ? _ratio[i] : 1);
@@ -308,7 +308,7 @@ auto ButterflyStrategy::GetBuyTradedQuantity() const -> int {
     return totalPacks == 999999 ? 0 : totalPacks;
 }
 
-auto ButterflyStrategy::GetSellTradedQuantity() const -> int {
+auto ButterflyStrategy::GetShortTradedLots() const -> int {
     int totalPacks = 999999;
     for (size_t i = 0; i < 3; ++i) {
         int packs = _shortOrders._tradedLot[i] / (_ratio[i] > 0 ? _ratio[i] : 1);
@@ -352,33 +352,84 @@ auto ButterflyStrategy::GetSATP() const -> double {
 }
 
 auto ButterflyStrategy::GetRLP() const -> double {
-    int buyPacks  = GetBuyTradedQuantity();
-    int sellPacks = GetSellTradedQuantity();
+    double totalRLP = 0.0;
+    for (size_t i = 0; i < 3; ++i) {
+        int64_t buyQty = 0;
+        uint64_t buyVal = 0;
+        int64_t sellQty = 0;
+        uint64_t sellVal = 0;
 
-    double realizedPnL = static_cast<double>(std::min(buyPacks, sellPacks)) * (GetSATP() - GetBATP()) * static_cast<double>(_lotSize);
-    if (buyPacks == sellPacks && buyPacks > 0) {
-        double totalSellValue = static_cast<double>(sellPacks * _lotSize) * GetSATP();
-        double totalBuyValue  = static_cast<double>(buyPacks * _lotSize) * GetBATP();
-        realizedPnL           = totalSellValue - totalBuyValue;
+        if (_longSide[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            buyVal += _longOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            sellVal += _longOrders._tradeValue[i];
+        }
+
+        if (_shortSide[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            buyVal += _shortOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            sellVal += _shortOrders._tradeValue[i];
+        }
+
+        double avgBuyPrice = buyQty > 0 ? static_cast<double>(buyVal) / buyQty : 0.0;
+        double avgSellPrice = sellQty > 0 ? static_cast<double>(sellVal) / sellQty : 0.0;
+
+        if (buyQty > sellQty) {
+            totalRLP += static_cast<double>(sellQty) * (avgSellPrice - avgBuyPrice);
+        } else {
+            totalRLP += static_cast<double>(buyQty) * (avgSellPrice - avgBuyPrice);
+        }
     }
-    return realizedPnL;
+    return totalRLP;
 }
 
 auto ButterflyStrategy::GetCutPL() const -> double { return GetRLP(); }
 
 auto ButterflyStrategy::GetM2M() const -> int {
-    int buyPacks  = GetBuyTradedQuantity();
-    int sellPacks = GetSellTradedQuantity();
+    double totalM2M = 0.0;
+    for (size_t i = 0; i < 3; ++i) {
+        int64_t buyQty = 0;
+        uint64_t buyVal = 0;
+        int64_t sellQty = 0;
+        uint64_t sellVal = 0;
 
-    double markToMarketPnL = 0.0;
-    if (buyPacks > sellPacks) {
-        double currentMarketSpread = static_cast<double>(GetBCmp()._spread);
-        markToMarketPnL            = static_cast<double>(buyPacks - sellPacks) * (currentMarketSpread - GetBATP()) * static_cast<double>(_lotSize);
-    } else if (sellPacks > buyPacks) {
-        double currentMarketSpread = static_cast<double>(GetSCmp()._spread);
-        markToMarketPnL            = static_cast<double>(sellPacks - buyPacks) * (GetSATP() - currentMarketSpread) * static_cast<double>(_lotSize);
+        if (_longSide[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            buyVal += _longOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            sellVal += _longOrders._tradeValue[i];
+        }
+
+        if (_shortSide[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            buyVal += _shortOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            sellVal += _shortOrders._tradeValue[i];
+        }
+
+        double avgBuyPrice = buyQty > 0 ? static_cast<double>(buyVal) / buyQty : 0.0;
+        double avgSellPrice = sellQty > 0 ? static_cast<double>(sellVal) / sellQty : 0.0;
+
+        int64_t netQty = buyQty - sellQty;
+        if (netQty != 0) {
+            double markPrice = 0.0;
+            if (netQty > 0) {
+                markPrice = _qoute[i].message.bid_levels[0].price;
+            } else {
+                markPrice = _qoute[i].message.ask_levels[0].price;
+            }
+
+            double avgPrice = netQty > 0 ? avgBuyPrice : avgSellPrice;
+            totalM2M += static_cast<double>(netQty) * (markPrice - avgPrice);
+        }
     }
-    return static_cast<int>(markToMarketPnL);
+    return static_cast<int>(totalM2M);
 }
 
 auto ButterflyStrategy::GetNetPL() const -> double { return GetRLP() + static_cast<double>(GetM2M()); }

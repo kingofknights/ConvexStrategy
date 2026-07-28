@@ -269,10 +269,10 @@ auto BoxSpreadStrategy::GetSCmp() const -> WindRate {
 auto BoxSpreadStrategy::GetStrategyID() const -> uint32_t { return _strategyId; }
 auto BoxSpreadStrategy::GetGap() const -> int { return _gap; }
 
-auto BoxSpreadStrategy::GetBuyTradedQuantity() const -> int {
+auto BoxSpreadStrategy::GetLongTradedLots() const -> int {
     return std::min({_longOrders._tradedLot[0], _longOrders._tradedLot[1], _longOrders._tradedLot[2], _longOrders._tradedLot[3]});
 }
-auto BoxSpreadStrategy::GetSellTradedQuantity() const -> int {
+auto BoxSpreadStrategy::GetShortTradedLots() const -> int {
     return std::min({_shortOrders._tradedLot[0], _shortOrders._tradedLot[1], _shortOrders._tradedLot[2], _shortOrders._tradedLot[3]});
 }
 
@@ -297,23 +297,93 @@ auto BoxSpreadStrategy::GetSATP() const -> double {
 }
 
 auto BoxSpreadStrategy::GetRLP() const -> double {
-    int buyLots  = GetBuyTradedQuantity();
-    int sellLots = GetSellTradedQuantity();
-    return static_cast<double>(std::min(buyLots, sellLots)) * (GetSATP() - GetBATP()) * static_cast<double>(_lotSize);
+    double totalRLP = 0.0;
+    // Fixed sides for Box Spread:
+    // Long Orders: Leg 0 (BUY), Leg 1 (SELL), Leg 2 (SELL), Leg 3 (BUY)
+    // Short Orders: Leg 0 (SELL), Leg 1 (BUY), Leg 2 (BUY), Leg 3 (SELL)
+    const ORDER_SIDE longSides[4] = {BUY_SIDE, SELL_SIDE, SELL_SIDE, BUY_SIDE};
+    const ORDER_SIDE shortSides[4] = {SELL_SIDE, BUY_SIDE, BUY_SIDE, SELL_SIDE};
+
+    for (size_t i = 0; i < 4; ++i) {
+        int64_t buyQty = 0;
+        uint64_t buyVal = 0;
+        int64_t sellQty = 0;
+        uint64_t sellVal = 0;
+
+        if (longSides[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            buyVal += _longOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            sellVal += _longOrders._tradeValue[i];
+        }
+
+        if (shortSides[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            buyVal += _shortOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            sellVal += _shortOrders._tradeValue[i];
+        }
+
+        double avgBuyPrice = buyQty > 0 ? static_cast<double>(buyVal) / buyQty : 0.0;
+        double avgSellPrice = sellQty > 0 ? static_cast<double>(sellVal) / sellQty : 0.0;
+
+        if (buyQty > sellQty) {
+            totalRLP += static_cast<double>(sellQty) * (avgSellPrice - avgBuyPrice);
+        } else {
+            totalRLP += static_cast<double>(buyQty) * (avgSellPrice - avgBuyPrice);
+        }
+    }
+    return totalRLP;
 }
 
 auto BoxSpreadStrategy::GetCutPL() const -> double { return GetRLP(); }
 
 auto BoxSpreadStrategy::GetM2M() const -> int {
-    int buyLots  = GetBuyTradedQuantity();
-    int sellLots = GetSellTradedQuantity();
-    double m2m   = 0.0;
-    if (buyLots > sellLots) {
-        m2m = static_cast<double>(buyLots - sellLots) * (GetBCmp()._windRate - GetBATP()) * static_cast<double>(_lotSize);
-    } else if (sellLots > buyLots) {
-        m2m = static_cast<double>(sellLots - buyLots) * (GetSATP() - GetSCmp()._windRate) * static_cast<double>(_lotSize);
+    double totalM2M = 0.0;
+    const ORDER_SIDE longSides[4] = {BUY_SIDE, SELL_SIDE, SELL_SIDE, BUY_SIDE};
+    const ORDER_SIDE shortSides[4] = {SELL_SIDE, BUY_SIDE, BUY_SIDE, SELL_SIDE};
+
+    for (size_t i = 0; i < 4; ++i) {
+        int64_t buyQty = 0;
+        uint64_t buyVal = 0;
+        int64_t sellQty = 0;
+        uint64_t sellVal = 0;
+
+        if (longSides[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            buyVal += _longOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
+            sellVal += _longOrders._tradeValue[i];
+        }
+
+        if (shortSides[i] == BUY_SIDE) {
+            buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            buyVal += _shortOrders._tradeValue[i];
+        } else {
+            sellQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
+            sellVal += _shortOrders._tradeValue[i];
+        }
+
+        double avgBuyPrice = buyQty > 0 ? static_cast<double>(buyVal) / buyQty : 0.0;
+        double avgSellPrice = sellQty > 0 ? static_cast<double>(sellVal) / sellQty : 0.0;
+
+        int64_t netQty = buyQty - sellQty;
+        if (netQty != 0) {
+            double markPrice = 0.0;
+            if (netQty > 0) {
+                markPrice = _qoute[i].message.bid_levels[0].price;
+            } else {
+                markPrice = _qoute[i].message.ask_levels[0].price;
+            }
+
+            double avgPrice = netQty > 0 ? avgBuyPrice : avgSellPrice;
+            totalM2M += static_cast<double>(netQty) * (markPrice - avgPrice);
+        }
     }
-    return static_cast<int>(m2m);
+    return static_cast<int>(totalM2M);
 }
 
 auto BoxSpreadStrategy::GetNetPL() const -> double { return GetRLP() + static_cast<double>(GetM2M()); }
