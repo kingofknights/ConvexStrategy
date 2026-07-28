@@ -7,6 +7,8 @@
 #include "order_instance.hpp"
 #include "rms_api.hpp"
 #include "ui_api.hpp"
+#include <cstdio>
+#include <fmt/format.h>
 
 // Algo
 #include "AlgoBase.hpp"
@@ -50,6 +52,16 @@ class BoxSpreadStrategy {
 
   public:
     BoxSpreadStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_);
+    ~BoxSpreadStrategy();
+
+    template<typename... Args>
+    void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
+        fmt::print(fmt_str, std::forward<Args>(args)...);
+        if (_logFile) {
+            fmt::print(_logFile, fmt_str, std::forward<Args>(args)...);
+            std::fflush(_logFile);
+        }
+    }
 
     void ParamUpdate(const nlohmann::json& json_);
 
@@ -114,4 +126,5 @@ class BoxSpreadStrategy {
 
     size_t _marketOrderRetries = 0;
     bool   _isBidding           = false;
+    std::FILE* _logFile = nullptr;
 };

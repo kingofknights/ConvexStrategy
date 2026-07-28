@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed all `_ratio` logic and references from 2-leg, 3-leg, 4-leg, 5-leg, and 6-leg ratio strategy files ([Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp), [Ratio3LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio3Leg/Ratio3LegStrategy.cpp), [Ratio4LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio4Leg/Ratio4LegStrategy.cpp), [Ratio5LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio5Leg/Ratio5LegStrategy.cpp), [Ratio6LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio6Leg/Ratio6LegStrategy.cpp)) as all leg ratios are fixed to 1:1:1:1.
 - Updated `GetBCmp()` and `GetSCmp()` in all N-leg ratio strategies to compute the spread dynamically using the leg's side (Buy side is negative (`-GetPrice()`), Sell side is positive (`+GetPrice()`)). Other math functions (slippage, BATP, SATP) remain simple subtraction.
 
+### Added
+- Implemented per-strategy file logging producing `StrategyName_StrategyId.log` outputs via custom `writeLog` helper mapping to `fmt::print` in all strategy types.
+
 ### Fixed
 - Fixed compilation errors in [Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp) by replacing undeclared identifiers `hedgeLeg` and `_` with the correct private member variable `_hedgeLeg`.
 - Fixed bidding/hedge leg index references (hardcoded to 0/1) and lot size scaling in `GetCost()` in [Ratio2LegStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/sample_strat/Ratio2Leg/Ratio2LegStrategy.cpp).

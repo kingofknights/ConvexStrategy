@@ -18,6 +18,10 @@
 #include <string>
 
 Ratio2LegStrategy::Ratio2LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_) : _ms(ms_), _strategyId(strategyId_) {
+    char filename[128];
+    std::snprintf(filename, sizeof(filename), "Ratio2Leg_%u.log", _strategyId);
+    _logFile = std::fopen(filename, "w");
+
     ParamUpdate(json_);
     _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
     _uid.composite_id_.strategy_id = strategyId_;
@@ -40,17 +44,22 @@ Ratio2LegStrategy::Ratio2LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
     _shortOrders._order[0] = std::make_unique<OrderObjectT>(_tokens[_biddingLeg], _shortSide[_biddingLeg], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     _shortOrders._order[1] = std::make_unique<OrderObjectT>(_tokens[hedgeLeg], _shortSide[hedgeLeg], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
 
-    fmt::print("PD Token {} K {} BLQ {} Tick {}\n", static_cast<int>(details[0].product_id_), static_cast<int>(details[0].strike_price_), static_cast<int>(details[0].lot_size_), static_cast<int>(details[0].tick_size_));
-    fmt::print("PD Token {} K {} BLQ {} Tick {}\n", static_cast<int>(details[1].product_id_), static_cast<int>(details[1].strike_price_), static_cast<int>(details[1].lot_size_), static_cast<int>(details[1].tick_size_));
-    fmt::print("{} Gap {} Tick {} BLQ {}\n Long Side [{} {}]\n Short Side [{} {}]\n\n",
+    writeLog("PD Token {} K {} BLQ {} Tick {}\n", static_cast<int>(details[0].product_id_), static_cast<int>(details[0].strike_price_), static_cast<int>(details[0].lot_size_), static_cast<int>(details[0].tick_size_));
+    writeLog("PD Token {} K {} BLQ {} Tick {}\n", static_cast<int>(details[1].product_id_), static_cast<int>(details[1].strike_price_), static_cast<int>(details[1].lot_size_), static_cast<int>(details[1].tick_size_));
+    writeLog("{} Gap {} Tick {} BLQ {}\n Long Side [{} {}]\n Short Side [{} {}]\n\n",
                __PRETTY_FUNCTION__, _gap, _tickSize, _lotSize,
                static_cast<int>(_longSide[_biddingLeg]), static_cast<int>(_longSide[hedgeLeg]),
                static_cast<int>(_shortSide[_biddingLeg]), static_cast<int>(_shortSide[hedgeLeg]));
 
-    fmt::print(" ---------------------------------\n _long [{} | {}]\n _short[{} | {}]\n\n",
+    writeLog(" ---------------------------------\n _long [{} | {}]\n _short[{} | {}]\n\n",
                static_cast<int>(_longOrders._order[0]->get_side()), static_cast<int>(_longOrders._order[1]->get_side()),
                static_cast<int>(_shortOrders._order[0]->get_side()), static_cast<int>(_shortOrders._order[1]->get_side()));
     ;
+}
+Ratio2LegStrategy::~Ratio2LegStrategy() {
+    if (_logFile) {
+        std::fclose(_logFile);
+    }
 }
 void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
     // ── Legs ─────────────────────────────────────────────────────────────────
@@ -71,7 +80,7 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
             ._side  = side == "BUY" ? BUY_SIDE : SELL_SIDE,
             ._bid   = bid,
         });
-        fmt::print(" ID {} Token {} Side {} bid {}\n", legId, token, side, bid);
+        writeLog(" ID {} Token {} Side {} bid {}\n", legId, token, side, bid);
     }
     _biddingLeg = std::min(_biddingLeg, static_cast<size_t>(1));
 
@@ -107,7 +116,7 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _priceDepth      = std::min<size_t>(_priceDepth, 5U);
         _allowedBidDepth = std::min<size_t>(_allowedBidDepth, 5U);
 
-        fmt::print(" Params  _longParam._quantity        {}  _longParam._totalQuantity  {}  _longParam._spread         {}  _shortParam._quantity      {}  _shortParam._totalQuantity {}  _shortParam._spread        {}\n",
+        writeLog(" Params  _longParam._quantity        {}  _longParam._totalQuantity  {}  _longParam._spread         {}  _shortParam._quantity      {}  _shortParam._totalQuantity {}  _shortParam._spread        {}\n",
                    _longParam._quantity, _longParam._totalQuantity, _longParam._spread,
                    _shortParam._quantity, _shortParam._totalQuantity, _shortParam._spread);
     }
@@ -118,7 +127,7 @@ void Ratio2LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _isBidding           = strategy.value("IsBidding", false);
         std::string status   = strategy.value("Status", "None");
         _active              = status == "Applied";
-        fmt::print(" Strategy: IsBidding={}\n", _isBidding);
+        writeLog(" Strategy: IsBidding={}\n", _isBidding);
     }
 }
 void Ratio2LegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
@@ -161,7 +170,7 @@ void Ratio2LegStrategy::OnBcast(const aef::infra::product::product_data& pd_, in
     }
 }
 void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
-    fmt::print("{} response id {} Side {} transaction_code {} price {} quantity {}\n",
+    writeLog("{} response id {} Side {} transaction_code {} price {} quantity {}\n",
                __FUNCTION__, resp_.hdr_.uid_.id_, static_cast<int>(resp_.packet_.flags_.order_side),
                resp_.hdr_.transaction_code, resp_.packet_.price_, resp_.packet_.quantity_);
 
@@ -175,8 +184,8 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     auto lot      = quantity / _lotSize;
     auto value    = static_cast<uint64_t>(price * quantity);
     // Long Entry Orders
-    fmt::print(" id long {} {} {}\n", _longOrders._uniqueID[0], _longOrders._uniqueID[1], resp_.hdr_.uid_.id_);
-    fmt::print(" id short {} {} {}\n", _shortOrders._uniqueID[0], _shortOrders._uniqueID[1], resp_.hdr_.uid_.id_);
+    writeLog(" id long {} {} {}\n", _longOrders._uniqueID[0], _longOrders._uniqueID[1], resp_.hdr_.uid_.id_);
+    writeLog(" id short {} {} {}\n", _shortOrders._uniqueID[0], _shortOrders._uniqueID[1], resp_.hdr_.uid_.id_);
 
     auto handleTrade = [&](MarketBidding& object_, size_t index_) -> void {
         object_._order[index_]->handle_confirmation(resp_);
@@ -196,7 +205,7 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
                 slippage = _shortParam._spread - executedSpread;
             }
             if (slippage > _allowedSlippage) {
-                fmt::print("[SLIPPAGE] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", slippage, _allowedSlippage);
+                writeLog("[SLIPPAGE] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", slippage, _allowedSlippage);
                 _active = false;
                 _longOrders._order[_biddingLeg]->cancel_order();
                 _shortOrders._order[_biddingLeg]->cancel_order();
@@ -226,8 +235,8 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     }
 
     if (traded) {
-        fmt::print(" long traded {} {}\n", _longOrders._tradedLot[0], _longOrders._tradedLot[1]);
-        fmt::print(" short traded {} {}\n", _shortOrders._tradedLot[0], _shortOrders._tradedLot[1]);
+        writeLog(" long traded {} {}\n", _longOrders._tradedLot[0], _longOrders._tradedLot[1]);
+        writeLog(" short traded {} {}\n", _shortOrders._tradedLot[0], _shortOrders._tradedLot[1]);
 
         SecondOrderBidding(_longOrders, _longParam);
         SecondOrderBidding(_shortOrders, _shortParam);
@@ -389,16 +398,16 @@ void Ratio2LegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots para
     int quantity          = param_._quantity * _lotSize;
 
     if (diff < (_minTickChange * _tickSize)) {
-        fmt::print("{} C M [{} {}] change {}  return\n", name_, currentPlacePrice, marketPrice, _minTickChange * _tickSize);
+        writeLog("{} C M [{} {}] change {}  return\n", name_, currentPlacePrice, marketPrice, _minTickChange * _tickSize);
         return;
     }
     if (quantity <= 0) {
-        fmt::print("{} quantity {}  return\n", name_, quantity);
+        writeLog("{} quantity {}  return\n", name_, quantity);
         return;
     }
     auto status = _ms->update_order(order, _tokens[0], marketPrice, quantity, _uid);
     if (status != 0) {
-        fmt::print("{} Order placed  _biddingLeg = {} price = {} quantity {} side {} uid {} client ID {} diff {} return {}\n",
+        writeLog("{} Order placed  _biddingLeg = {} price = {} quantity {} side {} uid {} client ID {} diff {} return {}\n",
                    __FUNCTION__, _biddingLeg, marketPrice, _lotSize * param_._quantity,
                    static_cast<int>(order->get_side()), _uid.id_, static_cast<uint32_t>(_uid.composite_id_.client_id), diff, status);
         object_._uniqueID[_biddingLeg] = _uid.id_;
@@ -415,7 +424,7 @@ void Ratio2LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
     }
 
     if (_marketOrderRetries > 0 && object_._hedgeRetryCount >= _marketOrderRetries) {
-        fmt::print("[HEDGE RETRY EXHAUSTED] Retry count {} >= MarketOrderRetries {}. Terminating strategy & cancelling all orders.\n",
+        writeLog("[HEDGE RETRY EXHAUSTED] Retry count {} >= MarketOrderRetries {}. Terminating strategy & cancelling all orders.\n",
                    object_._hedgeRetryCount, _marketOrderRetries);
         _active = false;
         _longOrders._order[0]->cancel_order();
@@ -425,7 +434,7 @@ void Ratio2LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
         return;
     }
 
-    fmt::print("{} first {} second {} leg {} retryCount {}\n", __FUNCTION__, firstTradedLots, secondTradedLots, 1, object_._hedgeRetryCount);
+    writeLog("{} first {} second {} leg {} retryCount {}\n", __FUNCTION__, firstTradedLots, secondTradedLots, 1, object_._hedgeRetryCount);
     int              quantity          = std::min(diff, param_._quantity) * _lotSize;
     OrderObjectPtrT& order             = object_._order[1];
     int              currentPlacePrice = order->get_open_price();
@@ -436,7 +445,7 @@ void Ratio2LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
     if (marketPrice > 0 && marketPrice != currentPlacePrice) {
         auto status = _ms->update_order(order, _tokens[1], marketPrice, quantity, _uid);
         if (status != 0) {
-            fmt::print("{} placing hedge order side {} price {} quantity {} (retry {})\n",
+            writeLog("{} placing hedge order side {} price {} quantity {} (retry {})\n",
                        __FUNCTION__, static_cast<int>(order->get_side()), marketPrice, quantity, object_._hedgeRetryCount + 1);
             object_._uniqueID[1] = _uid.id_;
             object_._hedgeRetryCount++;

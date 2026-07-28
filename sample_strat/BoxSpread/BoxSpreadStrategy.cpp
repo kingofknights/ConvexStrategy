@@ -20,6 +20,10 @@
 
 BoxSpreadStrategy::BoxSpreadStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_)
     : _ms(ms_), _strategyId(strategyId_) {
+    char filename[128];
+    std::snprintf(filename, sizeof(filename), "BoxSpread_%u.log", _strategyId);
+    _logFile = std::fopen(filename, "w");
+
     ParamUpdate(json_);
     _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
     _uid.composite_id_.strategy_id = strategyId_;
@@ -48,6 +52,12 @@ BoxSpreadStrategy::BoxSpreadStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
     for (size_t i = 0; i < 4; ++i) {
         _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
         _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+    }
+}
+
+BoxSpreadStrategy::~BoxSpreadStrategy() {
+    if (_logFile) {
+        std::fclose(_logFile);
     }
 }
 
@@ -355,7 +365,7 @@ void BoxSpreadStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
         }
 
         if (_marketOrderRetries > 0 && object_._hedgeRetryCount >= _marketOrderRetries) {
-            fmt::print("[HEDGE RETRY EXHAUSTED BoxSpread] Terminating strategy & cancelling all orders.\n");
+            writeLog("[HEDGE RETRY EXHAUSTED BoxSpread] Terminating strategy & cancelling all orders.\n");
             _active = false;
             for (size_t i = 0; i < 4; ++i) {
                 _longOrders._order[i]->cancel_order();
