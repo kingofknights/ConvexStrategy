@@ -58,10 +58,6 @@ class Ratio6LegStrategy {
     template<typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
         fmt::print(fmt_str, std::forward<Args>(args)...);
-        if (_logFile) {
-            fmt::print(_logFile, fmt_str, std::forward<Args>(args)...);
-            std::fflush(_logFile);
-        }
     }
 
     void ParamUpdate(const nlohmann::json& json_);
@@ -134,5 +130,4 @@ class Ratio6LegStrategy {
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;
-    std::FILE* _logFile = nullptr;
 };

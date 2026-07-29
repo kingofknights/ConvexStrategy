@@ -60,10 +60,6 @@ class Ratio2LegStrategy {
     template<typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
         fmt::print(fmt_str, std::forward<Args>(args)...);
-        if (_logFile) {
-            fmt::print(_logFile, fmt_str, std::forward<Args>(args)...);
-            std::fflush(_logFile);
-        }
     }
 
     void ParamUpdate(const nlohmann::json& json_);
@@ -115,8 +111,11 @@ class Ratio2LegStrategy {
 
     Quote                     _qoute[2];
     std::array<int, 2>        _tokens    = {0, 0};
+    std::array<int, 2>        _tokensParam = {0, 0};
     std::array<ORDER_SIDE, 2> _longSide  = {BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 2> _shortSide = {SELL_SIDE, BUY_SIDE};
+    std::array<ORDER_SIDE, 2> _longSideParam  = {BUY_SIDE, SELL_SIDE};
+    std::array<ORDER_SIDE, 2> _shortSideParam = {SELL_SIDE, BUY_SIDE};
 
     MarketBidding _longOrders;
     MarketBidding _shortOrders;
@@ -136,5 +135,4 @@ class Ratio2LegStrategy {
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;
-    std::FILE* _logFile = nullptr;
 };

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.9] - 2026-07-29
+
+### Removed
+- Removed file log writing (`_logFile`, `fopen`, and `fclose` calls) from all strategies (`Ratio2Leg`, `Ratio3Leg`, `Ratio4Leg`, `Ratio5Leg`, `Ratio6Leg`, `BoxSpread`, `Butterfly`, and `ConversionReversal`) and replaced it with direct stdout console output via `fmt::print`.
+
+## [1.3.8] - 2026-07-29
+
+### Removed
+- Removed file log writing (`_logFile`, `fopen`, and `fclose` calls) from `Ratio2LegStrategy` and replaced it with direct stdout console output via simple `fmt::print`.
+
+## [1.3.7] - 2026-07-29
+
+### Changed
+- Refactored `Ratio2LegStrategy` arrays (`_tokens`, `_longSide`, and `_shortSide`) to be pre-sorted during `ParamUpdate` such that index 0 is always the bidding leg and index 1 is always the hedge leg.
+- Simplified and cleaned up `GetBCmp` and `GetSCmp` functions in `Ratio2LegStrategy.cpp` to use direct side-based price lookup, rendering the formulas easier to read and maintain.
+
+## [1.3.6] - 2026-07-29
+
+### Fixed
+- Fixed quote indexing mismatch when `_biddingLeg` is 1 in `Ratio2LegStrategy.cpp` for functions `GetBCmp()`, `GetSCmp()`, and `GetCost()`, ensuring correct spread values (like `140.90` and `-141.55`) are generated dynamically based on actual leg side configuration (`B.S` and `S.B`).
+
 ## [1.3.5] - 2026-07-28
 
 ### Changed

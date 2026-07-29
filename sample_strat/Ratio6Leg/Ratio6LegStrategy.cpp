@@ -19,10 +19,6 @@
 #include <string>
 
 Ratio6LegStrategy::Ratio6LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_) : _ms(ms_), _strategyId(strategyId_) {
-    char filename[128];
-    std::snprintf(filename, sizeof(filename), "Ratio6Leg_%u.log", _strategyId);
-    _logFile = std::fopen(filename, "w");
-
     ParamUpdate(json_);
     _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
     _uid.composite_id_.strategy_id = strategyId_;
@@ -46,11 +42,7 @@ Ratio6LegStrategy::Ratio6LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
     }
 }
 
-Ratio6LegStrategy::~Ratio6LegStrategy() {
-    if (_logFile) {
-        std::fclose(_logFile);
-    }
-}
+Ratio6LegStrategy::~Ratio6LegStrategy() {}
 
 void Ratio6LegStrategy::ParamUpdate(const nlohmann::json& json_) {
     // ── Legs ─────────────────────────────────────────────────────────────────

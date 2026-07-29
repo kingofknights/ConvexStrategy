@@ -4,12 +4,12 @@
  */
 #include "MinixStrategy.hpp"
 
+#include "Butterfly/ButterflyStrategy.hpp"
 #include "Ratio2Leg/Ratio2LegStrategy.hpp"
 #include "Ratio3Leg/Ratio3LegStrategy.hpp"
 #include "Ratio4Leg/Ratio4LegStrategy.hpp"
 #include "Ratio5Leg/Ratio5LegStrategy.hpp"
 #include "Ratio6Leg/Ratio6LegStrategy.hpp"
-#include "Butterfly/ButterflyStrategy.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 
@@ -916,6 +916,7 @@ bool MinixStrategy::cancel_order(OrderMap& order_handle_, int32_t token) {
 }
 
 extern "C" AlgoBase* create(void* context) {
+    std::cout << __FILE__ << ":" << __FUNCTION__ << std::endl;
     return new MinixStrategy(static_cast<AlgoBase::ContextHandle>(context));
 }
 
