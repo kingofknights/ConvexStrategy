@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.10] - 2026-07-29
+
+### Fixed
+- Added `-DFMT_HEADER_ONLY` globally via target compile definitions in `sample_strat/CMakeLists.txt` to prevent unresolved linker symbols for `fmt` in header inclusions, fixing the dynamic library load error.
+
 ## [1.3.9] - 2026-07-29
 
 ### Removed

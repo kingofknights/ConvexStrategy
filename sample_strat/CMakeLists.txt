@@ -43,3 +43,4 @@ target_link_libraries(SampleAlgo PRIVATE AlgoBase)
 target_link_options(SampleAlgo PRIVATE "-Wl,-rpath,\$ORIGIN")
 
 target_compile_options(SampleAlgo PRIVATE -D__STDC_FORMAT_MACROS)
+target_compile_definitions(SampleAlgo PRIVATE FMT_HEADER_ONLY)
