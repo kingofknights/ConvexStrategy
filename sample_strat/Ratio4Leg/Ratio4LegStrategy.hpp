@@ -47,6 +47,8 @@ class Ratio4LegStrategy {
         uint32_t        _uniqueID[4]   = {0, 0, 0, 0};
         int32_t         _tradedLot[4]  = {0, 0, 0, 0};
         uint64_t        _tradeValue[4] = {0, 0, 0, 0};
+        int32_t         _cycleTradedLot[4]  = {0, 0, 0, 0};
+        uint64_t        _cycleTradeValue[4] = {0, 0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;

@@ -192,47 +192,57 @@ void Ratio2LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
         object_._order[index_]->handle_confirmation(resp_);
         object_._tradedLot[index_] += traded ? lot : 0;
         object_._tradeValue[index_] += traded ? value : 0;
+        object_._cycleTradedLot[index_] += traded ? lot : 0;
+        object_._cycleTradeValue[index_] += traded ? value : 0;
     };
 
-    auto checkSlippage = [&](MarketBidding& object_) {
-        if (traded && object_._lastBiddingFillPrice > 0 && _allowedSlippage > 0) {
-            double leg0FillPrice  = object_._lastBiddingFillPrice;
-            double leg1FillPrice  = price;
-            double executedSpread = leg0FillPrice - leg1FillPrice;
-            double slippage       = 0.0;
-            if (&object_ == &_longOrders) {
-                slippage = executedSpread - _longParam._spread;
+    auto checkSlippage = [&](MarketBidding& object_, ORDER_SIDE hedgeSide_) {
+        if (traded && _allowedSlippage > 0 && object_._cycleTradedLot[0] == object_._cycleTradedLot[1] && object_._cycleTradedLot[0] > 0 && object_._windRate._price[1] > 0) {
+            double leg1AveragePrice   = static_cast<double>(object_._cycleTradeValue[1]) / (object_._cycleTradedLot[1] * _lotSize);
+            double expectedHedgePrice = object_._windRate._price[1];
+            double actualHedgePrice   = leg1AveragePrice;
+            double slippage           = 0.0;
+
+            if (hedgeSide_ == BUY_SIDE) {
+                slippage = actualHedgePrice - expectedHedgePrice;
             } else {
-                slippage = _shortParam._spread - executedSpread;
+                slippage = expectedHedgePrice - actualHedgePrice;
             }
+
+            object_._cycleTradedLot[0]  = 0;
+            object_._cycleTradedLot[1]  = 0;
+            object_._cycleTradeValue[0] = 0;
+            object_._cycleTradeValue[1] = 0;
+
             if (slippage > _allowedSlippage) {
                 writeLog("[SLIPPAGE] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", slippage, _allowedSlippage);
                 _active = false;
-                _longOrders._order[0]->cancel_order();
-                _shortOrders._order[0]->cancel_order();
+                for (size_t i = 0; i < 2; ++i) {
+                    _longOrders._order[i]->cancel_order();
+                    _shortOrders._order[i]->cancel_order();
+                }
             }
         }
     };
 
-    auto processOrderResponse = [&](MarketBidding& object_, size_t index_) -> bool {
+    auto processOrderResponse = [&](MarketBidding& object_, ORDER_SIDE hedgeSide_, size_t index_) -> bool {
         if (resp_.hdr_.uid_.id_ == object_._uniqueID[index_]) {
             handleTrade(object_, index_);
             if (0 == index_) {
                 if (traded) {
                     object_._lastBiddingFillPrice = price;
                 }
-            } else {
-                checkSlippage(object_);
             }
+            checkSlippage(object_, hedgeSide_);
             return true;
         }
         return false;
     };
 
-    if (processOrderResponse(_longOrders, 0)) {
-    } else if (processOrderResponse(_longOrders, 1)) {
-    } else if (processOrderResponse(_shortOrders, 0)) {
-    } else if (processOrderResponse(_shortOrders, 1)) {
+    if (processOrderResponse(_longOrders, _longSide[1], 0)) {
+    } else if (processOrderResponse(_longOrders, _longSide[1], 1)) {
+    } else if (processOrderResponse(_shortOrders, _shortSide[1], 0)) {
+    } else if (processOrderResponse(_shortOrders, _shortSide[1], 1)) {
     }
 
     if (traded) {

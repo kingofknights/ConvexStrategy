@@ -46,6 +46,8 @@ class Ratio6LegStrategy {
         uint32_t        _uniqueID[6]   = {0, 0, 0, 0, 0, 0};
         int32_t         _tradedLot[6]  = {0, 0, 0, 0, 0, 0};
         uint64_t        _tradeValue[6] = {0, 0, 0, 0, 0, 0};
+        int32_t         _cycleTradedLot[6]  = {0, 0, 0, 0, 0, 0};
+        uint64_t        _cycleTradeValue[6] = {0, 0, 0, 0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;

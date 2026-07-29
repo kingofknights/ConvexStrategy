@@ -47,6 +47,8 @@ class Ratio3LegStrategy {
         uint32_t        _uniqueID[3]   = {0, 0, 0};
         int32_t         _tradedLot[3]  = {0, 0, 0};
         uint64_t        _tradeValue[3] = {0, 0, 0};
+        int32_t         _cycleTradedLot[3]  = {0, 0, 0};
+        uint64_t        _cycleTradeValue[3] = {0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;
@@ -112,6 +114,9 @@ class Ratio3LegStrategy {
     std::array<int, 3>        _tokens    = {0, 0, 0};
     std::array<ORDER_SIDE, 3> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
     std::array<ORDER_SIDE, 3> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
+    std::array<int, 3>        _tokensParam = {0, 0, 0};
+    std::array<ORDER_SIDE, 3> _longSideParam  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
+    std::array<ORDER_SIDE, 3> _shortSideParam = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
 
     MarketBidding _longOrders;
     MarketBidding _shortOrders;

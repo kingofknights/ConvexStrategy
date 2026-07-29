@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.12] - 2026-07-29
+
+### Changed
+- Updated slippage check in all N-leg ratio strategies (`Ratio2Leg`, `Ratio3Leg`, `Ratio4Leg`, `Ratio5Leg`, and `Ratio6Leg`) to verify executed spread only when all legs have traded in equal quantities for the current cycle (`object_._cycleTradedLot[i] == object_._cycleTradedLot[j]`).
+- Introduced cycle-specific accumulators `_cycleTradedLot` and `_cycleTradeValue` in all N-leg strategies to calculate slippage independently per cycle (preventing dilution over multiple successful cycles), resetting them back to 0 upon cycle completion.
+- Simplified slippage calculation to compare `expectedHedgePrice` and `actualHedgePrice` based on each hedge leg's side (`actual - expected` for `BUY_SIDE`, and `expected - actual` for `SELL_SIDE`). Side arrays are now passed explicitly as parameters to `checkSlippage` and `processOrderResponse`.
+- Implemented non-zero dynamic definitions for `GetFLP()` and `GetCost()` in 4-leg, 5-leg, and 6-leg strategies, calculating total strategy execution cost by summing up buy/sell cost parameters over all legs.
+
+## [1.3.11] - 2026-07-29
+
+### Changed
+- Added `_tokensParam`, `_longSideParam`, and `_shortSideParam` to `Ratio3LegStrategy` class to match the parameter structure of `Ratio2LegStrategy`.
+- Modified `Ratio3LegStrategy::ParamUpdate` to parse token and side parameters into the new `Param` arrays.
+- Modified `Ratio3LegStrategy` constructor to map parameters directly to the active execution variables.
+
 ## [1.3.10] - 2026-07-29
 
 ### Fixed
