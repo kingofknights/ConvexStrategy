@@ -7,8 +7,10 @@
 #include "order_instance.hpp"
 #include "rms_api.hpp"
 #include "ui_api.hpp"
-#include <cstdio>
+
 #include <fmt/format.h>
+
+#include <cstdio>
 
 // Algo
 #include "AlgoBase.hpp"
@@ -45,13 +47,13 @@ class Ratio2LegStrategy {
 
     struct MarketBidding {
         OrderObjectPtrT _order[2];
-        uint32_t        _uniqueID[2]   = {0, 0};
-        int32_t         _tradedLot[2]  = {0, 0};
-        uint64_t        _tradeValue[2] = {0, 0};
-        int32_t         _cycleTradedLot[2]  = {0, 0};
-        uint64_t        _cycleTradeValue[2] = {0, 0};
+        uint32_t        _uniqueID[2]          = {0, 0};
+        int32_t         _tradedLot[2]         = {0, 0};
+        uint64_t        _tradeValue[2]        = {0, 0};
+        int32_t         _cycleTradedLot[2]    = {0, 0};
+        uint64_t        _cycleTradeValue[2]   = {0, 0};
         int32_t         _lastBiddingFillPrice = 0;
-        size_t          _hedgeRetryCount = 0;
+        size_t          _hedgeRetryCount      = 0;
         WindRate        _windRate;
     };
 
@@ -59,7 +61,7 @@ class Ratio2LegStrategy {
     Ratio2LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_);
     ~Ratio2LegStrategy();
 
-    template<typename... Args>
+    template <typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
         fmt::print(fmt_str, std::forward<Args>(args)...);
     }
@@ -105,17 +107,19 @@ class Ratio2LegStrategy {
     client_uid     _uid;
 
     uint32_t _strategyId;
-    bool     _active     = false;
-    int      _gap        = 0;
-    int      _lotSize    = 0;
-    int      _tickSize   = 0;
-    size_t   _biddingLeg = 0;
+    bool     _active = false;
+
+    int    _gap        = 0;
+    int    _lotSize    = 0;
+    int    _tickSize   = 0;
+    size_t _biddingLeg = 0;
 
     Quote                     _qoute[2];
-    std::array<int, 2>        _tokens    = {0, 0};
+    std::array<int, 2>        _tokens      = {0, 0};
     std::array<int, 2>        _tokensParam = {0, 0};
-    std::array<ORDER_SIDE, 2> _longSide  = {BUY_SIDE, SELL_SIDE};
-    std::array<ORDER_SIDE, 2> _shortSide = {SELL_SIDE, BUY_SIDE};
+    std::array<bool, 2>       _isOption{false, false};
+    std::array<ORDER_SIDE, 2> _longSide       = {BUY_SIDE, SELL_SIDE};
+    std::array<ORDER_SIDE, 2> _shortSide      = {SELL_SIDE, BUY_SIDE};
     std::array<ORDER_SIDE, 2> _longSideParam  = {BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 2> _shortSideParam = {SELL_SIDE, BUY_SIDE};
 
@@ -126,13 +130,13 @@ class Ratio2LegStrategy {
     ParamLots _longParam;
     ParamLots _shortParam;
 
-    size_t _minTickChange = 0;
-    size_t _orderDepth    = 0;
-    size_t _priceDepth    = 0;
-    size_t _allowedBidDepth = 0;
-    int    _thresholdQty   = 0;
-    int    _allowedSlippage = 0;
-    int    _tradeGear     = 0;
+    size_t _minTickChange      = 0;
+    size_t _orderDepth         = 0;
+    size_t _priceDepth         = 0;
+    size_t _allowedBidDepth    = 0;
+    int    _thresholdQty       = 0;
+    int    _allowedSlippage    = 0;
+    int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;
 
     // ── Strategy meta ─────────────────────────────────────────────────────────

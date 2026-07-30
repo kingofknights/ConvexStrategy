@@ -2,6 +2,7 @@
 
 #include "AlgoBase.hpp"
 #include "MinixStrategy.hpp"
+#include "ProductInfo.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 
@@ -29,7 +30,8 @@ Ratio6LegStrategy::Ratio6LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
 
     ProductDetails details[6];
     for (size_t i = 0; i < 6; ++i) {
-        ms_->getProductDetails(_tokens[i], details[i]);
+        _ms->getProductDetails(_tokens[i], details[i]);
+        _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
     }
 
     _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
@@ -459,28 +461,25 @@ auto Ratio6LegStrategy::GetM2M() const -> int {
 auto Ratio6LegStrategy::GetNetPL() const -> double { return GetRLP() + static_cast<double>(GetM2M()); }
 auto Ratio6LegStrategy::GetFLP() const -> int { return _qoute[_biddingLeg].message.ltp_; }
 auto Ratio6LegStrategy::GetCost() const -> double {
-    constexpr static double buyCostPercentage  = 0.002079734;
-    constexpr static double sellCostPercentage = 0.000609734;
-
     std::array buyPrice = {
-        _qoute[0].message.bid_levels[0].price,
-        _qoute[1].message.bid_levels[0].price,
-        _qoute[2].message.bid_levels[0].price,
-        _qoute[3].message.bid_levels[0].price,
-        _qoute[4].message.bid_levels[0].price,
-        _qoute[5].message.bid_levels[0].price,
+        _qoute[0].message.bid_levels[0].price * (_isOption[0] ? OptionBuyCost : FutureBuyCost),
+        _qoute[1].message.bid_levels[0].price * (_isOption[1] ? OptionBuyCost : FutureBuyCost),
+        _qoute[2].message.bid_levels[0].price * (_isOption[2] ? OptionBuyCost : FutureBuyCost),
+        _qoute[3].message.bid_levels[0].price * (_isOption[3] ? OptionBuyCost : FutureBuyCost),
+        _qoute[4].message.bid_levels[0].price * (_isOption[4] ? OptionBuyCost : FutureBuyCost),
+        _qoute[5].message.bid_levels[0].price * (_isOption[5] ? OptionBuyCost : FutureBuyCost),
     };
     std::array sellPrice = {
-        _qoute[0].message.ask_levels[0].price,
-        _qoute[1].message.ask_levels[0].price,
-        _qoute[2].message.ask_levels[0].price,
-        _qoute[3].message.ask_levels[0].price,
-        _qoute[4].message.ask_levels[0].price,
-        _qoute[5].message.ask_levels[0].price,
+        _qoute[0].message.ask_levels[0].price * (_isOption[0] ? OptionSellCost : FutureSellCost),
+        _qoute[1].message.ask_levels[0].price * (_isOption[1] ? OptionSellCost : FutureSellCost),
+        _qoute[2].message.ask_levels[0].price * (_isOption[2] ? OptionSellCost : FutureSellCost),
+        _qoute[3].message.ask_levels[0].price * (_isOption[3] ? OptionSellCost : FutureSellCost),
+        _qoute[4].message.ask_levels[0].price * (_isOption[4] ? OptionSellCost : FutureSellCost),
+        _qoute[5].message.ask_levels[0].price * (_isOption[5] ? OptionSellCost : FutureSellCost),
     };
 
-    double buyCost  = (static_cast<double>(buyPrice[0] + buyPrice[1] + buyPrice[2] + buyPrice[3] + buyPrice[4] + buyPrice[5]) * buyCostPercentage);
-    double sellCost = (static_cast<double>(sellPrice[0] + sellPrice[1] + sellPrice[2] + sellPrice[3] + sellPrice[4] + sellPrice[5]) * sellCostPercentage);
+    double buyCost  = (static_cast<double>(buyPrice[0] + buyPrice[1] + buyPrice[2] + buyPrice[3] + buyPrice[4] + buyPrice[5]));
+    double sellCost = (static_cast<double>(sellPrice[0] + sellPrice[1] + sellPrice[2] + sellPrice[3] + sellPrice[4] + sellPrice[5]));
     return (buyCost + sellCost);
 }
 

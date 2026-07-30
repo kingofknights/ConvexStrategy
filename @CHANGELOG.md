@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.13] - 2026-07-30
+
+### Changed
+- Updated dynamic transaction cost logic in `Ratio3Leg`, `Ratio4Leg`, `Ratio5Leg`, and `Ratio6Leg` strategies to use option-specific (`OptionBuyCost` / `OptionSellCost`) and future-specific (`FutureBuyCost` / `FutureSellCost`) multipliers per leg, matching `Ratio2Leg`.
+
 ## [1.3.12] - 2026-07-29
 
 ### Changed

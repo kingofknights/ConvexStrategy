@@ -111,6 +111,7 @@ class Ratio6LegStrategy {
 
     Quote                     _qoute[6];
     std::array<int, 6>        _tokens    = {0, 0, 0, 0, 0, 0};
+    std::array<bool, 6>       _isOption{false, false, false, false, false, false};
     std::array<ORDER_SIDE, 6> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 6> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE};
 

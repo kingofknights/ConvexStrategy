@@ -2,6 +2,7 @@
 
 #include "AlgoBase.hpp"
 #include "MinixStrategy.hpp"
+#include "ProductInfo.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 
@@ -37,8 +38,11 @@ Ratio2LegStrategy::Ratio2LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, c
     _tokens[1] = _tokensParam[hedgeLeg];
 
     ProductDetails details[2];
-    ms_->getProductDetails(_tokens[0], details[0]);
-    ms_->getProductDetails(_tokens[1], details[1]);
+    _ms->getProductDetails(_tokens[0], details[0]);
+    _ms->getProductDetails(_tokens[1], details[1]);
+
+    _isOption[0] = details[0].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
+    _isOption[1] = details[1].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
 
     _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
     _lotSize  = details[0].lot_size_;
@@ -428,20 +432,17 @@ auto Ratio2LegStrategy::GetFLP() const -> int {
     return _qoute[0].message.ltp_;
 }
 auto Ratio2LegStrategy::GetCost() const -> double {
-    constexpr static double buyCostPercentage  = 0.002079734;
-    constexpr static double sellCostPercentage = 0.000609734;
-
     std::array buyPrice = {
-        _qoute[0].message.bid_levels[0].price,
-        _qoute[1].message.bid_levels[0].price,
+        _qoute[0].message.bid_levels[0].price * (_isOption[0] ? OptionBuyCost : FutureBuyCost),
+        _qoute[1].message.bid_levels[0].price * (_isOption[1] ? OptionBuyCost : FutureBuyCost),
     };
     std::array sellPrice = {
-        _qoute[0].message.ask_levels[0].price,
-        _qoute[1].message.ask_levels[0].price,
+        _qoute[0].message.ask_levels[0].price * (_isOption[0] ? OptionSellCost : FutureSellCost),
+        _qoute[1].message.ask_levels[0].price * (_isOption[1] ? OptionSellCost : FutureSellCost),
     };
 
-    double buyCost  = (static_cast<double>(buyPrice[0] + buyPrice[1]) * buyCostPercentage);
-    double sellCost = (static_cast<double>(sellPrice[0] + sellPrice[1]) * sellCostPercentage);
+    double buyCost  = (static_cast<double>(buyPrice[0] + buyPrice[1]));
+    double sellCost = (static_cast<double>(sellPrice[0] + sellPrice[1]));
     return (buyCost + sellCost);
 }
 

@@ -112,6 +112,7 @@ class Ratio3LegStrategy {
 
     Quote                     _qoute[3];
     std::array<int, 3>        _tokens    = {0, 0, 0};
+    std::array<bool, 3>       _isOption{false, false, false};
     std::array<ORDER_SIDE, 3> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
     std::array<ORDER_SIDE, 3> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
     std::array<int, 3>        _tokensParam = {0, 0, 0};

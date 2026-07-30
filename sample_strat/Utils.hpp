@@ -8,6 +8,11 @@ using OrderObjectPtrT = std::unique_ptr<OrderObjectT>;
 using PortfolioT      = uint32_t;
 using UserIdT         = uint32_t;
 
+constexpr static double OptionBuyCost  = 0.000450434;
+constexpr static double OptionSellCost = 0.001920434;
+constexpr static double FutureBuyCost  = 0.000042774;
+constexpr static double FutureSellCost = 0.000522774;
+
 #pragma pack(push, 1)
 struct UserPortfolio {
     UserIdT    _user;
