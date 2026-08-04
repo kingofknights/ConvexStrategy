@@ -112,6 +112,7 @@ class Ratio4LegStrategy {
 
     Quote                     _qoute[4];
     std::array<int, 4>        _tokens    = {0, 0, 0, 0};
+    std::array<int, 4>        _ratios    = {1, 1, 1, 1};
     std::array<bool, 4>       _isOption{false, false, false, false};
     std::array<ORDER_SIDE, 4> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 4> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE};

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-04
+
+### Added
+- Supported per-leg ratio multipliers (`LegRatios` array nested under `Ratio` object in JSON) for all N-leg ratio strategies (`Ratio2Leg` to `Ratio6Leg`).
+- Scaled spread calculations, target/slice quantities, total quantity limit checks, and traded lot counts using per-leg ratios.
+- Adjusted slippage checks to normalize cycle completion checks and scale leg-specific slippage amounts by their corresponding leg ratios.
+
+## [1.3.14] - 2026-07-31
+
+### Changed
+- Unified `BoxSpreadStrategy` implementation with `Ratio4LegStrategy` logic.
+- Unified `ConversionReversalStrategy` implementation with `Ratio3LegStrategy` logic.
+
 ## [1.3.13] - 2026-07-30
 
 ### Changed

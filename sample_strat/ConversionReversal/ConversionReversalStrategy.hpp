@@ -22,16 +22,17 @@
 class MinixStrategy;
 
 class ConversionReversalStrategy {
-  private:
-    enum class StrategyType {
-        CONVERSION = 1,
-        REVERSION  = 2
+    using OptionTypeT = aef::infra::product::OPTION_TYPE;
+
+    struct TokenInfo {
+        int        _token = 0;
+        ORDER_SIDE _side  = BUY_SIDE;
+        bool       _bid   = false;
     };
 
     struct WindRate {
-        int   _biddingPrice = 0;
-        float _windRate     = 0.0f;
-        bool  _valid        = false;
+        int   _price[3];
+        float _spread;
     };
 
     struct ParamLots {
@@ -41,10 +42,12 @@ class ConversionReversalStrategy {
     };
 
     struct MarketBidding {
-        OrderObjectPtrT _order[3];       // 0: CE, 1: PE, 2: FUT
+        OrderObjectPtrT _order[3];
         uint32_t        _uniqueID[3]   = {0, 0, 0};
         int32_t         _tradedLot[3]  = {0, 0, 0};
         uint64_t        _tradeValue[3] = {0, 0, 0};
+        int32_t         _cycleTradedLot[3]  = {0, 0, 0};
+        uint64_t        _cycleTradeValue[3] = {0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;
@@ -90,12 +93,10 @@ class ConversionReversalStrategy {
     [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
+    [[nodiscard]] auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int;
 
-    // Pure spread calculations directly from con_rev_BIDDING.docx
-    [[nodiscard]] auto CalculateConversionCallWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateReversionCallWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateConversionPutWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateReversionPutWindRate() const -> WindRate;
+    [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
+    [[nodiscard]] auto CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
 
   private:
     MinixStrategy* _ms;
@@ -106,19 +107,33 @@ class ConversionReversalStrategy {
     int      _gap        = 0;
     int      _lotSize    = 0;
     int      _tickSize   = 0;
-    int      _orderStrike = 0;
+    size_t   _biddingLeg = 0;
 
-    Quote _qoute[3]; // 0: CE, 1: PE, 2: FUT
-    std::array<int, 3> _tokens = {0, 0, 0};
+    Quote                     _qoute[3];
+    std::array<int, 3>        _tokens    = {0, 0, 0};
+    std::array<bool, 3>       _isOption{false, false, false};
+    std::array<ORDER_SIDE, 3> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
+    std::array<ORDER_SIDE, 3> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
+    std::array<int, 3>        _tokensParam = {0, 0, 0};
+    std::array<ORDER_SIDE, 3> _longSideParam  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
+    std::array<ORDER_SIDE, 3> _shortSideParam = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
 
-    // Long Bidding = Conversion (Long Fut, Long PE, Short CE)
-    // Short Bidding = Reversion (Short Fut, Short PE, Long CE)
     MarketBidding _longOrders;
     MarketBidding _shortOrders;
 
-    ParamLots _longParam;  // Conversion params
-    ParamLots _shortParam; // Reversion params
+    // ── Params ────────────────────────────────────────────────────────────────
+    ParamLots _longParam;
+    ParamLots _shortParam;
 
+    size_t _minTickChange   = 0;
+    size_t _orderDepth      = 0;
+    size_t _priceDepth      = 0;
+    size_t _allowedBidDepth = 0;
+    int    _thresholdQty    = 0;
+    int    _allowedSlippage = 0;
+    int    _tradeGear       = 0;
     size_t _marketOrderRetries = 0;
-    bool   _isBidding           = false;
+
+    // ── Strategy meta ─────────────────────────────────────────────────────────
+    bool _isBidding = false;
 };

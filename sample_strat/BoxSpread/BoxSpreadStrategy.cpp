@@ -2,6 +2,7 @@
 
 #include "AlgoBase.hpp"
 #include "MinixStrategy.hpp"
+#include "ProductInfo.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 
@@ -18,84 +19,90 @@
 #include <memory>
 #include <string>
 
-BoxSpreadStrategy::BoxSpreadStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_)
-    : _ms(ms_), _strategyId(strategyId_) {
+BoxSpreadStrategy::BoxSpreadStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_) : _ms(ms_), _strategyId(strategyId_) {
     ParamUpdate(json_);
     _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
     _uid.composite_id_.strategy_id = strategyId_;
 
     for (int token : _tokens) {
-        if (token > 0) {
-            _ms->subscribeProduct(token, _ms->flags);
-        }
+        _ms->subscribeProduct(token, _ms->flags);
     }
 
     ProductDetails details[4];
     for (size_t i = 0; i < 4; ++i) {
-        if (_tokens[i] > 0) {
-            ms_->getProductDetails(_tokens[i], details[i]);
-        }
+        _ms->getProductDetails(_tokens[i], details[i]);
+        _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
     }
 
-    _lotSize  = details[0].lot_size_ > 0 ? details[0].lot_size_ : 1;
-    _tickSize = details[0].tick_size_ > 0 ? details[0].tick_size_ : 5;
-
-    // Long Box (Conversion): Buy Order_CE, Sell Order_PE, Sell ATM_CE, Buy ATM_PE
-    // Short Box (Reversion):  Sell Order_CE, Buy Order_PE, Buy ATM_CE, Sell ATM_PE
-    ORDER_SIDE longSide[4]  = {BUY_SIDE, SELL_SIDE, SELL_SIDE, BUY_SIDE};
-    ORDER_SIDE shortSide[4] = {SELL_SIDE, BUY_SIDE, BUY_SIDE, SELL_SIDE};
+    _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
+    _lotSize  = details[0].lot_size_;
+    _tickSize = details[0].tick_size_;
 
     for (size_t i = 0; i < 4; ++i) {
-        _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
-        _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+        _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], _longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+        _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], _shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     }
 }
 
 BoxSpreadStrategy::~BoxSpreadStrategy() {}
 
 void BoxSpreadStrategy::ParamUpdate(const nlohmann::json& json_) {
+    // ── Legs ─────────────────────────────────────────────────────────────────
+    auto legs = json_["Legs"];
+
+    std::vector<TokenInfo> legsInfo;
+    for (auto& item : legs) {
+        int         token = item.value("Token", 0);
+        std::string side  = item.value("Side", "BUY");
+        size_t      legId = item.value("LegID", 0U);
+        bool        bid   = item.value("EnableBid", false);
+
+        if (bid && legId > 0) {
+            _biddingLeg = legId - 1;
+        }
+        legsInfo.push_back(TokenInfo{
+            ._token = token,
+            ._side  = side == "BUY" ? BUY_SIDE : SELL_SIDE,
+            ._bid   = bid,
+        });
+    }
+    _biddingLeg = std::min(_biddingLeg, static_cast<size_t>(3));
+
+    // ── Ratio (nested under "Ratio" object) ───────────────────────────────────
+    for (size_t i = 0; i < 4 && i < legsInfo.size(); ++i) {
+        TokenInfo info = legsInfo[i];
+        _tokens[i]     = info._token;
+        _longSide[i]   = info._side;
+        _shortSide[i]  = info._side == SELL_SIDE ? BUY_SIDE : SELL_SIDE;
+    }
+
+    // ── Params ────────────────────────────────────────────────────────────────
     if (json_.contains("Params")) {
         const auto& parmas = json_["Params"];
 
-        _orderStrike = parmas.value("OrderStrike", 0);
-        _atmStrike   = parmas.value("AtmStrike", 0);
-
-        _longParam._quantity      = parmas.value("LongBuySoQ", parmas.value("OrderLot", 0));
-        _longParam._totalQuantity = parmas.value("LongBuyQty", parmas.value("TotalLot", 0));
+        _longParam._quantity      = parmas.value("LongBuySoQ", 0);
+        _longParam._totalQuantity = parmas.value("LongBuyQty", 0);
         _longParam._spread        = parmas.value("LongBuyPrice", 0.0F) * 100.0F;
 
-        _shortParam._quantity      = parmas.value("ShortSellSoQ", parmas.value("OrderLot", 0));
-        _shortParam._totalQuantity = parmas.value("ShortSellQty", parmas.value("TotalLot", 0));
+        _shortParam._quantity      = parmas.value("ShortSellSoQ", 0);
+        _shortParam._totalQuantity = parmas.value("ShortSellQty", 0);
         _shortParam._spread        = parmas.value("ShortSellPrice", 0.0F) * 100.0F;
 
+        _minTickChange      = parmas.value("TickSize", 0U);
+        _orderDepth         = parmas.value("OrderDepth", 1U);
+        _priceDepth         = parmas.value("PriceDepth", 1U);
+        _allowedBidDepth    = parmas.value("AllowedBidDepth", 1U);
+        _thresholdQty       = parmas.value("ThresholdQty", 100);
+        _allowedSlippage    = parmas.value("AllowedSlippage", 0) * 100;
+        _tradeGear          = parmas.value("TradeGear", 0);
         _marketOrderRetries = parmas.value("MarketOrderRetries", 0U);
+
+        _orderDepth      = std::min<size_t>(_orderDepth, 5U);
+        _priceDepth      = std::min<size_t>(_priceDepth, 5U);
+        _allowedBidDepth = std::min<size_t>(_allowedBidDepth, 5U);
     }
 
-    if (json_.contains("Legs")) {
-        const auto& legs = json_["Legs"];
-        for (const auto& item : legs) {
-            std::string optionType = item.value("OptionType", "");
-            int token              = item.value("Token", 0);
-            int strike             = item.value("Strike", 0);
-            
-            if (optionType == "CE" || optionType == "CALL") {
-                if (strike == _orderStrike || _tokens[0] == 0) {
-                    _tokens[0] = token; // Order_CE
-                } else {
-                    _tokens[2] = token; // ATM_CE
-                }
-            } else if (optionType == "PE" || optionType == "PUT") {
-                if (strike == _orderStrike || _tokens[1] == 0) {
-                    _tokens[1] = token; // Order_PE
-                } else {
-                    _tokens[3] = token; // ATM_PE
-                }
-            } else {
-                _tokens[4] = token; // Future (for ITM determination)
-            }
-        }
-    }
-
+    // ── Strategy meta ─────────────────────────────────────────────────────────
     if (json_.contains("Strategy")) {
         const auto& strategy = json_["Strategy"];
         _isBidding           = strategy.value("IsBidding", false);
@@ -108,7 +115,7 @@ void BoxSpreadStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
     int  token  = event_.header.product_id;
     bool status = false;
     size_t index = 0;
-    for (size_t i = 0; i < 5; ++i) {
+    for (size_t i = 0; i < 4; ++i) {
         if (token == _tokens[i]) {
             status = true;
             index  = i;
@@ -123,23 +130,36 @@ void BoxSpreadStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
         return;
     }
 
-    // Long Bidding = Conversion Box
-    WindRate longRate = GetBCmp();
-    if (longRate._valid) {
-        OrderBiddingLogic(_longOrders, _longParam, longRate, "LongBoxConversion");
-    } else {
-        size_t biddingLeg = (_qoute[4].message.ltp_ > _orderStrike) ? 0 : 1;
-        _longOrders._order[biddingLeg]->cancel_order();
-    }
+    auto evaluateBidding = [&](MarketBidding& object_, ParamLots& param_, WindRate rate_, std::string name_) {
+        bool hedgeLegsOk = true;
+        for (size_t h = 0; h < 4; ++h) {
+            if (h == _biddingLeg) continue;
+            ORDER_SIDE hedgeSide = object_._order[h]->get_side();
+            bool orderOk = CheckOrderDepth(_qoute[h], _orderDepth, hedgeSide);
+            bool priceOk = CheckPriceDepth(_qoute[h], _priceDepth, hedgeSide);
 
-    // Short Bidding = Reversion Box
-    WindRate shortRate = GetSCmp();
-    if (shortRate._valid) {
-        OrderBiddingLogic(_shortOrders, _shortParam, shortRate, "ShortBoxReversion");
-    } else {
-        size_t biddingLeg = (_qoute[4].message.ltp_ > _orderStrike) ? 0 : 1;
-        _shortOrders._order[biddingLeg]->cancel_order();
-    }
+            double thresholdPct = _thresholdQty > 0 ? _thresholdQty : 100.0;
+            double targetQty    = (param_._quantity * _lotSize) * (thresholdPct / 100.0);
+            bool qtyOk          = GetAvailableQuantity(_qoute[h], _orderDepth, hedgeSide) >= targetQty;
+
+            if (!orderOk || !priceOk || !qtyOk) {
+                hedgeLegsOk = false;
+                break;
+            }
+        }
+
+        ORDER_SIDE mainSide = object_._order[_biddingLeg]->get_side();
+        bool biddingLegOk   = CheckPriceDepth(_qoute[_biddingLeg], _allowedBidDepth, mainSide);
+
+        if (hedgeLegsOk && biddingLegOk) {
+            OrderBiddingLogic(object_, param_, rate_, name_);
+        } else {
+            object_._order[_biddingLeg]->cancel_order();
+        }
+    };
+
+    evaluateBidding(_longOrders, _longParam, GetBCmp(), "Long");
+    evaluateBidding(_shortOrders, _shortParam, GetSCmp(), "Short");
 }
 
 void BoxSpreadStrategy::OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_) {
@@ -156,25 +176,81 @@ void BoxSpreadStrategy::OnOrderResponse(const oms_transaction& resp_) {
     auto lot      = quantity / _lotSize;
     auto value    = static_cast<uint64_t>(price * quantity);
 
-    size_t biddingLeg = (_qoute[4].message.ltp_ > _orderStrike) ? 0 : 1;
+    auto handleTrade = [&](MarketBidding& object_, size_t index_) -> void {
+        object_._order[index_]->handle_confirmation(resp_);
+        object_._tradedLot[index_] += traded ? lot : 0;
+        object_._tradeValue[index_] += traded ? value : 0;
+        object_._cycleTradedLot[index_] += traded ? lot : 0;
+        object_._cycleTradeValue[index_] += traded ? value : 0;
+    };
 
-    auto processResponse = [&](MarketBidding& object_) -> bool {
-        for (size_t i = 0; i < 4; ++i) {
-            if (resp_.hdr_.uid_.id_ == object_._uniqueID[i]) {
-                object_._order[i]->handle_confirmation(resp_);
-                object_._tradedLot[i] += traded ? lot : 0;
-                object_._tradeValue[i] += traded ? value : 0;
-                if (i == biddingLeg && traded) {
+    auto checkSlippage = [&](MarketBidding& object_, const std::array<ORDER_SIDE, 4>& sides_) {
+        if (traded && _allowedSlippage > 0 && 
+            object_._cycleTradedLot[0] == object_._cycleTradedLot[1] && 
+            object_._cycleTradedLot[1] == object_._cycleTradedLot[2] && 
+            object_._cycleTradedLot[2] == object_._cycleTradedLot[3] && 
+            object_._cycleTradedLot[0] > 0) {
+            
+            bool expectedPricesOk = true;
+            for (size_t i = 0; i < 4; ++i) {
+                if (i != _biddingLeg && object_._windRate._price[i] <= 0) {
+                    expectedPricesOk = false;
+                    break;
+                }
+            }
+            if (!expectedPricesOk) return;
+
+            double slippage = 0.0;
+            for (size_t i = 0; i < 4; ++i) {
+                if (i == _biddingLeg) continue;
+                double legAveragePrice = static_cast<double>(object_._cycleTradeValue[i]) / (object_._cycleTradedLot[i] * _lotSize);
+                double expectedHedgePrice = object_._windRate._price[i];
+                double actualHedgePrice   = legAveragePrice;
+                ORDER_SIDE hedgeSide_ = sides_[i];
+
+                if (hedgeSide_ == BUY_SIDE) {
+                    slippage += (actualHedgePrice - expectedHedgePrice);
+                } else {
+                    slippage += (expectedHedgePrice - actualHedgePrice);
+                }
+            }
+
+            // Reset cycle accumulators for the next cycle
+            for (size_t i = 0; i < 4; ++i) {
+                object_._cycleTradedLot[i] = 0;
+                object_._cycleTradeValue[i] = 0;
+            }
+
+            if (slippage > _allowedSlippage) {
+                writeLog("[SLIPPAGE BoxSpread] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", slippage, _allowedSlippage);
+                _active = false;
+                for (size_t i = 0; i < 4; ++i) {
+                    _longOrders._order[i]->cancel_order();
+                    _shortOrders._order[i]->cancel_order();
+                }
+            }
+        }
+    };
+
+    auto processOrderResponse = [&](MarketBidding& object_, const std::array<ORDER_SIDE, 4>& sides_, size_t index_) -> bool {
+        if (resp_.hdr_.uid_.id_ == object_._uniqueID[index_]) {
+            handleTrade(object_, index_);
+            if (_biddingLeg == index_) {
+                if (traded) {
                     object_._lastBiddingFillPrice = price;
                 }
-                return true;
             }
+            checkSlippage(object_, sides_);
+            return true;
         }
         return false;
     };
 
-    processResponse(_longOrders);
-    processResponse(_shortOrders);
+    for (size_t i = 0; i < 4; ++i) {
+        if (processOrderResponse(_longOrders, _longSide, i) || processOrderResponse(_shortOrders, _shortSide, i)) {
+            break;
+        }
+    }
 
     if (traded) {
         SecondOrderBidding(_longOrders, _longParam);
@@ -182,127 +258,108 @@ void BoxSpreadStrategy::OnOrderResponse(const oms_transaction& resp_) {
     }
 }
 
-// ── Spread Calculations directly from Documents.md ────────────────────────
-
-// Conversion bid in Call (Fut_LTP > Order_Strike)
-auto BoxSpreadStrategy::CalculateConversionCallWindRate() const -> WindRate {
-    int orderCeAsk = _qoute[0].message.ask_levels[0].price;
-    int orderPeAsk = _qoute[1].message.ask_levels[0].price;
-    int atmCeAsk   = _qoute[2].message.ask_levels[0].price;
-    int atmPeBid   = _qoute[3].message.bid_levels[0].price;
-
-    if (orderCeAsk <= 0 || orderPeAsk <= 0 || atmCeAsk <= 0 || atmPeBid <= 0) {
-        return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
-    }
-
-    float windRate     = static_cast<float>(orderCeAsk - orderPeAsk - atmCeAsk + atmPeBid + _orderStrike - _atmStrike - _tickSize);
-    int   biddingPrice = orderCeAsk - _tickSize;
-    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-}
-
-// Reversion bid in Call (Fut_LTP > Order_Strike)
-auto BoxSpreadStrategy::CalculateReversionCallWindRate() const -> WindRate {
-    int orderCeBid = _qoute[0].message.bid_levels[0].price;
-    int orderPeBid = _qoute[1].message.bid_levels[0].price;
-    int atmCeBid   = _qoute[2].message.bid_levels[0].price;
-    int atmPeAsk   = _qoute[3].message.ask_levels[0].price;
-
-    if (orderCeBid <= 0 || orderPeBid <= 0 || atmCeBid <= 0 || atmPeAsk <= 0) {
-        return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
-    }
-
-    float windRate     = static_cast<float>(-orderCeBid + orderPeBid + atmCeBid - atmPeAsk - _orderStrike + _atmStrike - _tickSize);
-    int   biddingPrice = orderCeBid + _tickSize;
-    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-}
-
-// Conversion bid in Put (Fut_LTP <= Order_Strike)
-auto BoxSpreadStrategy::CalculateConversionPutWindRate() const -> WindRate {
-    int orderCeBid = _qoute[0].message.bid_levels[0].price;
-    int orderPeBid = _qoute[1].message.bid_levels[0].price;
-    int atmCeAsk   = _qoute[2].message.ask_levels[0].price;
-    int atmPeBid   = _qoute[3].message.bid_levels[0].price;
-
-    if (orderCeBid <= 0 || orderPeBid <= 0 || atmCeAsk <= 0 || atmPeBid <= 0) {
-        return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
-    }
-
-    float windRate     = static_cast<float>(orderCeBid - orderPeBid - atmCeAsk + atmPeBid + _orderStrike - _atmStrike - _tickSize);
-    int   biddingPrice = orderPeBid + _tickSize;
-    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-}
-
-// Reversion bid in Put (Fut_LTP <= Order_Strike)
-auto BoxSpreadStrategy::CalculateReversionPutWindRate() const -> WindRate {
-    int orderPeAsk = _qoute[1].message.ask_levels[0].price;
-    int orderCeAsk = _qoute[0].message.ask_levels[0].price;
-    int atmCeBid   = _qoute[2].message.bid_levels[0].price;
-    int atmPeAsk   = _qoute[3].message.ask_levels[0].price;
-
-    if (orderPeAsk <= 0 || orderCeAsk <= 0 || atmCeBid <= 0 || atmPeAsk <= 0) {
-        return WindRate{._biddingPrice = 0, ._windRate = 0.0f, ._valid = false};
-    }
-
-    float windRate     = static_cast<float>(orderPeAsk - orderCeAsk + atmCeBid - atmPeAsk - _orderStrike + _atmStrike - _tickSize);
-    int   biddingPrice = orderPeAsk - _tickSize;
-    return WindRate{._biddingPrice = biddingPrice, ._windRate = windRate, ._valid = true};
-}
-
 auto BoxSpreadStrategy::GetBCmp() const -> WindRate {
-    int futLtp = _qoute[4].message.ltp_;
-    return (futLtp > _orderStrike) ? CalculateConversionCallWindRate() : CalculateConversionPutWindRate();
+    int leg0Price = GetPrice(_qoute[0], _shortSide[0], 0);
+    int leg1Price = GetPrice(_qoute[1], _shortSide[1], 0);
+    int leg2Price = GetPrice(_qoute[2], _shortSide[2], 0);
+    int leg3Price = GetPrice(_qoute[3], _shortSide[3], 0);
+    double spread = 0;
+    spread += _longSide[0] == BUY_SIDE ? -leg0Price : leg0Price;
+    spread += _longSide[1] == BUY_SIDE ? -leg1Price : leg1Price;
+    spread += _longSide[2] == BUY_SIDE ? -leg2Price : leg2Price;
+    spread += _longSide[3] == BUY_SIDE ? -leg3Price : leg3Price;
+    return WindRate{
+        ._price  = {leg0Price, leg1Price, leg2Price, leg3Price},
+        ._spread = static_cast<float>(spread),
+    };
 }
 
 auto BoxSpreadStrategy::GetSCmp() const -> WindRate {
-    int futLtp = _qoute[4].message.ltp_;
-    return (futLtp > _orderStrike) ? CalculateReversionCallWindRate() : CalculateReversionPutWindRate();
+    int leg0Price = GetPrice(_qoute[0], _longSide[0], 0);
+    int leg1Price = GetPrice(_qoute[1], _longSide[1], 0);
+    int leg2Price = GetPrice(_qoute[2], _longSide[2], 0);
+    int leg3Price = GetPrice(_qoute[3], _longSide[3], 0);
+    double spread = 0;
+    spread += _shortSide[0] == BUY_SIDE ? -leg0Price : leg0Price;
+    spread += _shortSide[1] == BUY_SIDE ? -leg1Price : leg1Price;
+    spread += _shortSide[2] == BUY_SIDE ? -leg2Price : leg2Price;
+    spread += _shortSide[3] == BUY_SIDE ? -leg3Price : leg3Price;
+    return WindRate{
+        ._price  = {leg0Price, leg1Price, leg2Price, leg3Price},
+        ._spread = static_cast<float>(spread),
+    };
 }
 
 auto BoxSpreadStrategy::GetStrategyID() const -> uint32_t { return _strategyId; }
 auto BoxSpreadStrategy::GetGap() const -> int { return _gap; }
 
 auto BoxSpreadStrategy::GetLongTradedLots() const -> int {
-    return std::min({_longOrders._tradedLot[0], _longOrders._tradedLot[1], _longOrders._tradedLot[2], _longOrders._tradedLot[3]});
+    int leg0TradedPacks = _longOrders._tradedLot[0];
+    int leg1TradedPacks = _longOrders._tradedLot[1];
+    int leg2TradedPacks = _longOrders._tradedLot[2];
+    int leg3TradedPacks = _longOrders._tradedLot[3];
+    int totalPacks      = std::min({leg0TradedPacks, leg1TradedPacks, leg2TradedPacks, leg3TradedPacks});
+    return totalPacks;
 }
+
 auto BoxSpreadStrategy::GetShortTradedLots() const -> int {
-    return std::min({_shortOrders._tradedLot[0], _shortOrders._tradedLot[1], _shortOrders._tradedLot[2], _shortOrders._tradedLot[3]});
+    int leg0TradedPacks = _shortOrders._tradedLot[0];
+    int leg1TradedPacks = _shortOrders._tradedLot[1];
+    int leg2TradedPacks = _shortOrders._tradedLot[2];
+    int leg3TradedPacks = _shortOrders._tradedLot[3];
+    int totalPacks      = std::min({leg0TradedPacks, leg1TradedPacks, leg2TradedPacks, leg3TradedPacks});
+    return totalPacks;
 }
 
 auto BoxSpreadStrategy::GetBATP() const -> double {
-    if (_longOrders._tradedLot[0] == 0 || _longOrders._tradedLot[1] == 0 || _longOrders._tradedLot[2] == 0 || _longOrders._tradedLot[3] == 0 || _lotSize == 0) return 0.0;
-    double pOrderCe = static_cast<double>(_longOrders._tradeValue[0]) / static_cast<double>(_longOrders._tradedLot[0] * _lotSize);
-    double pOrderPe = static_cast<double>(_longOrders._tradeValue[1]) / static_cast<double>(_longOrders._tradedLot[1] * _lotSize);
-    double pAtmCe   = static_cast<double>(_longOrders._tradeValue[2]) / static_cast<double>(_longOrders._tradedLot[2] * _lotSize);
-    double pAtmPe   = static_cast<double>(_longOrders._tradeValue[3]) / static_cast<double>(_longOrders._tradedLot[3] * _lotSize);
+    uint64_t leg0TradedValue = _longOrders._tradeValue[0];
+    uint64_t leg1TradedValue = _longOrders._tradeValue[1];
+    uint64_t leg2TradedValue = _longOrders._tradeValue[2];
+    uint64_t leg3TradedValue = _longOrders._tradeValue[3];
+    uint64_t leg0TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[0]);
+    uint64_t leg1TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[1]);
+    uint64_t leg2TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[2]);
+    uint64_t leg3TradedLots  = static_cast<uint64_t>(_longOrders._tradedLot[3]);
 
-    return (pOrderCe - pOrderPe - pAtmCe + pAtmPe + _orderStrike - _atmStrike);
+    if (leg0TradedLots == 0 or leg1TradedLots == 0 or leg2TradedLots == 0 or leg3TradedLots == 0 or _lotSize == 0) {
+        return 0.0;
+    }
+    double leg0AveragePrice = static_cast<double>(leg0TradedValue) / static_cast<double>(leg0TradedLots * _lotSize);
+    double leg1AveragePrice = static_cast<double>(leg1TradedValue) / static_cast<double>(leg1TradedLots * _lotSize);
+    double leg2AveragePrice = static_cast<double>(leg2TradedValue) / static_cast<double>(leg2TradedLots * _lotSize);
+    double leg3AveragePrice = static_cast<double>(leg3TradedValue) / static_cast<double>(leg3TradedLots * _lotSize);
+    return leg0AveragePrice - leg1AveragePrice - leg2AveragePrice + leg3AveragePrice;
 }
 
 auto BoxSpreadStrategy::GetSATP() const -> double {
-    if (_shortOrders._tradedLot[0] == 0 || _shortOrders._tradedLot[1] == 0 || _shortOrders._tradedLot[2] == 0 || _shortOrders._tradedLot[3] == 0 || _lotSize == 0) return 0.0;
-    double pOrderCe = static_cast<double>(_shortOrders._tradeValue[0]) / static_cast<double>(_shortOrders._tradedLot[0] * _lotSize);
-    double pOrderPe = static_cast<double>(_shortOrders._tradeValue[1]) / static_cast<double>(_shortOrders._tradedLot[1] * _lotSize);
-    double pAtmCe   = static_cast<double>(_shortOrders._tradeValue[2]) / static_cast<double>(_shortOrders._tradedLot[2] * _lotSize);
-    double pAtmPe   = static_cast<double>(_shortOrders._tradeValue[3]) / static_cast<double>(_shortOrders._tradedLot[3] * _lotSize);
+    uint64_t leg0TradedValue = _shortOrders._tradeValue[0];
+    uint64_t leg1TradedValue = _shortOrders._tradeValue[1];
+    uint64_t leg2TradedValue = _shortOrders._tradeValue[2];
+    uint64_t leg3TradedValue = _shortOrders._tradeValue[3];
+    uint64_t leg0TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[0]);
+    uint64_t leg1TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[1]);
+    uint64_t leg2TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[2]);
+    uint64_t leg3TradedLots  = static_cast<uint64_t>(_shortOrders._tradedLot[3]);
 
-    return (-pOrderCe + pOrderPe + pAtmCe - pAtmPe - _orderStrike + _atmStrike);
+    if (leg0TradedLots == 0 or leg1TradedLots == 0 or leg2TradedLots == 0 or leg3TradedLots == 0 or _lotSize == 0) {
+        return 0.0;
+    }
+    double leg0AveragePrice = static_cast<double>(leg0TradedValue) / static_cast<double>(leg0TradedLots * _lotSize);
+    double leg1AveragePrice = static_cast<double>(leg1TradedValue) / static_cast<double>(leg1TradedLots * _lotSize);
+    double leg2AveragePrice = static_cast<double>(leg2TradedValue) / static_cast<double>(leg2TradedLots * _lotSize);
+    double leg3AveragePrice = static_cast<double>(leg3TradedValue) / static_cast<double>(leg3TradedLots * _lotSize);
+    return leg0AveragePrice - leg1AveragePrice - leg2AveragePrice + leg3AveragePrice;
 }
 
 auto BoxSpreadStrategy::GetRLP() const -> double {
     double totalRLP = 0.0;
-    // Fixed sides for Box Spread:
-    // Long Orders: Leg 0 (BUY), Leg 1 (SELL), Leg 2 (SELL), Leg 3 (BUY)
-    // Short Orders: Leg 0 (SELL), Leg 1 (BUY), Leg 2 (BUY), Leg 3 (SELL)
-    const ORDER_SIDE longSides[4] = {BUY_SIDE, SELL_SIDE, SELL_SIDE, BUY_SIDE};
-    const ORDER_SIDE shortSides[4] = {SELL_SIDE, BUY_SIDE, BUY_SIDE, SELL_SIDE};
-
     for (size_t i = 0; i < 4; ++i) {
         int64_t buyQty = 0;
         uint64_t buyVal = 0;
         int64_t sellQty = 0;
         uint64_t sellVal = 0;
 
-        if (longSides[i] == BUY_SIDE) {
+        if (_longSide[i] == BUY_SIDE) {
             buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
             buyVal += _longOrders._tradeValue[i];
         } else {
@@ -310,7 +367,7 @@ auto BoxSpreadStrategy::GetRLP() const -> double {
             sellVal += _longOrders._tradeValue[i];
         }
 
-        if (shortSides[i] == BUY_SIDE) {
+        if (_shortSide[i] == BUY_SIDE) {
             buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
             buyVal += _shortOrders._tradeValue[i];
         } else {
@@ -334,16 +391,13 @@ auto BoxSpreadStrategy::GetCutPL() const -> double { return GetRLP(); }
 
 auto BoxSpreadStrategy::GetM2M() const -> int {
     double totalM2M = 0.0;
-    const ORDER_SIDE longSides[4] = {BUY_SIDE, SELL_SIDE, SELL_SIDE, BUY_SIDE};
-    const ORDER_SIDE shortSides[4] = {SELL_SIDE, BUY_SIDE, BUY_SIDE, SELL_SIDE};
-
     for (size_t i = 0; i < 4; ++i) {
         int64_t buyQty = 0;
         uint64_t buyVal = 0;
         int64_t sellQty = 0;
         uint64_t sellVal = 0;
 
-        if (longSides[i] == BUY_SIDE) {
+        if (_longSide[i] == BUY_SIDE) {
             buyQty += static_cast<int64_t>(_longOrders._tradedLot[i]) * _lotSize;
             buyVal += _longOrders._tradeValue[i];
         } else {
@@ -351,7 +405,7 @@ auto BoxSpreadStrategy::GetM2M() const -> int {
             sellVal += _longOrders._tradeValue[i];
         }
 
-        if (shortSides[i] == BUY_SIDE) {
+        if (_shortSide[i] == BUY_SIDE) {
             buyQty += static_cast<int64_t>(_shortOrders._tradedLot[i]) * _lotSize;
             buyVal += _shortOrders._tradeValue[i];
         } else {
@@ -379,48 +433,67 @@ auto BoxSpreadStrategy::GetM2M() const -> int {
 }
 
 auto BoxSpreadStrategy::GetNetPL() const -> double { return GetRLP() + static_cast<double>(GetM2M()); }
-auto BoxSpreadStrategy::GetFLP() const -> int { return 0; }
-auto BoxSpreadStrategy::GetCost() const -> double { return 0.0; }
+auto BoxSpreadStrategy::GetFLP() const -> int { return _qoute[_biddingLeg].message.ltp_; }
+auto BoxSpreadStrategy::GetCost() const -> double {
+    std::array buyPrice = {
+        _qoute[0].message.bid_levels[0].price * (_isOption[0] ? OptionBuyCost : FutureBuyCost),
+        _qoute[1].message.bid_levels[0].price * (_isOption[1] ? OptionBuyCost : FutureBuyCost),
+        _qoute[2].message.bid_levels[0].price * (_isOption[2] ? OptionBuyCost : FutureBuyCost),
+        _qoute[3].message.bid_levels[0].price * (_isOption[3] ? OptionBuyCost : FutureBuyCost),
+    };
+    std::array sellPrice = {
+        _qoute[0].message.ask_levels[0].price * (_isOption[0] ? OptionSellCost : FutureSellCost),
+        _qoute[1].message.ask_levels[0].price * (_isOption[1] ? OptionSellCost : FutureSellCost),
+        _qoute[2].message.ask_levels[0].price * (_isOption[2] ? OptionSellCost : FutureSellCost),
+        _qoute[3].message.ask_levels[0].price * (_isOption[3] ? OptionSellCost : FutureSellCost),
+    };
+
+    double buyCost  = (static_cast<double>(buyPrice[0] + buyPrice[1] + buyPrice[2] + buyPrice[3]));
+    double sellCost = (static_cast<double>(sellPrice[0] + sellPrice[1] + sellPrice[2] + sellPrice[3]));
+    return (buyCost + sellCost);
+}
 
 void BoxSpreadStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_) {
-    size_t biddingLeg = (_qoute[4].message.ltp_ > _orderStrike) ? 0 : 1; // 0 = Order_CE, 1 = Order_PE
-
-    int biddingLots = object_._tradedLot[biddingLeg];
+    int biddingPacks = object_._tradedLot[_biddingLeg];
     for (size_t h = 0; h < 4; ++h) {
-        if (h == biddingLeg) continue;
-        if (biddingLots != object_._tradedLot[h]) {
+        if (h == _biddingLeg) continue;
+        int hedgePacks = object_._tradedLot[h];
+        if (biddingPacks != hedgePacks) {
             SecondOrderBidding(object_, param_);
             return;
         }
     }
 
-    if (biddingLots >= param_._totalQuantity) {
-        object_._order[biddingLeg]->cancel_order();
+    if ((param_._spread < rate_._spread) || (object_._tradedLot[_biddingLeg] >= param_._totalQuantity)) {
+        object_._order[_biddingLeg]->cancel_order();
         return;
     }
 
-    OrderObjectPtrT& order             = object_._order[biddingLeg];
-    int              marketPrice       = rate_._biddingPrice;
+    OrderObjectPtrT& order             = object_._order[_biddingLeg];
+    int              basePrice         = GetPrice(_qoute[_biddingLeg], order->get_side(), 0);
+    int              priceOffset       = _tradeGear * _tickSize;
+    int              marketPrice       = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
     int              currentPlacePrice = order->get_open_price();
+    int              diff              = std::abs(currentPlacePrice - marketPrice);
+    int              quantity          = param_._quantity * _lotSize;
 
-    if (marketPrice > 0 && marketPrice != currentPlacePrice) {
-        int quantity = param_._quantity * _lotSize;
-        auto status  = _ms->update_order(order, _tokens[biddingLeg], marketPrice, quantity, _uid);
+    if (diff >= static_cast<int>(_minTickChange * _tickSize)) {
+        if (quantity <= 0) return;
+        auto status = _ms->update_order(order, _tokens[_biddingLeg], marketPrice, quantity, _uid);
         if (status != 0) {
-            object_._uniqueID[biddingLeg] = _uid.id_;
-            object_._windRate             = rate_;
+            object_._uniqueID[_biddingLeg] = _uid.id_;
+            object_._windRate              = rate_;
         }
     }
 }
 
 void BoxSpreadStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots param_) {
-    size_t biddingLeg = (_qoute[4].message.ltp_ > _orderStrike) ? 0 : 1;
-    int    biddingLot = object_._tradedLot[biddingLeg];
+    int biddingPacks = object_._tradedLot[_biddingLeg];
 
     for (size_t leg = 0; leg < 4; ++leg) {
-        if (leg == biddingLeg) continue;
-        int hedgeLot = object_._tradedLot[leg];
-        int diff     = biddingLot - hedgeLot;
+        if (leg == _biddingLeg) continue;
+        int hedgePacks = object_._tradedLot[leg];
+        int diff       = biddingPacks - hedgePacks;
         if (diff <= 0) {
             object_._hedgeRetryCount = 0;
             continue;
@@ -461,4 +534,27 @@ void BoxSpreadStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
 }
 [[nodiscard]] auto BoxSpreadStrategy::GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int {
     return side_ == BUY_SIDE ? event_.message.bid_levels[index_].order_count_ : event_.message.ask_levels[index_].order_count_;
+}
+[[nodiscard]] auto BoxSpreadStrategy::GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int {
+    int quantity = 0;
+    for (size_t index = 0; index < depth_; ++index) {
+        quantity += GetQuantity(event_, side_, index);
+    }
+    return quantity;
+}
+[[nodiscard]] auto BoxSpreadStrategy::CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool {
+    int totalOrders = 0;
+    for (size_t index = 0; index < 5; ++index) {
+        totalOrders += GetOrderCount(event_, side_, index);
+    }
+    return static_cast<size_t>(totalOrders) >= depth_;
+}
+[[nodiscard]] auto BoxSpreadStrategy::CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool {
+    size_t validPriceLevels = 0;
+    for (size_t index = 0; index < 5; ++index) {
+        if (GetPrice(event_, side_, index) > 0) {
+            validPriceLevels++;
+        }
+    }
+    return validPriceLevels >= depth_;
 }

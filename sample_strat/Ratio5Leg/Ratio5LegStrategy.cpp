@@ -76,6 +76,13 @@ void Ratio5LegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _shortSide[i]  = info._side == SELL_SIDE ? BUY_SIDE : SELL_SIDE;
     }
 
+    if (json_.contains("Ratio") && json_["Ratio"].contains("LegRatios")) {
+        auto legRatiosJson = json_["Ratio"]["LegRatios"];
+        for (size_t i = 0; i < 5 && i < legRatiosJson.size(); ++i) {
+            _ratios[i] = legRatiosJson[i].get<int>();
+        }
+    }
+
     // ── Params ────────────────────────────────────────────────────────────────
     if (json_.contains("Params")) {
         const auto& parmas = json_["Params"];
@@ -139,7 +146,7 @@ void Ratio5LegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
             bool priceOk = CheckPriceDepth(_qoute[h], _priceDepth, hedgeSide);
 
             double thresholdPct = _thresholdQty > 0 ? _thresholdQty : 100.0;
-            double targetQty    = (param_._quantity * _lotSize) * (thresholdPct / 100.0);
+            double targetQty    = (param_._quantity * _ratios[h] * _lotSize) * (thresholdPct / 100.0);
             bool qtyOk          = GetAvailableQuantity(_qoute[h], _orderDepth, hedgeSide) >= targetQty;
 
             if (!orderOk || !priceOk || !qtyOk) {
@@ -186,10 +193,10 @@ void Ratio5LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
     auto checkSlippage = [&](MarketBidding& object_, const std::array<ORDER_SIDE, 5>& sides_) {
         if (traded && _allowedSlippage > 0 && 
-            object_._cycleTradedLot[0] == object_._cycleTradedLot[1] && 
-            object_._cycleTradedLot[1] == object_._cycleTradedLot[2] && 
-            object_._cycleTradedLot[2] == object_._cycleTradedLot[3] && 
-            object_._cycleTradedLot[3] == object_._cycleTradedLot[4] && 
+            (object_._cycleTradedLot[0] / _ratios[0] == object_._cycleTradedLot[1] / _ratios[1]) && 
+            (object_._cycleTradedLot[1] / _ratios[1] == object_._cycleTradedLot[2] / _ratios[2]) && 
+            (object_._cycleTradedLot[2] / _ratios[2] == object_._cycleTradedLot[3] / _ratios[3]) && 
+            (object_._cycleTradedLot[3] / _ratios[3] == object_._cycleTradedLot[4] / _ratios[4]) && 
             object_._cycleTradedLot[0] > 0) {
             
             bool expectedPricesOk = true;
@@ -210,9 +217,9 @@ void Ratio5LegStrategy::OnOrderResponse(const oms_transaction& resp_) {
                 ORDER_SIDE hedgeSide_ = sides_[i];
 
                 if (hedgeSide_ == BUY_SIDE) {
-                    slippage += (actualHedgePrice - expectedHedgePrice);
+                    slippage += (actualHedgePrice - expectedHedgePrice) * _ratios[i];
                 } else {
-                    slippage += (expectedHedgePrice - actualHedgePrice);
+                    slippage += (expectedHedgePrice - actualHedgePrice) * _ratios[i];
                 }
             }
 
@@ -266,11 +273,11 @@ auto Ratio5LegStrategy::GetBCmp() const -> WindRate {
     int leg3Price = GetPrice(_qoute[3], _shortSide[3], 0);
     int leg4Price = GetPrice(_qoute[4], _shortSide[4], 0);
     double spread = 0;
-    spread += _longSide[0] == BUY_SIDE ? -leg0Price : leg0Price;
-    spread += _longSide[1] == BUY_SIDE ? -leg1Price : leg1Price;
-    spread += _longSide[2] == BUY_SIDE ? -leg2Price : leg2Price;
-    spread += _longSide[3] == BUY_SIDE ? -leg3Price : leg3Price;
-    spread += _longSide[4] == BUY_SIDE ? -leg4Price : leg4Price;
+    spread += (_longSide[0] == BUY_SIDE ? -leg0Price : leg0Price) * _ratios[0];
+    spread += (_longSide[1] == BUY_SIDE ? -leg1Price : leg1Price) * _ratios[1];
+    spread += (_longSide[2] == BUY_SIDE ? -leg2Price : leg2Price) * _ratios[2];
+    spread += (_longSide[3] == BUY_SIDE ? -leg3Price : leg3Price) * _ratios[3];
+    spread += (_longSide[4] == BUY_SIDE ? -leg4Price : leg4Price) * _ratios[4];
     return WindRate{
         ._price  = {leg0Price, leg1Price, leg2Price, leg3Price, leg4Price},
         ._spread = static_cast<float>(spread),
@@ -284,11 +291,11 @@ auto Ratio5LegStrategy::GetSCmp() const -> WindRate {
     int leg3Price = GetPrice(_qoute[3], _longSide[3], 0);
     int leg4Price = GetPrice(_qoute[4], _longSide[4], 0);
     double spread = 0;
-    spread += _shortSide[0] == BUY_SIDE ? -leg0Price : leg0Price;
-    spread += _shortSide[1] == BUY_SIDE ? -leg1Price : leg1Price;
-    spread += _shortSide[2] == BUY_SIDE ? -leg2Price : leg2Price;
-    spread += _shortSide[3] == BUY_SIDE ? -leg3Price : leg3Price;
-    spread += _shortSide[4] == BUY_SIDE ? -leg4Price : leg4Price;
+    spread += (_shortSide[0] == BUY_SIDE ? -leg0Price : leg0Price) * _ratios[0];
+    spread += (_shortSide[1] == BUY_SIDE ? -leg1Price : leg1Price) * _ratios[1];
+    spread += (_shortSide[2] == BUY_SIDE ? -leg2Price : leg2Price) * _ratios[2];
+    spread += (_shortSide[3] == BUY_SIDE ? -leg3Price : leg3Price) * _ratios[3];
+    spread += (_shortSide[4] == BUY_SIDE ? -leg4Price : leg4Price) * _ratios[4];
     return WindRate{
         ._price  = {leg0Price, leg1Price, leg2Price, leg3Price, leg4Price},
         ._spread = static_cast<float>(spread),
@@ -299,21 +306,21 @@ auto Ratio5LegStrategy::GetStrategyID() const -> uint32_t { return _strategyId; 
 auto Ratio5LegStrategy::GetGap() const -> int { return _gap; }
 
 auto Ratio5LegStrategy::GetLongTradedLots() const -> int {
-    int leg0TradedPacks = _longOrders._tradedLot[0];
-    int leg1TradedPacks = _longOrders._tradedLot[1];
-    int leg2TradedPacks = _longOrders._tradedLot[2];
-    int leg3TradedPacks = _longOrders._tradedLot[3];
-    int leg4TradedPacks = _longOrders._tradedLot[4];
+    int leg0TradedPacks = _longOrders._tradedLot[0] / _ratios[0];
+    int leg1TradedPacks = _longOrders._tradedLot[1] / _ratios[1];
+    int leg2TradedPacks = _longOrders._tradedLot[2] / _ratios[2];
+    int leg3TradedPacks = _longOrders._tradedLot[3] / _ratios[3];
+    int leg4TradedPacks = _longOrders._tradedLot[4] / _ratios[4];
     int totalPacks      = std::min({leg0TradedPacks, leg1TradedPacks, leg2TradedPacks, leg3TradedPacks, leg4TradedPacks});
     return totalPacks;
 }
 
 auto Ratio5LegStrategy::GetShortTradedLots() const -> int {
-    int leg0TradedPacks = _shortOrders._tradedLot[0];
-    int leg1TradedPacks = _shortOrders._tradedLot[1];
-    int leg2TradedPacks = _shortOrders._tradedLot[2];
-    int leg3TradedPacks = _shortOrders._tradedLot[3];
-    int leg4TradedPacks = _shortOrders._tradedLot[4];
+    int leg0TradedPacks = _shortOrders._tradedLot[0] / _ratios[0];
+    int leg1TradedPacks = _shortOrders._tradedLot[1] / _ratios[1];
+    int leg2TradedPacks = _shortOrders._tradedLot[2] / _ratios[2];
+    int leg3TradedPacks = _shortOrders._tradedLot[3] / _ratios[3];
+    int leg4TradedPacks = _shortOrders._tradedLot[4] / _ratios[4];
     int totalPacks      = std::min({leg0TradedPacks, leg1TradedPacks, leg2TradedPacks, leg3TradedPacks, leg4TradedPacks});
     return totalPacks;
 }
@@ -469,17 +476,17 @@ auto Ratio5LegStrategy::GetCost() const -> double {
 }
 
 void Ratio5LegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_) {
-    int biddingPacks = object_._tradedLot[_biddingLeg];
+    int biddingPacks = object_._tradedLot[_biddingLeg] / _ratios[_biddingLeg];
     for (size_t h = 0; h < 5; ++h) {
         if (h == _biddingLeg) continue;
-        int hedgePacks = object_._tradedLot[h];
+        int hedgePacks = object_._tradedLot[h] / _ratios[h];
         if (biddingPacks != hedgePacks) {
             SecondOrderBidding(object_, param_);
             return;
         }
     }
 
-    if ((param_._spread < rate_._spread) || (object_._tradedLot[_biddingLeg] >= param_._totalQuantity)) {
+    if ((param_._spread < rate_._spread) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity * _ratios[_biddingLeg]))) {
         object_._order[_biddingLeg]->cancel_order();
         return;
     }
@@ -490,7 +497,7 @@ void Ratio5LegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots para
     int              marketPrice       = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
     int              currentPlacePrice = order->get_open_price();
     int              diff              = std::abs(currentPlacePrice - marketPrice);
-    int              quantity          = param_._quantity * _lotSize;
+    int              quantity          = param_._quantity * _ratios[_biddingLeg] * _lotSize;
 
     if (diff >= static_cast<int>(_minTickChange * _tickSize)) {
         if (quantity <= 0) return;
@@ -503,12 +510,13 @@ void Ratio5LegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots para
 }
 
 void Ratio5LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots param_) {
-    int biddingPacks = object_._tradedLot[_biddingLeg];
+    int biddingPacks = object_._tradedLot[_biddingLeg] / _ratios[_biddingLeg];
 
     for (size_t leg = 0; leg < 5; ++leg) {
         if (leg == _biddingLeg) continue;
-        int hedgePacks = object_._tradedLot[leg];
-        int diff       = biddingPacks - hedgePacks;
+        int hedgePacks = object_._tradedLot[leg] / _ratios[leg];
+        int targetHedgeLots = biddingPacks * _ratios[leg];
+        int diff            = targetHedgeLots - object_._tradedLot[leg];
         if (diff <= 0) {
             object_._hedgeRetryCount = 0;
             continue;
@@ -524,7 +532,8 @@ void Ratio5LegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots par
             return;
         }
 
-        int              quantity          = std::min(diff, param_._quantity) * _lotSize;
+        int              maxHedgeSlice     = param_._quantity * _ratios[leg];
+        int              quantity          = std::min(diff, maxHedgeSlice) * _lotSize;
         OrderObjectPtrT& order             = object_._order[leg];
         int              currentPlacePrice = order->get_open_price();
 

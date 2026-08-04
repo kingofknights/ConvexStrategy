@@ -22,16 +22,17 @@
 class MinixStrategy;
 
 class BoxSpreadStrategy {
-  private:
-    enum class BoxStrategyType {
-        CONVERSION = 1,
-        REVERSION  = 2
+    using OptionTypeT = aef::infra::product::OPTION_TYPE;
+
+    struct TokenInfo {
+        int        _token = 0;
+        ORDER_SIDE _side  = BUY_SIDE;
+        bool       _bid   = false;
     };
 
     struct WindRate {
-        int   _biddingPrice = 0;
-        float _windRate     = 0.0f;
-        bool  _valid        = false;
+        int   _price[4];
+        float _spread;
     };
 
     struct ParamLots {
@@ -41,10 +42,12 @@ class BoxSpreadStrategy {
     };
 
     struct MarketBidding {
-        OrderObjectPtrT _order[4];       // 0: Order_CE, 1: Order_PE, 2: ATM_CE, 3: ATM_PE
+        OrderObjectPtrT _order[4];
         uint32_t        _uniqueID[4]   = {0, 0, 0, 0};
         int32_t         _tradedLot[4]  = {0, 0, 0, 0};
         uint64_t        _tradeValue[4] = {0, 0, 0, 0};
+        int32_t         _cycleTradedLot[4]  = {0, 0, 0, 0};
+        uint64_t        _cycleTradeValue[4] = {0, 0, 0, 0};
         int32_t         _lastBiddingFillPrice = 0;
         size_t          _hedgeRetryCount = 0;
         WindRate        _windRate;
@@ -90,36 +93,44 @@ class BoxSpreadStrategy {
     [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
     [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
+    [[nodiscard]] auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int;
 
-    // Pure spread calculations directly from Documents.md
-    [[nodiscard]] auto CalculateConversionCallWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateReversionCallWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateConversionPutWindRate() const -> WindRate;
-    [[nodiscard]] auto CalculateReversionPutWindRate() const -> WindRate;
+    [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
+    [[nodiscard]] auto CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
 
   private:
     MinixStrategy* _ms;
     client_uid     _uid;
 
     uint32_t _strategyId;
-    bool     _active      = false;
-    int      _gap         = 0;
-    int      _lotSize     = 0;
-    int      _tickSize    = 0;
-    int      _orderStrike = 0;
-    int      _atmStrike   = 0;
+    bool     _active     = false;
+    int      _gap        = 0;
+    int      _lotSize    = 0;
+    int      _tickSize   = 0;
+    size_t   _biddingLeg = 0;
 
-    Quote _qoute[5]; // 0: Order_CE, 1: Order_PE, 2: ATM_CE, 3: ATM_PE, 4: FUT
-    std::array<int, 5> _tokens = {0, 0, 0, 0, 0};
+    Quote                     _qoute[4];
+    std::array<int, 4>        _tokens    = {0, 0, 0, 0};
+    std::array<bool, 4>       _isOption{false, false, false, false};
+    std::array<ORDER_SIDE, 4> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE, SELL_SIDE};
+    std::array<ORDER_SIDE, 4> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE, BUY_SIDE};
 
-    // Long Bidding = Conversion Box (Long Order_CE, Short Order_PE, Short ATM_CE, Long ATM_PE)
-    // Short Bidding = Reversion Box (Short Order_CE, Long Order_PE, Long ATM_CE, Short ATM_PE)
     MarketBidding _longOrders;
     MarketBidding _shortOrders;
 
-    ParamLots _longParam;  // Conversion box params
-    ParamLots _shortParam; // Reversion box params
+    // ── Params ────────────────────────────────────────────────────────────────
+    ParamLots _longParam;
+    ParamLots _shortParam;
 
+    size_t _minTickChange   = 0;
+    size_t _orderDepth      = 0;
+    size_t _priceDepth      = 0;
+    size_t _allowedBidDepth = 0;
+    int    _thresholdQty    = 0;
+    int    _allowedSlippage = 0;
+    int    _tradeGear       = 0;
     size_t _marketOrderRetries = 0;
-    bool   _isBidding           = false;
+
+    // ── Strategy meta ─────────────────────────────────────────────────────────
+    bool _isBidding = false;
 };

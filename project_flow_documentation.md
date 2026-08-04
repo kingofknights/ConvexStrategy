@@ -192,5 +192,26 @@ To prevent overnight option exposure, the system executes square-off safety prot
 
 ---
 
+---
+
+## 9. Ratio N-Leg (2-Leg to 6-Leg) Strategy Mathematics
+
+Ratio spread strategies operate on 2 to 6 legs where each leg is weighted by a per-leg ratio multiplier.
+
+### Real-Time Spread Calculations (Paise)
+* **Ratio Multipliers**: Leg ratios are parsed from the `"Ratio"` object (`"LegRatios"` array) in the JSON configuration.
+* **Spread formula**:
+  $$\text{Spread} = \sum_{i=0}^{N-1} \text{SideSign}_i \times \text{Price}_i \times \text{Ratio}_i$$
+  * Where $\text{SideSign}_i = -1$ if the execution side of the leg is `BUY_SIDE` and $+1$ if it is `SELL_SIDE`.
+  * For buying a spread (BCmp), the leg prices are evaluated at their ask prices for BUY sides, and bid prices for SELL sides. For selling a spread (SCmp), the leg prices are evaluated at their bid prices for BUY sides, and ask prices for SELL sides.
+
+### Quantity & Slippage Scaling
+* Bidding leg slice size: `param_._quantity * _ratios[_biddingLeg] * _lotSize`
+* Hedge leg target lots: `biddingPacks * _ratios[leg]` where `biddingPacks = tradedLot[_biddingLeg] / _ratios[_biddingLeg]`.
+* Slippage Cycle Completion Check: Verifies that normalized cycle quantities are equal: `_cycleTradedLot[i] / _ratios[i] == _cycleTradedLot[j] / _ratios[j]`.
+* Slippage Calculation: Accumulated slippage per leg is scaled by its corresponding ratio: $\text{slippage} = \sum (\text{actualHedgePrice} - \text{expectedHedgePrice}) \times \text{Ratio}_i$.
+
+---
+
 > [!WARNING]
 > If market data books are crossed ($\text{Bid} \ge \text{Ask}$), the strategy blocks trading updates (`booksReady()` returns false). This prevents the algorithm from executing trades on stale, single-sided, or invalid market feeds.

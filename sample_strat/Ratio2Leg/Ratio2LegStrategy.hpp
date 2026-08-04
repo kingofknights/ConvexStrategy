@@ -26,6 +26,7 @@ class Ratio2LegStrategy {
         int        _token = 0;
         ORDER_SIDE _side  = BUY_SIDE;
         bool       _bid   = false;
+        int        _ratio = 1;
     };
 
     struct WindRate {
@@ -117,6 +118,8 @@ class Ratio2LegStrategy {
     Quote                     _qoute[2];
     std::array<int, 2>        _tokens      = {0, 0};
     std::array<int, 2>        _tokensParam = {0, 0};
+    std::array<int, 2>        _ratios      = {1, 1};
+    std::array<int, 2>        _ratiosParam = {1, 1};
     std::array<bool, 2>       _isOption{false, false};
     std::array<ORDER_SIDE, 2> _longSide       = {BUY_SIDE, SELL_SIDE};
     std::array<ORDER_SIDE, 2> _shortSide      = {SELL_SIDE, BUY_SIDE};
