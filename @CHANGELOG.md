@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated `Ratio2Leg`, `Ratio3Leg`, `Ratio4Leg`, `Ratio5Leg`, and `Ratio6Leg` strategies into a single universal `RatioLegStrategy` class.
 - Parameterized the strategy by passing the dynamic number of legs in the constructor.
 - Replaced separate ratio maps and handler functions in `MinixStrategy` with unified ones.
+- Removed unused variable `hedgePacks` in `SecondOrderBidding` and simplified EOD clock setup in `MinixStrategy::OnTick`.
 
 ## [1.4.0] - 2026-08-04
 
