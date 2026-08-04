@@ -7,34 +7,30 @@
 #include "order_instance.hpp"
 #include "rms_api.hpp"
 #include "ui_api.hpp"
-#include <cstdio>
+
 #include <fmt/format.h>
+#include <cstdio>
+#include <vector>
+#include <string>
 
 // Algo
 #include "AlgoBase.hpp"
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <cstdint>
-#include <string>
-#include <vector>
-
 class MinixStrategy;
 
-class Ratio3LegStrategy {
+class RatioLegStrategy {
     using OptionTypeT = aef::infra::product::OPTION_TYPE;
 
     struct TokenInfo {
         int        _token = 0;
         ORDER_SIDE _side  = BUY_SIDE;
         bool       _bid   = false;
-        int        _ratio = 1;
     };
 
+  public:
     struct WindRate {
-        int   _price[3];
-        float _spread;
+        std::vector<int> _price;
+        float            _spread = 0.0f;
     };
 
     struct ParamLots {
@@ -44,22 +40,31 @@ class Ratio3LegStrategy {
     };
 
     struct MarketBidding {
-        OrderObjectPtrT _order[3];
-        uint32_t        _uniqueID[3]   = {0, 0, 0};
-        int32_t         _tradedLot[3]  = {0, 0, 0};
-        uint64_t        _tradeValue[3] = {0, 0, 0};
-        int32_t         _cycleTradedLot[3]  = {0, 0, 0};
-        uint64_t        _cycleTradeValue[3] = {0, 0, 0};
-        int32_t         _lastBiddingFillPrice = 0;
-        size_t          _hedgeRetryCount = 0;
-        WindRate        _windRate;
+        std::vector<OrderObjectPtrT> _order;
+        std::vector<uint32_t>        _uniqueID;
+        std::vector<int32_t>         _tradedLot;
+        std::vector<uint64_t>        _tradeValue;
+        std::vector<int32_t>         _cycleTradedLot;
+        std::vector<uint64_t>        _cycleTradeValue;
+        int32_t                      _lastBiddingFillPrice = 0;
+        size_t                       _hedgeRetryCount = 0;
+        WindRate                     _windRate;
+        
+        void resize(size_t n) {
+            _order.resize(n);
+            _uniqueID.assign(n, 0);
+            _tradedLot.assign(n, 0);
+            _tradeValue.assign(n, 0);
+            _cycleTradedLot.assign(n, 0);
+            _cycleTradeValue.assign(n, 0);
+            _windRate._price.assign(n, 0);
+        }
     };
 
-  public:
-    Ratio3LegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_);
-    ~Ratio3LegStrategy();
+    RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_, size_t numLegs_);
+    ~RatioLegStrategy();
 
-    template<typename... Args>
+    template <typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
         fmt::print(fmt_str, std::forward<Args>(args)...);
     }
@@ -105,22 +110,24 @@ class Ratio3LegStrategy {
     client_uid     _uid;
 
     uint32_t _strategyId;
-    bool     _active     = false;
-    int      _gap        = 0;
-    int      _lotSize    = 0;
-    int      _tickSize   = 0;
-    size_t   _biddingLeg = 0;
+    size_t   _numLegs;
+    bool     _active = false;
 
-    Quote                     _qoute[3];
-    std::array<int, 3>        _tokens    = {0, 0, 0};
-    std::array<int, 3>        _ratios    = {1, 1, 1};
-    std::array<int, 3>        _ratiosParam = {1, 1, 1};
-    std::array<bool, 3>       _isOption{false, false, false};
-    std::array<ORDER_SIDE, 3> _longSide  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
-    std::array<ORDER_SIDE, 3> _shortSide = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
-    std::array<int, 3>        _tokensParam = {0, 0, 0};
-    std::array<ORDER_SIDE, 3> _longSideParam  = {BUY_SIDE, SELL_SIDE, BUY_SIDE};
-    std::array<ORDER_SIDE, 3> _shortSideParam = {SELL_SIDE, BUY_SIDE, SELL_SIDE};
+    int    _gap        = 0;
+    int    _lotSize    = 0;
+    int    _tickSize   = 0;
+    size_t _biddingLeg = 0;
+
+    std::vector<Quote>       _qoute;
+    std::vector<int>         _tokens;
+    std::vector<int>         _tokensParam;
+    std::vector<int>         _ratios;
+    std::vector<int>         _ratiosParam;
+    std::vector<bool>        _isOption;
+    std::vector<ORDER_SIDE>  _longSide;
+    std::vector<ORDER_SIDE>  _shortSide;
+    std::vector<ORDER_SIDE>  _longSideParam;
+    std::vector<ORDER_SIDE>  _shortSideParam;
 
     MarketBidding _longOrders;
     MarketBidding _shortOrders;
@@ -129,13 +136,13 @@ class Ratio3LegStrategy {
     ParamLots _longParam;
     ParamLots _shortParam;
 
-    size_t _minTickChange   = 0;
-    size_t _orderDepth      = 0;
-    size_t _priceDepth      = 0;
-    size_t _allowedBidDepth = 0;
-    int    _thresholdQty    = 0;
-    int    _allowedSlippage = 0;
-    int    _tradeGear       = 0;
+    size_t _minTickChange      = 0;
+    size_t _orderDepth         = 0;
+    size_t _priceDepth         = 0;
+    size_t _allowedBidDepth    = 0;
+    int    _thresholdQty       = 0;
+    int    _allowedSlippage    = 0;
+    int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;
 
     // ── Strategy meta ─────────────────────────────────────────────────────────

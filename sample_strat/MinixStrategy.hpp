@@ -19,11 +19,7 @@
 #include <utility>
 #include <vector>
 
-class Ratio2LegStrategy;
-class Ratio3LegStrategy;
-class Ratio4LegStrategy;
-class Ratio5LegStrategy;
-class Ratio6LegStrategy;
+class RatioLegStrategy;
 class ButterflyStrategy;
 class ConversionReversalStrategy;
 class BoxSpreadStrategy;
@@ -32,11 +28,7 @@ class BoxSpreadStrategy;
  * @brief Strategy entry point loaded by the engine as libSampleAlgo.so.
  */
 class MinixStrategy : public AlgoBase {
-    friend class Ratio2LegStrategy;
-    friend class Ratio3LegStrategy;
-    friend class Ratio4LegStrategy;
-    friend class Ratio5LegStrategy;
-    friend class Ratio6LegStrategy;
+    friend class RatioLegStrategy;
     friend class ButterflyStrategy;
     friend class ConversionReversalStrategy;
     friend class BoxSpreadStrategy;
@@ -66,11 +58,7 @@ class MinixStrategy : public AlgoBase {
 
   private:
     void applyLegStrategyJson(const std::string& jsonText);
-    void handleRatio2LegStrategy(const nlohmann::json& root, const std::string& jsonText);
-    void handleRatio3LegStrategy(const nlohmann::json& root, const std::string& jsonText);
-    void handleRatio4LegStrategy(const nlohmann::json& root, const std::string& jsonText);
-    void handleRatio5LegStrategy(const nlohmann::json& root, const std::string& jsonText);
-    void handleRatio6LegStrategy(const nlohmann::json& root, const std::string& jsonText);
+    void handleRatioLegStrategy(const nlohmann::json& root, const std::string& jsonText, size_t numLegs);
     void handleButterflyStrategy(const nlohmann::json& root, const std::string& jsonText);
 
     // Once per ~1s, echo strategy updates back to the GUI.
@@ -89,11 +77,7 @@ class MinixStrategy : public AlgoBase {
     std::map<int32_t, std::pair<aef::infra::ui_cmd::StrategyDatafromui,
                                 std::vector<aef::infra::ui_cmd::TokenDatafromui>>>
         legStrategies_;
-    std::map<int32_t, Ratio2LegStrategy*> ratio2Strats_;
-    std::map<int32_t, Ratio3LegStrategy*> ratio3Strats_;
-    std::map<int32_t, Ratio4LegStrategy*> ratio4Strats_;
-    std::map<int32_t, Ratio5LegStrategy*> ratio5Strats_;
-    std::map<int32_t, Ratio6LegStrategy*> ratio6Strats_;
+    std::map<int32_t, RatioLegStrategy*> ratioStrats_;
     std::map<int32_t, ButterflyStrategy*> butterflyStrats_;
     std::map<int32_t, std::string>        strategyJson_;
     long long                             lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-04
+
+### Changed
+- Consolidated `Ratio2Leg`, `Ratio3Leg`, `Ratio4Leg`, `Ratio5Leg`, and `Ratio6Leg` strategies into a single universal `RatioLegStrategy` class.
+- Parameterized the strategy by passing the dynamic number of legs in the constructor.
+- Replaced separate ratio maps and handler functions in `MinixStrategy` with unified ones.
+
 ## [1.4.0] - 2026-08-04
 
 ### Added

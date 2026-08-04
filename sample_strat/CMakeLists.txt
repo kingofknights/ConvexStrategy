@@ -1,8 +1,4 @@
-add_library(SampleAlgo SHARED MinixStrategy.cpp Ratio2Leg/Ratio2LegStrategy.cpp
-                              Ratio3Leg/Ratio3LegStrategy.cpp
-                              Ratio4Leg/Ratio4LegStrategy.cpp
-                              Ratio5Leg/Ratio5LegStrategy.cpp
-                              Ratio6Leg/Ratio6LegStrategy.cpp
+add_library(SampleAlgo SHARED MinixStrategy.cpp RatioLeg/RatioLegStrategy.cpp
                               Butterfly/ButterflyStrategy.cpp
                               ConversionReversal/ConversionReversalStrategy.cpp
                               BoxSpread/BoxSpreadStrategy.cpp
@@ -17,11 +13,7 @@ set_target_properties(
 # find_package(fmt REQUIRED)
 
 target_include_directories(SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio2Leg
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio3Leg
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio4Leg
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio5Leg
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Ratio6Leg
+                                              ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg
                                               ${CMAKE_CURRENT_SOURCE_DIR}/Butterfly
                                               ${CMAKE_CURRENT_SOURCE_DIR}/ConversionReversal
                                               ${CMAKE_CURRENT_SOURCE_DIR}/BoxSpread
