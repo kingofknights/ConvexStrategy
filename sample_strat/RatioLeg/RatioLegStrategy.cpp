@@ -234,10 +234,10 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
             double slippage = 0.0;
             for (size_t i = 0; i < _numLegs; ++i) {
                 if (i == _biddingLeg) continue;
-                double legAveragePrice = static_cast<double>(object_._cycleTradeValue[i]) / (object_._cycleTradedLot[i] * _lotSize);
-                double expectedHedgePrice = object_._windRate._price[i];
-                double actualHedgePrice   = legAveragePrice;
-                ORDER_SIDE hedgeSide_ = sides_[i];
+                double     legAveragePrice    = static_cast<double>(object_._cycleTradeValue[i]) / (object_._cycleTradedLot[i] * _lotSize);
+                double     expectedHedgePrice = object_._windRate._price[i];
+                double     actualHedgePrice   = legAveragePrice;
+                ORDER_SIDE hedgeSide_         = sides_[i];
 
                 if (hedgeSide_ == BUY_SIDE) {
                     slippage += (actualHedgePrice - expectedHedgePrice) * _ratios[i];
@@ -248,7 +248,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
             // Reset cycle accumulators for the next cycle
             for (size_t i = 0; i < _numLegs; ++i) {
-                object_._cycleTradedLot[i] = 0;
+                object_._cycleTradedLot[i]  = 0;
                 object_._cycleTradeValue[i] = 0;
             }
 
@@ -445,14 +445,9 @@ auto RatioLegStrategy::GetNetPL() const -> double { return GetRLP() + static_cas
 auto RatioLegStrategy::GetFLP() const -> int { return _qoute[_biddingLeg].message.ltp_; }
 
 auto RatioLegStrategy::GetCost() const -> double {
-    constexpr static double OptionBuyCost  = 0.000060000000000000001;
-    constexpr static double OptionSellCost = 0.000070000000000000007;
-    constexpr static double FutureBuyCost  = 0.0;
-    constexpr static double FutureSellCost = 0.0;
-
     double totalCost = 0.0;
     for (size_t i = 0; i < _numLegs; ++i) {
-        double buyPrice = _qoute[i].message.bid_levels[0].price * (_isOption[i] ? OptionBuyCost : FutureBuyCost);
+        double buyPrice  = _qoute[i].message.bid_levels[0].price * (_isOption[i] ? OptionBuyCost : FutureBuyCost);
         double sellPrice = _qoute[i].message.ask_levels[0].price * (_isOption[i] ? OptionSellCost : FutureSellCost);
         totalCost += buyPrice + sellPrice;
     }
@@ -498,7 +493,6 @@ void RatioLegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots para
 
     for (size_t leg = 0; leg < _numLegs; ++leg) {
         if (leg == _biddingLeg) continue;
-        int hedgePacks = object_._tradedLot[leg] / _ratios[leg];
         int targetHedgeLots = biddingPacks * _ratios[leg];
         int diff            = targetHedgeLots - object_._tradedLot[leg];
         if (diff <= 0) {

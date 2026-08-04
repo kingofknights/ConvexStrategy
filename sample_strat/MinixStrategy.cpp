@@ -150,33 +150,22 @@ void MinixStrategy::applyLegStrategyJson(const std::string& jsonText) {
         int         strategyId = ljInt(strategy, "StrategyId", 0);
         std::cout << name << " " << status << " " << strategyId << std::endl;
 
-        if (name == "Ratio2" || name == "ratio2" || name == "RATIO2" ||
-            name == "Ratio 2 Leg" || name == "ratio 2 leg" ||
-            name == "Ratio2Leg" || name == "2LegRatio") {
+        if (name == "2LegRatio") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 2);
-        } else if (name == "Ratio3" || name == "ratio3" || name == "RATIO3" ||
-                   name == "Ratio 3 Leg" || name == "ratio 3 leg" ||
-                   name == "Ratio3Leg" || name == "3LegRatio") {
+        } else if (name == "3LegRatio") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 3);
-        } else if (name == "Ratio4" || name == "ratio4" || name == "RATIO4" ||
-                   name == "Ratio 4 Leg" || name == "ratio 4 leg" ||
-                   name == "Ratio4Leg" || name == "4LegRatio") {
+        } else if (name == "4LegRatio") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 4);
-        } else if (name == "Ratio5" || name == "ratio5" || name == "RATIO5" ||
-                   name == "Ratio 5 Leg" || name == "ratio 5 leg" ||
-                   name == "Ratio5Leg" || name == "5LegRatio") {
+        } else if (name == "5LegRatio") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 5);
-        } else if (name == "Ratio6" || name == "ratio6" || name == "RATIO6" ||
-                   name == "Ratio 6 Leg" || name == "ratio 6 leg" ||
-                   name == "Ratio6Leg" || name == "6LegRatio") {
+        } else if (name == "6LegRatio") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 6);
-        } else if (name == "Butterfly" || name == "butterfly" || name == "BUTTERFLY" ||
-                   name == "ButterflyStrategy" || name == "Fly") {
+        } else if (name == "Butterfly") {
             sendStatus(status, strategyId);
             handleButterflyStrategy(root, jsonText);
         }
@@ -359,26 +348,9 @@ void MinixStrategy::OnTick(const Quote& event) {
               event.header.product_id, event.header.sequence_no,
               event.header.exchange_timestamp, event.message.ltp_);
 
-    auto sodFrom = [](uint64_t ns) -> int64_t {
-        uint32_t    s  = static_cast<uint32_t>(ns / 1000000000ULL);
-        std::string tt = format_time(
-            static_cast<std::time_t>(aef::infra::GetUTCTimeFromNSETime(s)));
-        if (tt.size() >= 8 && tt >= "09:14:00" && tt <= "15:31:00")
-            return (static_cast<int64_t>((tt[0] - '0') * 36000 +
-                                         (tt[1] - '0') * 3600 + (tt[3] - '0') * 600 +
-                                         (tt[4] - '0') * 60 + (tt[6] - '0') * 10 +
-                                         (tt[7] - '0'))) *
-                   1000000000LL;
-        return -1;
-    };
-    int64_t clk = sodFrom(event.header.exchange_timestamp);
-    if (clk < 0)
-        clk = sodFrom(event.header.event_timestamp);
-    if (clk >= 0)
-        lastTickTs_ = clk;
-
-    for (auto& kv : ratioStrats_) kv.second->OnTick(event, lastTickTs_);
-    for (auto& kv : butterflyStrats_) kv.second->OnTick(event, lastTickTs_);
+    int64_t lastTickTs = 0;
+    for (auto& kv : ratioStrats_) kv.second->OnTick(event, lastTickTs);
+    for (auto& kv : butterflyStrats_) kv.second->OnTick(event, lastTickTs);
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
