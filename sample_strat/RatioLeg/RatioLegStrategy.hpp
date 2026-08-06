@@ -9,9 +9,10 @@
 #include "ui_api.hpp"
 
 #include <fmt/format.h>
+
 #include <cstdio>
-#include <vector>
 #include <string>
+#include <vector>
 
 // Algo
 #include "AlgoBase.hpp"
@@ -47,9 +48,9 @@ class RatioLegStrategy {
         std::vector<int32_t>         _cycleTradedLot;
         std::vector<uint64_t>        _cycleTradeValue;
         int32_t                      _lastBiddingFillPrice = 0;
-        size_t                       _hedgeRetryCount = 0;
+        size_t                       _hedgeRetryCount      = 0;
         WindRate                     _windRate;
-        
+
         void resize(size_t n) {
             _order.resize(n);
             _uniqueID.assign(n, 0);
@@ -77,7 +78,7 @@ class RatioLegStrategy {
 
     void OnOrderResponse(const oms_transaction& resp_);
 
-    void OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_);
+    void OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, int multiplier_, std::string name_);
 
     void SecondOrderBidding(MarketBidding& object_, ParamLots param_);
 
@@ -118,16 +119,16 @@ class RatioLegStrategy {
     int    _tickSize   = 0;
     size_t _biddingLeg = 0;
 
-    std::vector<Quote>       _qoute;
-    std::vector<int>         _tokens;
-    std::vector<int>         _tokensParam;
-    std::vector<int>         _ratios;
-    std::vector<int>         _ratiosParam;
-    std::vector<bool>        _isOption;
-    std::vector<ORDER_SIDE>  _longSide;
-    std::vector<ORDER_SIDE>  _shortSide;
-    std::vector<ORDER_SIDE>  _longSideParam;
-    std::vector<ORDER_SIDE>  _shortSideParam;
+    std::vector<Quote>      _qoute;
+    std::vector<int>        _tokens;
+    std::vector<int>        _tokensParam;
+    std::vector<int>        _ratios;
+    std::vector<int>        _ratiosParam;
+    std::vector<bool>       _isOption;
+    std::vector<ORDER_SIDE> _longSide;
+    std::vector<ORDER_SIDE> _shortSide;
+    std::vector<ORDER_SIDE> _longSideParam;
+    std::vector<ORDER_SIDE> _shortSideParam;
 
     MarketBidding _longOrders;
     MarketBidding _shortOrders;

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-08-06
+
+### Changed
+- Fixed `GetBATP()` and `GetSATP()` calculation in `RatioLegStrategy` to follow the same ratio-weighted and side-signed spread math as `BCmp`/`SCmp`.
+- Integrated multiplier in `OrderBiddingLogic` for correct long/short passive bidding logic.
+- Factored in leg ratios in transaction cost calculations.
+- Cleaned up redundant spread UI fields in `MinixStrategy` and reduced UI update interval to 1s.
+
 ## [1.5.0] - 2026-08-04
 
 ### Changed

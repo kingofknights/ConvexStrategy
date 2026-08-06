@@ -411,7 +411,7 @@ int  MinixStrategy::doWork() {
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
                    .count();
-    if (now - lastSpreadSendMs_ >= 5000) {
+    if (now - lastSpreadSendMs_ >= 1000) {
         lastSpreadSendMs_ = now;
         sendStrategySpreadsToUI();
     }
@@ -437,8 +437,6 @@ void MinixStrategy::sendStrategySpreadsToUI() {
         j["TrSpread"]   = static_cast<float>(ratio->GetRLP()) / 100.0F;
         j["B-ATP"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
         j["S-ATP"]      = static_cast<float>(ratio->GetSATP()) / 100.0F;
-        j["B-Buy"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
-        j["B-Sell"]     = static_cast<float>(ratio->GetSATP()) / 100.0F;
         sendJsonChunkedToUI(9612, j.dump());
     };
 

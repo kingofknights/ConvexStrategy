@@ -18,7 +18,9 @@ namespace execution_strat {
         //    myOrder_.packet_.flags_.order_type= ORDER_TYPE::IOC_ORDER_TYPE;
     }
     bool order_instance::is_response_pending() const {
-        if ((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_PLACED) & current_state_) || (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_) || (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)) {
+        if ((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_PLACED) & current_state_) ||
+            (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_) ||
+            (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)) {
             return true;
         }
         return false;

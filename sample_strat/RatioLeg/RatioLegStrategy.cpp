@@ -9,6 +9,7 @@
 #define FMT_HEADER_ONLY
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include <fmt/ranges.h>
 
 #include <algorithm>
 #include <cmath>
@@ -87,7 +88,6 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             ._bid   = bid,
         });
     }
-    _biddingLeg = std::min(_biddingLeg, _numLegs - 1);
 
     // ── Ratio (nested under "Ratio" object) ───────────────────────────────────
     for (size_t i = 0; i < _numLegs && i < legsInfo.size(); ++i) {
@@ -158,7 +158,7 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
         return;
     }
 
-    auto evaluateBidding = [&](MarketBidding& object_, ParamLots& param_, WindRate rate_, std::string name_) {
+    auto evaluateBidding = [&](MarketBidding& object_, ParamLots& param_, WindRate rate_, int multiplier_, std::string name_) {
         bool hedgeLegsOk = true;
         for (size_t h = 0; h < _numLegs; ++h) {
             if (h == _biddingLeg) continue;
@@ -180,14 +180,14 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
         bool       biddingLegOk = CheckPriceDepth(_qoute[_biddingLeg], _allowedBidDepth, mainSide);
 
         if (hedgeLegsOk && biddingLegOk) {
-            OrderBiddingLogic(object_, param_, rate_, name_);
+            OrderBiddingLogic(object_, param_, rate_, multiplier_, name_);
         } else {
             object_._order[_biddingLeg]->cancel_order();
         }
     };
 
-    evaluateBidding(_longOrders, _longParam, GetBCmp(), "Long");
-    evaluateBidding(_shortOrders, _shortParam, GetSCmp(), "Short");
+    evaluateBidding(_longOrders, _longParam, GetBCmp(), 1, "Long");
+    evaluateBidding(_shortOrders, _shortParam, GetSCmp(), -1, "Short");
 }
 
 void RatioLegStrategy::OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_) {}
@@ -298,6 +298,8 @@ auto RatioLegStrategy::GetBCmp() const -> WindRate {
     for (size_t i = 0; i < _numLegs; ++i) {
         spread += (_longSide[i] == BUY_SIDE ? -prices[i] : prices[i]) * _ratios[i];
     }
+
+    fmt::print("{} port {} {} prices [{}] ratio [{}] _bid {}\n", __FUNCTION__, _strategyId, _numLegs, prices, _ratios, _biddingLeg);
     return WindRate{
         ._price  = prices,
         ._spread = static_cast<float>(spread),
@@ -313,6 +315,8 @@ auto RatioLegStrategy::GetSCmp() const -> WindRate {
     for (size_t i = 0; i < _numLegs; ++i) {
         spread += (_shortSide[i] == BUY_SIDE ? -prices[i] : prices[i]) * _ratios[i];
     }
+    fmt::print("{} port {} {} prices [{}] ratio [{}] _bid {}\n", __FUNCTION__, _strategyId, _numLegs, prices, _ratios, _biddingLeg);
+
     return WindRate{
         ._price  = prices,
         ._spread = static_cast<float>(spread),
@@ -341,23 +345,31 @@ auto RatioLegStrategy::GetShortTradedLots() const -> int {
 }
 
 auto RatioLegStrategy::GetBATP() const -> double {
-    double totalBATP = 0.0;
     for (size_t i = 0; i < _numLegs; ++i) {
-        if (_longOrders._tradedLot[i] > 0) {
-            totalBATP += static_cast<double>(_longOrders._tradeValue[i]) / (_longOrders._tradedLot[i] * _lotSize);
+        if (_longOrders._tradedLot[i] == 0) {
+            return 0.0;
         }
     }
-    return totalBATP;
+    double spread = 0.0;
+    for (size_t i = 0; i < _numLegs; ++i) {
+        double avgPrice = static_cast<double>(_longOrders._tradeValue[i]) / (_longOrders._tradedLot[i] * _lotSize);
+        spread += (_longSide[i] == BUY_SIDE ? -avgPrice : avgPrice) * _ratios[i];
+    }
+    return spread;
 }
 
 auto RatioLegStrategy::GetSATP() const -> double {
-    double totalSATP = 0.0;
     for (size_t i = 0; i < _numLegs; ++i) {
-        if (_shortOrders._tradedLot[i] > 0) {
-            totalSATP += static_cast<double>(_shortOrders._tradeValue[i]) / (_shortOrders._tradedLot[i] * _lotSize);
+        if (_shortOrders._tradedLot[i] == 0) {
+            return 0.0;
         }
     }
-    return totalSATP;
+    double spread = 0.0;
+    for (size_t i = 0; i < _numLegs; ++i) {
+        double avgPrice = static_cast<double>(_shortOrders._tradeValue[i]) / (_shortOrders._tradedLot[i] * _lotSize);
+        spread += (_shortSide[i] == BUY_SIDE ? -avgPrice : avgPrice) * _ratios[i];
+    }
+    return spread;
 }
 
 auto RatioLegStrategy::GetRLP() const -> double {
@@ -447,14 +459,14 @@ auto RatioLegStrategy::GetFLP() const -> int { return _qoute[_biddingLeg].messag
 auto RatioLegStrategy::GetCost() const -> double {
     double totalCost = 0.0;
     for (size_t i = 0; i < _numLegs; ++i) {
-        double buyPrice  = _qoute[i].message.bid_levels[0].price * (_isOption[i] ? OptionBuyCost : FutureBuyCost);
-        double sellPrice = _qoute[i].message.ask_levels[0].price * (_isOption[i] ? OptionSellCost : FutureSellCost);
+        double buyPrice  = _qoute[i].message.bid_levels[0].price * _ratios[i] * (_isOption[i] ? OptionBuyCost : FutureBuyCost);
+        double sellPrice = _qoute[i].message.ask_levels[0].price * _ratios[i] * (_isOption[i] ? OptionSellCost : FutureSellCost);
         totalCost += buyPrice + sellPrice;
     }
     return totalCost;
 }
 
-void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, std::string name_) {
+void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param_, WindRate rate_, int multiplier_, std::string name_) {
     int biddingPacks = object_._tradedLot[_biddingLeg] / _ratios[_biddingLeg];
     for (size_t h = 0; h < _numLegs; ++h) {
         if (h == _biddingLeg) continue;
@@ -465,7 +477,8 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param
         }
     }
 
-    if ((param_._spread < rate_._spread) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity * _ratios[_biddingLeg]))) {
+    fmt::print("{} Leg {} bid {} param {} market{} \n", __FUNCTION__, _numLegs, _biddingLeg, param_._spread, rate_._spread);
+    if (((param_._spread * multiplier_) < (rate_._spread * multiplier_)) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity * _ratios[_biddingLeg]))) {
         object_._order[_biddingLeg]->cancel_order();
         return;
     }
