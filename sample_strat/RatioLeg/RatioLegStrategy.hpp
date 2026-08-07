@@ -148,4 +148,6 @@ class RatioLegStrategy {
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;
+
+    TradeTracer _tracer;
 };

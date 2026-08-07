@@ -65,6 +65,7 @@ class MinixStrategy : public AlgoBase {
     void sendStrategySpreadsToUI();
     // GUI framing: one metadata packet {"packet_count":N,...} then N 1500-byte chunks.
     void sendJsonChunkedToUI(int32_t message_code, const std::string& payload);
+    void sendTradeTracerToUI(const TradeTracer& tracer_);
 
     struct JsonReassembly {
         int         expected = 0;      // packet_count from the metadata header
@@ -76,8 +77,8 @@ class MinixStrategy : public AlgoBase {
 
     std::map<int32_t, std::pair<aef::infra::ui_cmd::StrategyDatafromui,
                                 std::vector<aef::infra::ui_cmd::TokenDatafromui>>>
-        legStrategies_;
-    std::map<int32_t, RatioLegStrategy*> ratioStrats_;
+                                          legStrategies_;
+    std::map<int32_t, RatioLegStrategy*>  ratioStrats_;
     std::map<int32_t, ButterflyStrategy*> butterflyStrats_;
     std::map<int32_t, std::string>        strategyJson_;
     long long                             lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI

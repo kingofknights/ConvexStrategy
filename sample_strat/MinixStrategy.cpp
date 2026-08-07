@@ -721,6 +721,17 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, std::str
     std::memcpy(ui.message, &response, sizeof(response));
     sentoUI(ui);
 }
+void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_) {
+    aef::infra::ui_cmd::UIStruct ui{};
+    ui.header.message_code   = 9956;
+    ui.header.interface_id   = 22;
+    ui.header.message_length = 1520;
+    ui.header.component_id   = 1;
+    ui.header.timestamp      = 0;
+    std::memset(ui.message, 0, sizeof(ui.message));
+    std::memcpy(ui.message, &tracer_, sizeof(tracer_));
+    sentoUI(ui);
+}
 /**
  * @brief Cancel an order if eligible and notify portfolio manager.
  */
