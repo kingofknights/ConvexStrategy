@@ -29,9 +29,6 @@ class BoxSpreadStrategy;
  */
 class MinixStrategy : public AlgoBase {
     friend class RatioLegStrategy;
-    friend class ButterflyStrategy;
-    friend class ConversionReversalStrategy;
-    friend class BoxSpreadStrategy;
 
   public:
     MinixStrategy(AlgoBase::ContextHandle context);
@@ -77,11 +74,10 @@ class MinixStrategy : public AlgoBase {
 
     std::map<int32_t, std::pair<aef::infra::ui_cmd::StrategyDatafromui,
                                 std::vector<aef::infra::ui_cmd::TokenDatafromui>>>
-                                          legStrategies_;
-    std::map<int32_t, RatioLegStrategy*>  ratioStrats_;
-    std::map<int32_t, ButterflyStrategy*> butterflyStrats_;
-    std::map<int32_t, std::string>        strategyJson_;
-    long long                             lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI
+                                         legStrategies_;
+    std::map<int32_t, RatioLegStrategy*> ratioStrats_;
+    std::map<int32_t, std::string>       strategyJson_;
+    long long                            lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI
 
     // Order context shared with the box via update_order/cancel_order.
     execution_strat::PortfolioOrderManager portfolio_mgr_;

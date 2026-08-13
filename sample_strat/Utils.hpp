@@ -15,7 +15,7 @@ constexpr static double FutureSellCost = 0.000522774;
 
 #pragma pack(push, 1)
 struct TradeTracer {
-    int      _time;
+    uint64_t _time;
     uint64_t _orderId;
     uint32_t _strategyId;
     int      _side;

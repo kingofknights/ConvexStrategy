@@ -54,6 +54,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
     for (size_t i = 0; i < _numLegs; ++i) {
         _ms->getProductDetails(_tokens[i], details[i]);
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
+        std::memset(_tracer._symbol, '\0', 11);
         std::memcpy(_tracer._symbol, details[i].symbol, 11);
     }
 
@@ -135,12 +136,12 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
             "\nTickSize: {}, \nOrderDepth: {}, \nPriceDepth: {}, \nAllowedBidDepth: {}, "
-            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nTradeGear: {}, \nMarketOrderRetries: {}\n",
+            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nTradeGear: {}, \nMarketOrderRetries: {}\n, _biddingLeg: {}",
             _strategyId,
             _longParam._quantity, _longParam._totalQuantity, _longParam._spread,
             _shortParam._quantity, _shortParam._totalQuantity, _shortParam._spread,
             _minTickChange, _orderDepth, _priceDepth, _allowedBidDepth,
-            _thresholdQty, _allowedSlippage, _tradeGear, _marketOrderRetries);
+            _thresholdQty, _allowedSlippage, _tradeGear, _marketOrderRetries, _biddingLeg);
     }
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
@@ -226,10 +227,11 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
     auto checkSlippage = [&](MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, const std::string& sideName, int sideOfPack_) {
         if (traded && object_._cycleTradedLot[0] > 0) {
-            bool allEqual    = true;
-            int  firstLegLot = object_._cycleTradedLot[0] / _ratios[0];
-            for (size_t i = 1; i < _numLegs; ++i) {
-                if (firstLegLot != (object_._cycleTradedLot[i] / _ratios[i])) {
+            int firstLegLot = object_._cycleTradedLot[0] / _ratios[0];
+            if (firstLegLot <= 0) return;
+            bool allEqual = true;
+            for (size_t i = 0; i < _numLegs; ++i) {
+                if (object_._cycleTradedLot[i] != firstLegLot * _ratios[i]) {
                     allEqual = false;
                     break;
                 }
@@ -249,10 +251,11 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
             float slippage     = 0.0;
             for (size_t i = 0; i < _numLegs; ++i) {
                 float legAveragePrice = static_cast<float>(object_._cycleTradeValue[i]) / (object_._cycleTradedLot[i] * _lotSize);
-                writeLog("[SLIPPAGE {}Leg] Trade Value: {}, Traded Lot: {}, Lot Size: {}, Leg Average Price: {}\n",
-                         i, object_._cycleTradeValue[i], object_._cycleTradedLot[i], _lotSize, legAveragePrice);
+                writeLog("[SLIPPAGE {}Leg]  [strategy = {}] [leg = {}]  Trade Value: {}, Traded Lot: {}, Lot Size: {}, Leg Average Price: {}\n",
+                         _numLegs, _strategyId, i, object_._cycleTradeValue[i], object_._cycleTradedLot[i], _lotSize, legAveragePrice);
                 tradedSpread += (sides_[i] == BUY_SIDE ? -legAveragePrice : legAveragePrice) * _ratios[i];
             }
+
             _tracer._orderId      = resp_.packet_.exchange_order_id;
             _tracer._time         = resp_.hdr_.exchange_timestamp;
             _tracer._qtyRemaining = 0;
@@ -261,8 +264,10 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
             _tracer._price        = param_._spread / 100.0F;
             _tracer._ltp          = static_cast<float>(tradedSpread) / 100.0F;
             _tracer._ltq          = object_._cycleTradedLot[0] / _ratios[0];
-            _tracer._slippage     = (sideOfPack_ == BUY_SIDE ? 1.0 : -1.0) * ((param_._spread - tradedSpread) / 100.0F);
+            _tracer._slippage     = (param_._spread - tradedSpread) / 100.0F;
 
+            writeLog("Tracer [{}Leg] symbol {}  strategyId {} orderId {} time {} qtyRemaining {} side {} price {} ltp {} ltq {} slippage {}\n",
+                     _numLegs, _tracer._symbol, _strategyId, _tracer._orderId, _tracer._time, _tracer._qtyRemaining, sideOfPack_, _tracer._price, _tracer._ltp, _tracer._ltq, _tracer._slippage);
             slippage = _tracer._slippage;
             _ms->sendTradeTracerToUI(_tracer);
             for (size_t i = 0; i < _numLegs; ++i) {
@@ -506,7 +511,10 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param
     int              marketPrice       = order->get_side() == BUY_SIDE ? (basePrice + priceOffset) : (basePrice - priceOffset);
     int              currentPlacePrice = order->get_open_price();
     int              diff              = std::abs(currentPlacePrice - marketPrice);
-    int              quantity          = param_._quantity * _ratios[_biddingLeg] * _lotSize;
+    int              quantity          = param_._quantity * _ratios[_biddingLeg];
+    int              remainQty         = param_._totalQuantity - object_._tradedLot[_biddingLeg];
+
+    quantity = std::min(quantity, remainQty) * _lotSize;
 
     if (diff >= static_cast<int>(_minTickChange * _tickSize)) {
         if (quantity <= 0) return;

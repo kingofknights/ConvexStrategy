@@ -167,7 +167,7 @@ void MinixStrategy::applyLegStrategyJson(const std::string& jsonText) {
             handleRatioLegStrategy(root, jsonText, 6);
         } else if (name == "Butterfly") {
             sendStatus(status, strategyId);
-            handleButterflyStrategy(root, jsonText);
+            handleRatioLegStrategy(root, jsonText, 3);
         }
 
     } catch (const std::exception& e) {
@@ -205,33 +205,6 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
     }
 }
 
-void MinixStrategy::handleButterflyStrategy(const nlohmann::json& root, const std::string& jsonText) {
-    try {
-        auto strategy             = root["Strategy"];
-        auto status               = strategy["Status"].get<std::string>();
-        int  strategyID           = strategy["StrategyId"].get<int>();
-        strategyJson_[strategyID] = jsonText;
-        if (status == "Subscribed") {
-            auto iterator = butterflyStrats_.find(strategyID);
-            if (iterator == butterflyStrats_.end()) {
-                butterflyStrats_[strategyID] = new ButterflyStrategy(this, strategyID, root);
-            }
-        } else if (status == "Applied") {
-            auto iterator = butterflyStrats_.find(strategyID);
-            if (iterator != butterflyStrats_.end()) {
-                iterator->second->ParamUpdate(root);
-            }
-        } else if (status == "Unsubscribed" || status == "Cancelled") {
-            auto iterator = butterflyStrats_.find(strategyID);
-            if (iterator != butterflyStrats_.end()) {
-                delete iterator->second;
-                butterflyStrats_.erase(iterator);
-            }
-        }
-    } catch (const std::exception& e) {
-        std::cout << "[handleButterflyStrategy] failed: " << e.what() << std::endl;
-    }
-}
 /**
  * @brief Initialize strategy configuration, subscriptions, and order handles.
  */
@@ -278,46 +251,12 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
         } catch (const std::exception&) { /* skip non-numeric lines */
         }
     }
-
-    // SIM/test hook: optionally inject box strategies from a JSON file so the
-    // simulator can exercise applyLegStrategyJson without the UI/connector
-    // pipeline. Set "LegStrategy_json" in order_info.json (a single doc or a JSON
-    // array of docs).
-    std::string legJsonFile = root.get<std::string>("LegStrategy_json", "");
-    if (!legJsonFile.empty()) {
-        std::ifstream lf(legJsonFile);
-        if (lf) {
-            std::stringstream ss;
-            ss << lf.rdbuf();
-            std::string content = ss.str();
-            try {
-                json parsed = json::parse(content);
-                if (parsed.is_array()) {
-                    std::cout << "[SIM] injecting " << parsed.size()
-                              << " leg strategies from " << legJsonFile << std::endl;
-                    for (auto& el : parsed)
-                        applyLegStrategyJson(el.dump());
-                } else {
-                    std::cout << "[SIM] injecting leg strategy from " << legJsonFile
-                              << std::endl;
-                    applyLegStrategyJson(content);
-                }
-            } catch (const std::exception& e) {
-                std::cout << "[SIM] LegStrategy_json parse error: " << e.what()
-                          << std::endl;
-            }
-        } else
-            std::cout << "[SIM] LegStrategy_json file not found: " << legJsonFile
-                      << std::endl;
-    }
 }
 
 MinixStrategy::~MinixStrategy() {
     log_info("sample_strat : destructor");
     for (auto& kv : ratioStrats_) delete kv.second;
-    for (auto& kv : butterflyStrats_) delete kv.second;
     ratioStrats_.clear();
-    butterflyStrats_.clear();
 }
 
 bool MinixStrategy::subscribeProduct(const int32_t  product_id,
@@ -350,7 +289,6 @@ void MinixStrategy::OnTick(const Quote& event) {
 
     int64_t lastTickTs = 0;
     for (auto& kv : ratioStrats_) kv.second->OnTick(event, lastTickTs);
-    for (auto& kv : butterflyStrats_) kv.second->OnTick(event, lastTickTs);
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
@@ -390,7 +328,6 @@ static const char* omsSideName(int s) {
 
 void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
     for (auto& kv : ratioStrats_) kv.second->OnOrderResponse(order_resp);
-    for (auto& kv : butterflyStrats_) kv.second->OnOrderResponse(order_resp);
 
     LOG_DEBUG(
         "[ORDER] RECV %-18s token=%d side=%-4s qty=%d price=%d uid=%d "
@@ -441,7 +378,6 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     };
 
     for (auto& kv : ratioStrats_) sendRatioUI(kv.second);
-    for (auto& kv : butterflyStrats_) sendRatioUI(kv.second);
 }
 
 void MinixStrategy::sendJsonChunkedToUI(int32_t            message_code,
@@ -498,7 +434,6 @@ void MinixStrategy::onBcastData(
                 1000000000LL;
     }
     for (auto& kv : ratioStrats_) kv.second->OnBcast(product_details_, lastTickTs_);
-    for (auto& kv : butterflyStrats_) kv.second->OnBcast(product_details_, lastTickTs_);
 }
 
 /**

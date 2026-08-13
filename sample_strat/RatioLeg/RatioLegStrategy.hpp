@@ -114,10 +114,10 @@ class RatioLegStrategy {
     size_t   _numLegs;
     bool     _active = false;
 
-    int    _gap        = 0;
-    int    _lotSize    = 0;
-    int    _tickSize   = 0;
-    size_t _biddingLeg = 0;
+    int             _gap        = 0;
+    int             _lotSize    = 0;
+    int             _tickSize   = 0;
+    volatile size_t _biddingLeg = 0;
 
     std::vector<Quote>      _qoute;
     std::vector<int>        _tokens;

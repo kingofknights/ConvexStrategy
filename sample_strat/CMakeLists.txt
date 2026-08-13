@@ -1,9 +1,5 @@
 add_library(SampleAlgo SHARED MinixStrategy.cpp RatioLeg/RatioLegStrategy.cpp
-                              Butterfly/ButterflyStrategy.cpp
-                              ConversionReversal/ConversionReversalStrategy.cpp
-                              BoxSpread/BoxSpreadStrategy.cpp
-                              order_instance.cpp
-                              PortfolioOrderManager.cpp)
+                              order_instance.cpp PortfolioOrderManager.cpp)
 
 set_target_properties(
   SampleAlgo
@@ -12,12 +8,9 @@ set_target_properties(
              ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # find_package(fmt REQUIRED)
 
-target_include_directories(SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/Butterfly
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/ConversionReversal
-                                              ${CMAKE_CURRENT_SOURCE_DIR}/BoxSpread
-                                              ${PROJECT_SOURCE_DIR})
+target_include_directories(
+  SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg ${PROJECT_SOURCE_DIR})
 
 # target_link_libraries(SampleAlgo AlgoBase #                   fmt::fmt
 # -static-libstdc++)
