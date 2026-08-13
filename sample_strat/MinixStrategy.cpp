@@ -4,7 +4,6 @@
  */
 #include "MinixStrategy.hpp"
 
-#include "Butterfly/ButterflyStrategy.hpp"
 #include "RatioLegStrategy.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
@@ -15,15 +14,6 @@
 #include <boost/program_options/options_description.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
-
-#include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <iostream>
-#include <regex>
-#include <sstream>
-#include <string>
-#include <thread>
 
 using json = nlohmann::json;
 
@@ -36,11 +26,6 @@ namespace pt = boost::property_tree;
 using namespace std::string_literals;
 
 using json = nlohmann::json;
-std::unordered_map<std::string, double> parameterStorage_global;
-std::unordered_map<std::string, double> parameterStorage_token;
-
-std::unordered_map<uint32_t, int32_t>
-    interface_map;  // Interface map to store interface ids
 
 /**
  * @brief Convert nanosecond timestamp to human readable UTC string.
@@ -65,26 +50,31 @@ std::string toLower(const std::string& s) {
 }
 
 // Convert to uppercase (for comparison)
-static int64_t ljInt(const json& o, const char* k, int64_t def = 0) {
-    if (!o.contains(k) || o[k].is_null())
-        return def;
-    const auto& v = o[k];
-    if (v.is_number_integer())
-        return v.get<int64_t>();
-    if (v.is_number_unsigned())
-        return static_cast<int64_t>(v.get<uint64_t>());
-    if (v.is_number_float())
-        return static_cast<int64_t>(v.get<double>());
-    if (v.is_boolean())
-        return v.get<bool>() ? 1 : 0;
-    if (v.is_string()) {
+static int64_t ljInt(const json& json_, const char* key_, int64_t default_ = 0) {
+    if (!json_.contains(key_) || json_[key_].is_null()) {
+        return default_;
+    }
+    const auto& value = json_[key_];
+    if (value.is_number_integer()) {
+        return value.get<int64_t>();
+    }
+    if (value.is_number_unsigned()) {
+        return static_cast<int64_t>(value.get<uint64_t>());
+    }
+    if (value.is_number_float()) {
+        return static_cast<int64_t>(value.get<double>());
+    }
+    if (value.is_boolean()) {
+        return value.get<bool>() ? 1 : 0;
+    }
+    if (value.is_string()) {
         try {
-            return std::stoll(v.get<std::string>());
+            return std::stoll(value.get<std::string>());
         } catch (...) {
-            return def;
+            return default_;
         }
     }
-    return def;
+    return default_;
 }
 static double ljDouble(const json& o, const char* k, double def = 0.0) {
     if (!o.contains(k) || o[k].is_null())
@@ -168,6 +158,12 @@ void MinixStrategy::applyLegStrategyJson(const std::string& jsonText) {
         } else if (name == "Butterfly") {
             sendStatus(status, strategyId);
             handleRatioLegStrategy(root, jsonText, 3);
+        } else if (name == "Box") {
+            sendStatus(status, strategyId);
+            handleRatioLegStrategy(root, jsonText, 4);
+        } else if (name == "ConRev") {
+            sendStatus(status, strategyId);
+            handleRatioLegStrategy(root, jsonText, 3);
         }
 
     } catch (const std::exception& e) {
@@ -179,9 +175,9 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
                                            const std::string&    jsonText,
                                            size_t                numLegs) {
     try {
-        auto strategy             = root["Strategy"];
-        auto status               = strategy["Status"].get<std::string>();
-        int  strategyID           = strategy["StrategyId"].get<int>();
+        auto     strategy         = root["Strategy"];
+        auto     status           = strategy["Status"].get<std::string>();
+        uint32_t strategyID       = strategy["StrategyId"].get<uint32_t>();
         strategyJson_[strategyID] = jsonText;
         if (status == "Subscribed") {
             auto iterator = ratioStrats_.find(strategyID);
@@ -218,24 +214,24 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
     auto is = openStream(config_file.c_str());
     pt::read_json(is, root);
 
-    client = root.get<int32_t>("client");
-    algoid = root.get<int32_t>("algoid");
-    omsid  = root.get<int32_t>("omsid");
+    _client = root.get<int32_t>("client");
+    _algoid = root.get<int32_t>("algoid");
+    _omsid  = root.get<int32_t>("omsid");
 
     std::cout << std::fixed << std::setprecision(2);
 
     // Market-data event flags requested per token: TER + MBP depth + OI + TBT.
-    flags = static_cast<uint16_t>(
-                aef::infra::product::SNAPSHOT_FLAGS::TER_UPDATE_EVENT) |
-            static_cast<uint16_t>(
-                aef::infra::product::SNAPSHOT_FLAGS::MBP_UPDATE_EVENT) |
-            static_cast<uint16_t>(
-                aef::infra::product::SNAPSHOT_FLAGS::OI_UPDATE_EVENT) |
-            static_cast<uint16_t>(
-                aef::infra::product::SNAPSHOT_FLAGS::TBT_UPDATE_EVENT);
+    _flags = static_cast<uint16_t>(
+                 aef::infra::product::SNAPSHOT_FLAGS::TER_UPDATE_EVENT) |
+             static_cast<uint16_t>(
+                 aef::infra::product::SNAPSHOT_FLAGS::MBP_UPDATE_EVENT) |
+             static_cast<uint16_t>(
+                 aef::infra::product::SNAPSHOT_FLAGS::OI_UPDATE_EVENT) |
+             static_cast<uint16_t>(
+                 aef::infra::product::SNAPSHOT_FLAGS::TBT_UPDATE_EVENT);
 
-    std::cout << "Algo for Box Strategy with client ID : " << client << std::endl;
-    clientUID.composite_id_.client_id   = client;
+    std::cout << "Algo for Box Strategy with client ID : " << _client << std::endl;
+    clientUID.composite_id_.client_id   = _client;
     clientUID.composite_id_.strategy_id = 1;
 
     // Subscribe any tokens listed up front in bcast.csv (one token id per line)
@@ -247,7 +243,7 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
         if (line_subtok.empty())
             continue;
         try {
-            subscribeProduct(std::stoi(line_subtok), flags);
+            subscribeProduct(std::stoi(line_subtok), _flags);
         } catch (const std::exception&) { /* skip non-numeric lines */
         }
     }
@@ -427,13 +423,13 @@ void MinixStrategy::onBcastData(
                          315513000;
         std::string tt = format_time(bt);
         if (tt.size() >= 8 && tt >= "09:14:00" && tt <= "15:31:00")
-            lastTickTs_ =
+            _lastTickTs =
                 (static_cast<int64_t>((tt[0] - '0') * 36000 + (tt[1] - '0') * 3600 +
                                       (tt[3] - '0') * 600 + (tt[4] - '0') * 60 +
                                       (tt[6] - '0') * 10 + (tt[7] - '0'))) *
                 1000000000LL;
     }
-    for (auto& kv : ratioStrats_) kv.second->OnBcast(product_details_, lastTickTs_);
+    for (auto& kv : ratioStrats_) kv.second->OnBcast(product_details_, _lastTickTs);
 }
 
 /**

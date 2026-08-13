@@ -74,10 +74,10 @@ class MinixStrategy : public AlgoBase {
 
     std::map<int32_t, std::pair<aef::infra::ui_cmd::StrategyDatafromui,
                                 std::vector<aef::infra::ui_cmd::TokenDatafromui>>>
-                                         legStrategies_;
-    std::map<int32_t, RatioLegStrategy*> ratioStrats_;
-    std::map<int32_t, std::string>       strategyJson_;
-    long long                            lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI
+                                          legStrategies_;
+    std::map<uint32_t, RatioLegStrategy*> ratioStrats_;
+    std::map<uint32_t, std::string>       strategyJson_;
+    long long                             lastSpreadSendMs_ = 0;  // last time BCmp/SCmp were pushed to the GUI
 
     // Order context shared with the box via update_order/cancel_order.
     execution_strat::PortfolioOrderManager portfolio_mgr_;
@@ -85,10 +85,7 @@ class MinixStrategy : public AlgoBase {
     int                                    requestId        = 0;
     uint64_t                               event_timestamp_ = 0, trigger_timestamp_ = 0;
 
-    uint16_t flags  = 0;                         // market-data event flags requested per token
-    int32_t  client = 0, algoid = 0, omsid = 0;  // ids from config (order routing)
-    // Authoritative timer clock for the boxes: a clean synthetic ns clock derived in
-    // OnTick (market-hours filtered); onBcastData forwards the same cached value so the
-    // two feed paths never mix epochs. 0 until the first OnTick (the box ignores <=0).
-    int64_t lastTickTs_ = 0;  // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
+    uint16_t _flags  = 0;                           // market-data event flags requested per token
+    int32_t  _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
+    int64_t  _lastTickTs = 0;                       // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
 };

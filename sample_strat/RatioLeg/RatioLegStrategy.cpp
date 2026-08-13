@@ -36,7 +36,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
     _shortOrders.resize(_numLegs);
 
     ParamUpdate(json_);
-    _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->client);
+    _uid.composite_id_.client_id   = static_cast<uint32_t>(_ms->_client);
     _uid.composite_id_.strategy_id = _strategyId;
 
     for (size_t i = 0; i < _numLegs; ++i) {
@@ -47,7 +47,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
     }
 
     for (int token : _tokens) {
-        _ms->subscribeProduct(token, _ms->flags);
+        _ms->subscribeProduct(token, _ms->_flags);
     }
 
     std::vector<ProductDetails> details(_numLegs);
@@ -63,8 +63,8 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
     _tickSize = details[0].tick_size_;
 
     for (size_t i = 0; i < _numLegs; ++i) {
-        _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], _longSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
-        _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], _shortSide[i], _lotSize, _ms->client, _ms->algoid, _ms->omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+        _longOrders._order[i]  = std::make_unique<OrderObjectT>(_tokens[i], _longSide[i], _lotSize, _ms->_client, _ms->_algoid, _ms->_omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
+        _shortOrders._order[i] = std::make_unique<OrderObjectT>(_tokens[i], _shortSide[i], _lotSize, _ms->_client, _ms->_algoid, _ms->_omsid, ORDER_TYPE::LIMIT_ORDER_TYPE, _ms);
     }
 }
 
