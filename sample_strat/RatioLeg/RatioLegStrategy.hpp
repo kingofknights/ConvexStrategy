@@ -67,10 +67,12 @@ class RatioLegStrategy {
 
     template <typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
-        fmt::print(fmt_str, std::forward<Args>(args)...);
+        std::cout << fmt::format(fmt_str, std::forward<Args>(args)...) << std::endl;
     }
 
     void ParamUpdate(const nlohmann::json& json_);
+
+    void Stop();
 
     void OnTick(const Quote& event_, int64_t nowTs_);
 
@@ -96,6 +98,8 @@ class RatioLegStrategy {
     [[nodiscard]] auto GetCutPL() const -> double;
     [[nodiscard]] auto GetNetPL() const -> double;
     [[nodiscard]] auto GetM2M() const -> int;
+    [[nodiscard]] auto IsActive() const -> bool;
+    [[nodiscard]] auto IsStopped() const -> bool;
 
   protected:
     [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;

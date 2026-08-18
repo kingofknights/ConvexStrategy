@@ -188,10 +188,20 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
                 iterator->second->ParamUpdate(root);
+            } else {
+                auto strat               = new RatioLegStrategy(this, strategyID, root, numLegs);
+                ratioStrats_[strategyID] = strat;
+                strat->ParamUpdate(root);
             }
-        } else if (status == "Unsubscribed" || status == "Cancelled") {
+        } else if (status == "Unsubscribed") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
+                iterator->second->Stop();
+            }
+        } else if (status == "Cancelled" || status == "Deleted") {
+            auto iterator = ratioStrats_.find(strategyID);
+            if (iterator != ratioStrats_.end()) {
+                iterator->second->Stop();
                 delete iterator->second;
                 ratioStrats_.erase(iterator);
             }
@@ -284,7 +294,12 @@ void MinixStrategy::OnTick(const Quote& event) {
               event.header.exchange_timestamp, event.message.ltp_);
 
     int64_t lastTickTs = 0;
-    for (auto& kv : ratioStrats_) kv.second->OnTick(event, lastTickTs);
+    for (auto& kv : ratioStrats_) {
+        kv.second->OnTick(event, lastTickTs);
+        if (kv.second->IsStopped()) {
+            kv.second->Stop();
+        }
+    }
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
@@ -335,12 +350,17 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
         order_resp.hdr_.uid_.composite_id_.request_id,
         order_resp.hdr_.error_code, order_resp.hdr_.reason_code);
 
-    portfolio_mgr_.on_order_response(order_resp);
+    // ponytail: query product details to identify options vs futures
+    ProductDetails details;
+    bool           is_option = false;
+    if (getProductDetails(order_resp.packet_.product_id_, details)) {
+        is_option = details.opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
+    }
+
+    portfolio_mgr_.on_order_response(order_resp, is_option);
 }
 
-int  count       = 0;
-bool orderPlaced = 0;
-int  MinixStrategy::doWork() {
+int MinixStrategy::doWork() {
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
                    .count();
@@ -348,7 +368,26 @@ int  MinixStrategy::doWork() {
         lastSpreadSendMs_ = now;
         sendStrategySpreadsToUI();
     }
+
+    if (!_strategiesToTerminate.empty()) {
+        for (int strategyId : _strategiesToTerminate) {
+            auto it = ratioStrats_.find(static_cast<uint32_t>(strategyId));
+            if (it != ratioStrats_.end()) {
+                nlohmann::json response;
+                response["Status"]     = "Unsubscribed";
+                response["StrategyId"] = strategyId;
+                sendJsonChunkedToUI(9621, response.dump());
+
+                it->second->Stop();
+            }
+        }
+        _strategiesToTerminate.clear();
+    }
     return 0;
+}
+
+void MinixStrategy::Registerfortermination(int strategyId) {
+    _strategiesToTerminate.push_back(strategyId);
 }
 
 void MinixStrategy::sendStrategySpreadsToUI() {
@@ -364,9 +403,9 @@ void MinixStrategy::sendStrategySpreadsToUI() {
         j["B-TrQ"]      = ratio->GetLongTradedLots();
         j["S-TrQ"]      = ratio->GetShortTradedLots();
         j["M2M"]        = static_cast<float>(ratio->GetM2M()) / 100.0F;
-        j["Net P/L"]    = static_cast<float>(ratio->GetNetPL()) / 100.0F;
+        j["NLP"]        = static_cast<float>(ratio->GetNetPL()) / 100.0F;
         j["RLP"]        = static_cast<float>(ratio->GetRLP()) / 100.0F;
-        j["Cut P/L"]    = static_cast<float>(ratio->GetCutPL()) / 100.0F;
+        j["CLP"]        = static_cast<float>(ratio->GetCutPL()) / 100.0F;
         j["TrSpread"]   = static_cast<float>(ratio->GetRLP()) / 100.0F;
         j["B-ATP"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
         j["S-ATP"]      = static_cast<float>(ratio->GetSATP()) / 100.0F;
@@ -653,6 +692,7 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, std::str
     sentoUI(ui);
 }
 void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_) {
+    std::cout << __FUNCTION__ << std::endl;
     aef::infra::ui_cmd::UIStruct ui{};
     ui.header.message_code   = 9956;
     ui.header.interface_id   = 22;

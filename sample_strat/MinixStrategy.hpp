@@ -52,6 +52,7 @@ class MinixStrategy : public AlgoBase {
     bool unSubscribeProduct(const int32_t product_id, const uint16_t flags);
 
     void sendOrderResponse(const oms_transaction& response_, std::string name_);
+    void Registerfortermination(int strategyId);
 
   private:
     void applyLegStrategyJson(const std::string& jsonText);
@@ -88,4 +89,5 @@ class MinixStrategy : public AlgoBase {
     uint16_t _flags  = 0;                           // market-data event flags requested per token
     int32_t  _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
     int64_t  _lastTickTs = 0;                       // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
+    std::vector<int> _strategiesToTerminate;
 };

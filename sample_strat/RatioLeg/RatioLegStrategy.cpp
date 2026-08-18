@@ -56,6 +56,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
         std::memset(_tracer._symbol, '\0', 11);
         std::memcpy(_tracer._symbol, details[i].symbol, 11);
+        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {}", _strategyId, i, _tokens[i], _tracer._symbol);
     }
 
     _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
@@ -149,7 +150,23 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         const auto& strategy = json_["Strategy"];
         _isBidding           = strategy.value("IsBidding", false);
         std::string status   = strategy.value("Status", "None");
-        _active              = status == "Applied";
+        if (status == "Applied") {
+            _active = true;
+        } else if (status == "Unsubscribed") {
+            Stop();
+        }
+    }
+}
+
+void RatioLegStrategy::Stop() {
+    _active = false;
+    for (size_t i = 0; i < _numLegs; ++i) {
+        if (_longOrders._order[i]) {
+            _longOrders._order[i]->cancel_order();
+        }
+        if (_shortOrders._order[i]) {
+            _shortOrders._order[i]->cancel_order();
+        }
     }
 }
 
@@ -277,11 +294,8 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
 
             if (_allowedSlippage > 0 && slippage > _allowedSlippage) {
                 writeLog("[SLIPPAGE {}Leg] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", _numLegs, slippage, _allowedSlippage);
-                _active = false;
-                for (size_t i = 0; i < _numLegs; ++i) {
-                    _longOrders._order[i]->cancel_order();
-                    _shortOrders._order[i]->cancel_order();
-                }
+                Stop();
+                _ms->Registerfortermination(_strategyId);
             }
         }
     };
@@ -396,7 +410,8 @@ auto RatioLegStrategy::GetSATP() const -> double {
 }
 
 auto RatioLegStrategy::GetRLP() const -> double {
-    double totalRLP = 0.0;
+    double totalRLP  = 0.0;
+    double totalCost = 0.0;
     for (size_t i = 0; i < _numLegs; ++i) {
         int64_t  buyQty  = 0;
         uint64_t buyVal  = 0;
@@ -427,8 +442,13 @@ auto RatioLegStrategy::GetRLP() const -> double {
         } else {
             totalRLP += static_cast<double>(buyQty) * (avgSellPrice - avgBuyPrice);
         }
+
+        // ponytail: calculate transaction cost on actual traded value (paise)
+        double buyCostCoeff  = _isOption[i] ? OptionBuyCost : FutureBuyCost;
+        double sellCostCoeff = _isOption[i] ? OptionSellCost : FutureSellCost;
+        totalCost += (static_cast<double>(buyVal) * buyCostCoeff) + (static_cast<double>(sellVal) * sellCostCoeff);
     }
-    return totalRLP;
+    return totalRLP - totalCost;
 }
 
 auto RatioLegStrategy::GetCutPL() const -> double { return GetRLP(); }
@@ -500,7 +520,7 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param
         }
     }
 
-    if ((param_._spread > rate_._spread) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity * _ratios[_biddingLeg]))) {
+    if ((param_._spread > rate_._spread) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity))) {
         object_._order[_biddingLeg]->cancel_order();
         return;
     }
@@ -561,6 +581,7 @@ void RatioLegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots para
         if (marketPrice > 0 && marketPrice != currentPlacePrice) {
             auto status = _ms->update_order(order, _tokens[leg], marketPrice, quantity, _uid);
             if (status != 0) {
+                writeLog("SecondOrderBidding [{}LegRatio] [._index = {}, ._tokens = {}, ._price = {}, ._quantity = {}]", _numLegs, leg, _tokens[leg], marketPrice, quantity);
                 object_._uniqueID[leg] = _uid.id_;
                 object_._hedgeRetryCount++;
             }
@@ -613,4 +634,12 @@ auto RatioLegStrategy::CheckPriceDepth(const Quote& event_, size_t depth_, ORDER
         }
     }
     return true;
+}
+
+auto RatioLegStrategy::IsActive() const -> bool {
+    return _active;
+}
+
+auto RatioLegStrategy::IsStopped() const -> bool {
+    return !_active;
 }

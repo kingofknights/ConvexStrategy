@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] - 2026-08-18
+
+### Added
+- Implemented strategy stop and resume feature via GUI `Status` field (`Unsubscribed` status pauses strategy execution, cancels active leg orders, and retains strategy state; `Applied` status resumes strategy execution and updates parameters).
+- Added `RatioLegStrategy::Stop()` method to safely halt strategy tick evaluation and cancel active orders.
+- Added `RatioLegStrategy::IsActive()` and `RatioLegStrategy::IsStopped()` getter methods to query strategy operational status.
+- Added `Registerfortermination()` mechanism in `MinixStrategy` to trigger strategy self-termination upon slippage breach and dispatch status update code 9621 (`Unsubscribed`) to GUI.
+
+### Changed
+- Updated transaction cost calculation in `PortfolioOrderManager` and `RatioLegStrategy::GetRLP()` to differentiate between option and future contracts.
+- Renamed UI broadcast spread keys in `MinixStrategy::sendStrategySpreadsToUI` (`Net P/L` -> `NLP`, `Cut P/L` -> `CLP`).
+
+## [1.5.5] - 2026-08-17
+
+### Changed
+- Deducted transaction costs from strategy-level realized P&L (`RatioLegStrategy::GetRLP()`) and portfolio token realized P&L (`PortfolioOrderManager::on_trade()`) using option-specific (`OptionBuyCost`/`OptionSellCost`) and future-specific (`FutureBuyCost`/`FutureSellCost`) multipliers based on actual traded value.
+
 ## [1.5.4] - 2026-08-13
 
 ### Changed
