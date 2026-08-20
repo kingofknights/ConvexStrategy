@@ -10,6 +10,7 @@
 
 #include <fmt/format.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -62,13 +63,15 @@ class RatioLegStrategy {
         }
     };
 
-    RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_, size_t numLegs_);
+    RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t numLegs_);
     ~RatioLegStrategy();
 
     template <typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str, Args&&... args) const {
         std::cout << fmt::format(fmt_str, std::forward<Args>(args)...) << std::endl;
     }
+
+    void Print();
 
     void ParamUpdate(const nlohmann::json& json_);
 
@@ -84,6 +87,7 @@ class RatioLegStrategy {
 
     void SecondOrderBidding(MarketBidding& object_, ParamLots param_);
 
+    [[nodiscard]] auto GetInterface() const -> int32_t;
     [[nodiscard]] auto GetStrategyID() const -> uint32_t;
     [[nodiscard]] auto GetGap() const -> int;
     [[nodiscard]] auto GetCost() const -> double;
@@ -115,6 +119,7 @@ class RatioLegStrategy {
     client_uid     _uid;
 
     uint32_t _strategyId;
+    int32_t  _interface;
     size_t   _numLegs;
     bool     _active = false;
 

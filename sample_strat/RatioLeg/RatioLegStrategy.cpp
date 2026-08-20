@@ -20,8 +20,8 @@
 #include <memory>
 #include <string>
 
-RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, const nlohmann::json& json_, size_t numLegs_)
-    : _ms(ms_), _strategyId(strategyId_), _numLegs(numLegs_) {
+RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t numLegs_)
+    : _ms(ms_), _strategyId(strategyId_), _interface(interface_), _numLegs(numLegs_) {
     _qoute.resize(_numLegs);
     _tokens.assign(_numLegs, 0);
     _tokensParam.assign(_numLegs, 0);
@@ -56,7 +56,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, con
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
         std::memset(_tracer._symbol, '\0', 11);
         std::memcpy(_tracer._symbol, details[i].symbol, 11);
-        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {}", _strategyId, i, _tokens[i], _tracer._symbol);
+        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], _tracer._symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
     }
 
     _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_) / 100;
@@ -137,7 +137,7 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
             "\nTickSize: {}, \nOrderDepth: {}, \nPriceDepth: {}, \nAllowedBidDepth: {}, "
-            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nTradeGear: {}, \nMarketOrderRetries: {}\n, _biddingLeg: {}",
+            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nTradeGear: {}, \nMarketOrderRetries: {}\n, _biddingLeg: {}\n",
             _strategyId,
             _longParam._quantity, _longParam._totalQuantity, _longParam._spread,
             _shortParam._quantity, _shortParam._totalQuantity, _shortParam._spread,
@@ -214,6 +214,7 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
             OrderBiddingLogic(object_, param_, rate_, multiplier_, name_);
         } else {
             object_._order[_biddingLeg]->cancel_order();
+            writeLog("evaluateBidding {} StragegyId: {} [.hedgeLegsOk = {}, biddingLegOk = {}\n", _numLegs, _strategyId, hedgeLegsOk, biddingLegOk);
         }
     };
 
@@ -227,7 +228,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     if (_strategyId != resp_.hdr_.uid_.composite_id_.strategy_id) {
         return;
     }
-    _ms->sendOrderResponse(resp_, std::to_string(_numLegs) + "LegRatio");
+    _ms->sendOrderResponse(resp_, _interface, std::to_string(_numLegs) + "LegRatio");
     bool traded   = resp_.hdr_.transaction_code == OMS_TRADE;
     auto price    = resp_.packet_.price_;
     auto quantity = resp_.packet_.quantity_;
@@ -286,7 +287,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
             writeLog("Tracer [{}Leg] symbol {}  strategyId {} orderId {} time {} qtyRemaining {} side {} price {} ltp {} ltq {} slippage {}\n",
                      _numLegs, _tracer._symbol, _strategyId, _tracer._orderId, _tracer._time, _tracer._qtyRemaining, sideOfPack_, _tracer._price, _tracer._ltp, _tracer._ltq, _tracer._slippage);
             slippage = _tracer._slippage;
-            _ms->sendTradeTracerToUI(_tracer);
+            _ms->sendTradeTracerToUI(_tracer, _interface);
             for (size_t i = 0; i < _numLegs; ++i) {
                 object_._cycleTradedLot[i]  = 0;
                 object_._cycleTradeValue[i] = 0;
@@ -361,6 +362,7 @@ auto RatioLegStrategy::GetSCmp() const -> WindRate {
 }
 
 auto RatioLegStrategy::GetStrategyID() const -> uint32_t { return _strategyId; }
+auto RatioLegStrategy::GetInterface() const -> int32_t { return _interface; }
 auto RatioLegStrategy::GetGap() const -> int { return _gap; }
 
 auto RatioLegStrategy::GetLongTradedLots() const -> int {
@@ -522,6 +524,7 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param
 
     if ((param_._spread > rate_._spread) || (object_._tradedLot[_biddingLeg] >= (param_._totalQuantity))) {
         object_._order[_biddingLeg]->cancel_order();
+        writeLog("[RatioLeg] {} StragegyId: {} user spread > market spread {} > {}", _numLegs, _strategyId, param_._spread, rate_._spread);
         return;
     }
 
@@ -544,6 +547,8 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, ParamLots param
                      __FUNCTION__, _strategyId, param_._spread, rate_._spread, multiplier_, name_, marketPrice);
             object_._uniqueID[_biddingLeg] = _uid.id_;
             object_._windRate              = rate_;
+        } else {
+            writeLog("[RatioLeg] {} StragegyId: {} failed to place order [._status = {}, ._price = {}, ._quantity = {}]", _numLegs, _strategyId, status, marketPrice, quantity);
         }
     }
 }
@@ -581,7 +586,7 @@ void RatioLegStrategy::SecondOrderBidding(MarketBidding& object_, ParamLots para
         if (marketPrice > 0 && marketPrice != currentPlacePrice) {
             auto status = _ms->update_order(order, _tokens[leg], marketPrice, quantity, _uid);
             if (status != 0) {
-                writeLog("SecondOrderBidding [{}LegRatio] [._index = {}, ._tokens = {}, ._price = {}, ._quantity = {}]", _numLegs, leg, _tokens[leg], marketPrice, quantity);
+                writeLog("SecondOrderBidding [{}LegRatio] [._index = {}, ._tokens = {}, ._price = {}, ._quantity = {}]\n", _numLegs, leg, _tokens[leg], marketPrice, quantity);
                 object_._uniqueID[leg] = _uid.id_;
                 object_._hedgeRetryCount++;
             }
@@ -642,4 +647,11 @@ auto RatioLegStrategy::IsActive() const -> bool {
 
 auto RatioLegStrategy::IsStopped() const -> bool {
     return !_active;
+}
+
+void RatioLegStrategy::Print() {
+    writeLog("------------------- Ratio StragegyId: {}", _strategyId);
+    for (size_t index = 0; index < _numLegs; ++index) {
+        writeLog("token {} Buy [._price = {}] Sell [._price = {}]", _tokens[index], int(_qoute[index].message.bid_levels[0].price), int(_qoute[index].message.ask_levels[0].price));
+    }
 }

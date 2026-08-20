@@ -51,19 +51,18 @@ class MinixStrategy : public AlgoBase {
     bool subscribeProduct(const int32_t product_id, const uint16_t flags);
     bool unSubscribeProduct(const int32_t product_id, const uint16_t flags);
 
-    void sendOrderResponse(const oms_transaction& response_, std::string name_);
+    void sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string name_);
     void Registerfortermination(int strategyId);
 
   private:
-    void applyLegStrategyJson(const std::string& jsonText);
-    void handleRatioLegStrategy(const nlohmann::json& root, const std::string& jsonText, size_t numLegs);
-    void handleButterflyStrategy(const nlohmann::json& root, const std::string& jsonText);
+    void applyLegStrategyJson(int32_t interface_, const std::string& jsonText);
+    void handleRatioLegStrategy(const nlohmann::json& root, const std::string& jsonText, size_t numLegs, int32_t interface_);
 
     // Once per ~1s, echo strategy updates back to the GUI.
     void sendStrategySpreadsToUI();
     // GUI framing: one metadata packet {"packet_count":N,...} then N 1500-byte chunks.
-    void sendJsonChunkedToUI(int32_t message_code, const std::string& payload);
-    void sendTradeTracerToUI(const TradeTracer& tracer_);
+    void sendJsonChunkedToUI(int32_t message_code, int32_t interface_, const std::string& payload);
+    void sendTradeTracerToUI(const TradeTracer& tracer_, int32_t interface_);
 
     struct JsonReassembly {
         int         expected = 0;      // packet_count from the metadata header
@@ -86,8 +85,8 @@ class MinixStrategy : public AlgoBase {
     int                                    requestId        = 0;
     uint64_t                               event_timestamp_ = 0, trigger_timestamp_ = 0;
 
-    uint16_t _flags  = 0;                           // market-data event flags requested per token
-    int32_t  _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
-    int64_t  _lastTickTs = 0;                       // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
+    uint16_t         _flags  = 0;                           // market-data event flags requested per token
+    int32_t          _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
+    int64_t          _lastTickTs = 0;                       // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
     std::vector<int> _strategiesToTerminate;
 };
