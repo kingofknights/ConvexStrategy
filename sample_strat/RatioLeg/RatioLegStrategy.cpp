@@ -184,6 +184,7 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
     if (!status) {
         return;
     }
+    ++_eventCount;
     _qoute[index] = event_;
     if (!_active) {
         return;
@@ -650,8 +651,10 @@ auto RatioLegStrategy::IsStopped() const -> bool {
 }
 
 void RatioLegStrategy::Print() {
-    writeLog("------------------- Ratio StragegyId: {}", _strategyId);
+    writeLog("------------------- Ratio StragegyId: {} [._eventCount = {}]", _strategyId, _eventCount);
     for (size_t index = 0; index < _numLegs; ++index) {
-        writeLog("token {} Buy [._price = {}] Sell [._price = {}]", _tokens[index], int(_qoute[index].message.bid_levels[0].price), int(_qoute[index].message.ask_levels[0].price));
+        writeLog("token {} Buy [._price = {}] Sell [._price = {}] LTP = {}, LTQ = {}", _tokens[index], int(_qoute[index].message.bid_levels[0].price), int(_qoute[index].message.ask_levels[0].price),
+                 int(_qoute[index].message.ltp_), int(_qoute[index].message.ltq_));
     }
+    _eventCount = 0;
 }

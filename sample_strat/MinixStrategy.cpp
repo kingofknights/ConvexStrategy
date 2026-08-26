@@ -18,15 +18,8 @@
 #include <cstdint>
 
 using json = nlohmann::json;
-
-int date = 0;
-
 using namespace std;
-int32_t omsid;
-namespace po = boost::program_options;
-namespace pt = boost::property_tree;
 using namespace std::string_literals;
-
 using json = nlohmann::json;
 
 /**
@@ -181,7 +174,7 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
         auto     status           = strategy["Status"].get<std::string>();
         uint32_t strategyID       = strategy["StrategyId"].get<uint32_t>();
         strategyJson_[strategyID] = jsonText;
-        if (status == "Subscribed") {
+        if (status == "Subscribed" or status == "New") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator == ratioStrats_.end()) {
                 ratioStrats_[strategyID] = new RatioLegStrategy(this, strategyID, interface_, root, numLegs);
@@ -200,7 +193,7 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
             if (iterator != ratioStrats_.end()) {
                 iterator->second->Stop();
             }
-        } else if (status == "Cancelled" || status == "Deleted") {
+        } else if (status == "Deleted") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
                 iterator->second->Stop();
@@ -218,6 +211,7 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
  */
 MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
     : AlgoBase(context) {
+    namespace pt = boost::property_tree;
     pt::ptree root;
     auto      config_file = get_strategy_config_file();
     std::cout << "filename " << config_file << std::endl;
@@ -418,8 +412,7 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     for (auto& kv : ratioStrats_) sendRatioUI(kv.second);
 }
 
-void MinixStrategy::sendJsonChunkedToUI(int32_t message_code, int32_t interface_,
-                                        const std::string& payload) {
+void MinixStrategy::sendJsonChunkedToUI(int32_t message_code, int32_t interface_, const std::string& payload) {
     constexpr size_t max_chunk_size = 1500;
     int32_t          current_ts     = static_cast<int32_t>(
         std::chrono::system_clock::now().time_since_epoch().count() / 1000000);
@@ -448,7 +441,7 @@ void MinixStrategy::sendJsonChunkedToUI(int32_t message_code, int32_t interface_
             payload.substr(static_cast<size_t>(i) * max_chunk_size, max_chunk_size);
         aef::infra::ui_cmd::UIStruct ui{};
         ui.header.message_code   = message_code;
-        ui.header.interface_id   = 22;
+        ui.header.interface_id   = interface_;
         ui.header.message_length = 1520;
         ui.header.component_id   = 1;
         ui.header.timestamp      = current_ts;

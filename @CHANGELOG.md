@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.7] - 2026-08-26
+
+### Added
+- Added tick event counter (`_eventCount`) to `RatioLegStrategy` to monitor tick frequency per strategy instance.
+- Added LTP and LTQ market depth fields to `RatioLegStrategy::Print()` log output.
+
+### Changed
+- Supported `New` status alongside `Subscribed` for strategy initialization in `MinixStrategy::handleRatioLegStrategy`.
+- Fixed UI chunked message dispatch in `MinixStrategy::sendJsonChunkedToUI` to use dynamic `interface_` ID instead of hardcoded `22`.
+- Cleaned up unused global namespace and variables in `MinixStrategy.cpp`.
+
 ## [1.5.6] - 2026-08-18
 
 ### Added

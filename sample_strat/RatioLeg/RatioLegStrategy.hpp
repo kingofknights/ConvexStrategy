@@ -118,6 +118,7 @@ class RatioLegStrategy {
     MinixStrategy* _ms;
     client_uid     _uid;
 
+    int      _eventCount = 0;
     uint32_t _strategyId;
     int32_t  _interface;
     size_t   _numLegs;
