@@ -31,37 +31,37 @@ class MinixStrategy : public AlgoBase {
     friend class RatioLegStrategy;
 
   public:
-    MinixStrategy(AlgoBase::ContextHandle context);
+    MinixStrategy(AlgoBase::ContextHandle context_);
     ~MinixStrategy();
 
     // ---- AlgoBase callbacks ------------------------------------------------
-    void OnTick(const Quote& event) override;                                              // TBT market data
+    void OnTick(const Quote& event_) override;                                              // TBT market data
     void onBcastData(const aef::infra::product::product_data& product_details_) override;  // broadcast/snapshot
-    void OnOrderResponse(const oms_transaction& order_resp) override;                      // OMS/exchange order responses
-    int  doWork() override;                                                                // periodic engine hook
-    void onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) override;                 // chunked GUI strategy-config JSON
+    void OnOrderResponse(const oms_transaction& order_resp_) override;                     // OMS/exchange order responses
+    int  doWork() override;                                                                 // periodic engine hook
+    void onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) override;                 // chunked GUI strategy-config JSON
 
     using OrderMap = std::unordered_map<int32_t, execution_strat::order_instance>;
     /** @brief Place or modify an order entry in the supplied map. */
-    int  update_order(OrderMap& order_handle_, int32_t token, int32_t price, int32_t qty);
+    int  update_order(OrderMap& order_handle_, int32_t token_, int32_t price_, int32_t qty_);
     auto update_order(OrderObjectPtrT& order_, int32_t token_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> int;
     /** @brief Cancel an active order if present. */
-    bool cancel_order(OrderMap& order_handle_, int32_t token);
+    bool cancel_order(OrderMap& order_handle_, int32_t token_);
 
-    bool subscribeProduct(const int32_t product_id, const uint16_t flags);
-    bool unSubscribeProduct(const int32_t product_id, const uint16_t flags);
+    bool subscribeProduct(const int32_t product_id_, const uint16_t flags_);
+    bool unSubscribeProduct(const int32_t product_id_, const uint16_t flags_);
 
-    void sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string name_);
-    void Registerfortermination(int strategyId);
+    void sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string_view name_);
+    void Registerfortermination(int strategyId_);
 
   private:
-    void applyLegStrategyJson(int32_t interface_, const std::string& jsonText);
-    void handleRatioLegStrategy(const nlohmann::json& root, const std::string& jsonText, size_t numLegs, int32_t interface_);
+    void applyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
+    void handleRatioLegStrategy(const nlohmann::json& root_, const std::string& jsonText_, size_t numLegs_, int32_t interface_, bool gapDiff_);
 
     // Once per ~1s, echo strategy updates back to the GUI.
     void sendStrategySpreadsToUI();
     // GUI framing: one metadata packet {"packet_count":N,...} then N 1500-byte chunks.
-    void sendJsonChunkedToUI(int32_t message_code, int32_t interface_, const std::string& payload);
+    void sendJsonChunkedToUI(int32_t message_code_, int32_t interface_, const std::string& payload_);
     void sendTradeTracerToUI(const TradeTracer& tracer_, int32_t interface_);
 
     struct JsonReassembly {

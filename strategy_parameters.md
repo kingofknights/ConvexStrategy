@@ -32,3 +32,7 @@ This document outlines the usage and logic behind the key execution parameters d
 * **Description:** The maximum execution slippage tolerated after a trade executes.
 * **Details:** Calculated in paise (input multiplied by 100).
 * **Engine Behavior:** If a trade executes and the resulting slippage exceeds the `AllowedSlippage`, the strategy immediately halts bidding for that position and pauses itself to protect against adverse market movements.
+
+### 7. Market Order Retries (`MarketOrderRetries` / `_marketOrderRetries`)
+* **Description:** The maximum number of progressive tick-stepped limit modifications permitted for hedge legs before escalating to aggressive market touch execution.
+* **Engine Behavior:** For each retry attempt $k < \text{MarketOrderRetries}$, the hedge limit price is adjusted by 1 tick closer to the market. When retries reach `MarketOrderRetries`, the order is aggressively placed at the opposite side market touch (BUY at Ask, SELL at Bid) to guarantee execution. The strategy is **never** stopped on max retries — stoppage is governed exclusively by `AllowedSlippage`.

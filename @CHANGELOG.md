@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.8] - 2026-09-02
+
+### Added
+- Implemented calculated spread pricing for hedge legs upon first leg (bidding leg) fill in `RatioLegStrategy::CalculateHedgePrice()`.
+- Implemented progressive per-retry tick step escalation in `RatioLegStrategy::ExecuteHedgeLeg()` (BUY side steps up by $+1\text{ tick}$, SELL side steps down by $-1\text{ tick}$ per retry).
+- Implemented aggressive opposite side market touch execution (BUY at Ask, SELL at Bid) upon reaching max retries (`_marketOrderRetries`) to guarantee trade completion without stopping the strategy.
+- Added unhedged position prioritization in `RatioLegStrategy::OnTick` to immediately cancel bidding quotes and execute hedge orders first when ratio imbalance is detected.
+
+### Changed
+- Replaced dynamic vector allocations in `WindRate` with fixed-size `std::array<int, MAX_LEGS>` to achieve zero heap allocations on the tick hot path.
+- Converted `_hedgeRetryCount` to per-leg tracking vector `std::vector<size_t>` in `MarketBidding`, eliminating 1-second time-based variables.
+- Refactored `RatioLegStrategy` into modular, single-responsibility functions (`HasUnhedgedLots`, `CheckHedgeLegsDepth`, `CheckBiddingLegDepth`, `EvaluateBidding`, `ComputeRawSpread`, `AdjustGap`, `CalculateTradedLots`, `ProcessTradeFill`, `CheckSlippageThreshold`, `ProcessLegResponse`, `ExecuteHedgeLeg`).
+- Replaced `std::string` value parameters with `std::string_view` across order response and bidding logic to prevent string reallocations.
+- Standardized all function parameters across `RatioLegStrategy` and `MinixStrategy` to strictly follow trailing underscore (`_`) suffix convention.
+
 ## [1.5.7] - 2026-08-26
 
 ### Added

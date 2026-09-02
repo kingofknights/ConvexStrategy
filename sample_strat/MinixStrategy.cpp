@@ -111,23 +111,23 @@ static bool ljBool(const json& o, const char* k, bool def = false) {
  * "strategy":{<StrategyDatafromui fields>}, "tokens":[ {<TokenDatafromui
  * fields>}, ... ] }
  */
-void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& jsonText) {
+void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& jsonText_) {
     using aef::infra::ui_cmd::BuySell;
     using aef::infra::ui_cmd::StrategyDatafromui;
     using aef::infra::ui_cmd::TokenDatafromui;
 
-    auto sendStatus = [this, interface_](std::string status, int strategyId) {
+    auto sendStatus = [this, interface_](std::string status_, int strategyId_) {
         json response;
-        response["Status"]     = status;
-        response["StrategyId"] = strategyId;
+        response["Status"]     = status_;
+        response["StrategyId"] = strategyId_;
         std::cout << "SendStatus " << response.dump() << std::endl;
         sendJsonChunkedToUI(9621, interface_, response.dump());
     };
 
     std::cout << "applyLegStrategyJson" << std::endl;
-    std::cout << "jsonText: " << jsonText << std::endl;
+    std::cout << "jsonText: " << jsonText_ << std::endl;
     try {
-        json  root     = json::parse(jsonText);
+        json  root     = json::parse(jsonText_);
         json& strategy = root["Strategy"];
 
         std::string name       = strategy.value("SubType", "");
@@ -137,28 +137,28 @@ void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& 
 
         if (name == "2LegRatio") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 2, interface_);
+            handleRatioLegStrategy(root, jsonText_, 2, interface_, false);
         } else if (name == "3LegRatio") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 3, interface_);
+            handleRatioLegStrategy(root, jsonText_, 3, interface_, false);
         } else if (name == "4LegRatio") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 4, interface_);
+            handleRatioLegStrategy(root, jsonText_, 4, interface_, false);
         } else if (name == "5LegRatio") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 5, interface_);
+            handleRatioLegStrategy(root, jsonText_, 5, interface_, false);
         } else if (name == "6LegRatio") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 6, interface_);
+            handleRatioLegStrategy(root, jsonText_, 6, interface_, false);
         } else if (name == "Butterfly") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 3, interface_);
+            handleRatioLegStrategy(root, jsonText_, 3, interface_, false);
         } else if (name == "Box") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 4, interface_);
+            handleRatioLegStrategy(root, jsonText_, 4, interface_, true);
         } else if (name == "ConRev") {
             sendStatus(status, strategyId);
-            handleRatioLegStrategy(root, jsonText, 3, interface_);
+            handleRatioLegStrategy(root, jsonText_, 3, interface_, true);
         }
 
     } catch (const std::exception& e) {
@@ -166,27 +166,27 @@ void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& 
     }
 }
 
-void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
-                                           const std::string&    jsonText,
-                                           size_t numLegs, int32_t interface_) {
+void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root_,
+                                           const std::string&    jsonText_,
+                                           size_t numLegs_, int32_t interface_, bool gapDiff_) {
     try {
-        auto     strategy         = root["Strategy"];
+        auto     strategy         = root_["Strategy"];
         auto     status           = strategy["Status"].get<std::string>();
         uint32_t strategyID       = strategy["StrategyId"].get<uint32_t>();
-        strategyJson_[strategyID] = jsonText;
+        strategyJson_[strategyID] = jsonText_;
         if (status == "Subscribed" or status == "New") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator == ratioStrats_.end()) {
-                ratioStrats_[strategyID] = new RatioLegStrategy(this, strategyID, interface_, root, numLegs);
+                ratioStrats_[strategyID] = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
             }
         } else if (status == "Applied") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
-                iterator->second->ParamUpdate(root);
+                iterator->second->ParamUpdate(root_);
             } else {
-                auto strat               = new RatioLegStrategy(this, strategyID, interface_, root, numLegs);
+                auto strat               = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
                 ratioStrats_[strategyID] = strat;
-                strat->ParamUpdate(root);
+                strat->ParamUpdate(root_);
             }
         } else if (status == "Unsubscribed") {
             auto iterator = ratioStrats_.find(strategyID);
@@ -209,8 +209,8 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root,
 /**
  * @brief Initialize strategy configuration, subscriptions, and order handles.
  */
-MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context)
-    : AlgoBase(context) {
+MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
+    : AlgoBase(context_) {
     namespace pt = boost::property_tree;
     pt::ptree root;
     auto      config_file = get_strategy_config_file();
@@ -261,22 +261,22 @@ MinixStrategy::~MinixStrategy() {
     ratioStrats_.clear();
 }
 
-bool MinixStrategy::subscribeProduct(const int32_t  product_id,
-                                     const uint16_t flags) {
-    LOG_DEBUG("[SUB] subscribeProduct product_id=%d flags=%d", product_id, flags);
-    return AlgoBase::subscribeProduct(product_id, flags);
+bool MinixStrategy::subscribeProduct(const int32_t  product_id_,
+                                     const uint16_t flags_) {
+    LOG_DEBUG("[SUB] subscribeProduct product_id=%d flags=%d", product_id_, flags_);
+    return AlgoBase::subscribeProduct(product_id_, flags_);
 }
 
-bool MinixStrategy::unSubscribeProduct(const int32_t  product_id,
-                                       const uint16_t flags) {
-    LOG_DEBUG("[SUB] unSubscribeProduct product_id=%d flags=%d", product_id,
-              flags);
-    return AlgoBase::unSubscribeProduct(product_id, flags);
+bool MinixStrategy::unSubscribeProduct(const int32_t  product_id_,
+                                       const uint16_t flags_) {
+    LOG_DEBUG("[SUB] unSubscribeProduct product_id=%d flags=%d", product_id_,
+              flags_);
+    return AlgoBase::unSubscribeProduct(product_id_, flags_);
 }
 
 // function to squareoff using traderId
-std::string format_time(std::time_t t) {
-    std::tm*           timeInfo = std::localtime(&t);
+std::string format_time(std::time_t t_) {
+    std::tm*           timeInfo = std::localtime(&t_);
     std::ostringstream oss;
     oss << std::setw(2) << std::setfill('0') << timeInfo->tm_hour << ":"
         << std::setw(2) << std::setfill('0') << timeInfo->tm_min << ":"
@@ -284,14 +284,14 @@ std::string format_time(std::time_t t) {
     return oss.str();
 }
 
-void MinixStrategy::OnTick(const Quote& event) {
+void MinixStrategy::OnTick(const Quote& event_) {
     LOG_DEBUG("[TICK] OnTick product_id=%d seq=%d ts=%lu ltp=%d",
-              event.header.product_id, event.header.sequence_no,
-              event.header.exchange_timestamp, event.message.ltp_);
+              event_.header.product_id, event_.header.sequence_no,
+              event_.header.exchange_timestamp, event_.message.ltp_);
 
     int64_t lastTickTs = 0;
     for (auto& kv : ratioStrats_) {
-        kv.second->OnTick(event, lastTickTs);
+        kv.second->OnTick(event_, lastTickTs);
         if (kv.second->IsStopped()) {
             kv.second->Stop();
         }
@@ -299,8 +299,8 @@ void MinixStrategy::OnTick(const Quote& event) {
 }
 
 // --- clean order-lifecycle logging helpers --------------------------------
-static const char* omsEventName(int code) {
-    switch (code) {
+static const char* omsEventName(int code_) {
+    switch (code_) {
         case 1111:
             return "NEW_REQ";
         case 1112:
@@ -329,31 +329,31 @@ static const char* omsEventName(int code) {
             return "OTHER";
     }
 }
-static const char* omsSideName(int s) {
-    return s == 1 ? "BUY" : (s == 2 ? "SELL" : "?");
+static const char* omsSideName(int s_) {
+    return s_ == 1 ? "BUY" : (s_ == 2 ? "SELL" : "?");
 }
 
-void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp) {
-    for (auto& kv : ratioStrats_) kv.second->OnOrderResponse(order_resp);
+void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp_) {
+    for (auto& kv : ratioStrats_) kv.second->OnOrderResponse(order_resp_);
 
     LOG_DEBUG(
         "[ORDER] RECV %-18s token=%d side=%-4s qty=%d price=%d uid=%d "
         "err=%d reason=%d",
-        omsEventName(order_resp.hdr_.transaction_code),
-        order_resp.packet_.product_id_,
-        omsSideName(static_cast<int>(order_resp.packet_.flags_.order_side)),
-        order_resp.packet_.quantity_, order_resp.packet_.price_,
-        order_resp.hdr_.uid_.composite_id_.request_id,
-        order_resp.hdr_.error_code, order_resp.hdr_.reason_code);
+        omsEventName(order_resp_.hdr_.transaction_code),
+        order_resp_.packet_.product_id_,
+        omsSideName(static_cast<int>(order_resp_.packet_.flags_.order_side)),
+        order_resp_.packet_.quantity_, order_resp_.packet_.price_,
+        order_resp_.hdr_.uid_.composite_id_.request_id,
+        order_resp_.hdr_.error_code, order_resp_.hdr_.reason_code);
 
     // ponytail: query product details to identify options vs futures
     ProductDetails details;
     bool           is_option = false;
-    if (getProductDetails(order_resp.packet_.product_id_, details)) {
+    if (getProductDetails(order_resp_.packet_.product_id_, details)) {
         is_option = details.opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
     }
 
-    portfolio_mgr_.on_order_response(order_resp, is_option);
+    portfolio_mgr_.on_order_response(order_resp_, is_option);
 }
 
 int MinixStrategy::doWork() {
@@ -363,6 +363,10 @@ int MinixStrategy::doWork() {
     if (now - lastSpreadSendMs_ >= 1000) {
         lastSpreadSendMs_ = now;
         sendStrategySpreadsToUI();
+    }
+
+    for (auto& kv : ratioStrats_) {
+        kv.second->CheckHedgeTimeout();
     }
 
     if (!_strategiesToTerminate.empty()) {
@@ -382,8 +386,8 @@ int MinixStrategy::doWork() {
     return 0;
 }
 
-void MinixStrategy::Registerfortermination(int strategyId) {
-    _strategiesToTerminate.push_back(strategyId);
+void MinixStrategy::Registerfortermination(int strategyId_) {
+    _strategiesToTerminate.push_back(strategyId_);
 }
 
 void MinixStrategy::sendStrategySpreadsToUI() {
@@ -412,18 +416,18 @@ void MinixStrategy::sendStrategySpreadsToUI() {
     for (auto& kv : ratioStrats_) sendRatioUI(kv.second);
 }
 
-void MinixStrategy::sendJsonChunkedToUI(int32_t message_code, int32_t interface_, const std::string& payload) {
+void MinixStrategy::sendJsonChunkedToUI(int32_t message_code_, int32_t interface_, const std::string& payload_) {
     constexpr size_t max_chunk_size = 1500;
     int32_t          current_ts     = static_cast<int32_t>(
         std::chrono::system_clock::now().time_since_epoch().count() / 1000000);
     int packet_count =
-        static_cast<int>((payload.size() + max_chunk_size - 1) / max_chunk_size);
+        static_cast<int>((payload_.size() + max_chunk_size - 1) / max_chunk_size);
     if (packet_count < 1)
         packet_count = 1;
 
     {
         aef::infra::ui_cmd::UIStruct ui{};
-        ui.header.message_code   = message_code;
+        ui.header.message_code   = message_code_;
         ui.header.component_id   = 1;
         ui.header.timestamp      = current_ts;
         ui.header.interface_id   = interface_;
@@ -438,9 +442,9 @@ void MinixStrategy::sendJsonChunkedToUI(int32_t message_code, int32_t interface_
     }
     for (int i = 0; i < packet_count; i++) {
         std::string chunk =
-            payload.substr(static_cast<size_t>(i) * max_chunk_size, max_chunk_size);
+            payload_.substr(static_cast<size_t>(i) * max_chunk_size, max_chunk_size);
         aef::infra::ui_cmd::UIStruct ui{};
-        ui.header.message_code   = message_code;
+        ui.header.message_code   = message_code_;
         ui.header.interface_id   = interface_;
         ui.header.message_length = 1520;
         ui.header.component_id   = 1;
@@ -470,11 +474,11 @@ void MinixStrategy::onBcastData(
 /**
  * @brief Evaluate parsed CSV rows and fire configured orders.
  */
-void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
-    std::cout << ">>> [GUI-RX] onUIRequest code=" << ui_req.header.message_code
-              << " msg_len=" << ui_req.header.message_length
-              << " iface=" << ui_req.header.interface_id
-              << " comp=" << ui_req.header.component_id << std::endl;
+void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) {
+    std::cout << ">>> [GUI-RX] onUIRequest code=" << ui_req_.header.message_code
+              << " msg_len=" << ui_req_.header.message_length
+              << " iface=" << ui_req_.header.interface_id
+              << " comp=" << ui_req_.header.component_id << std::endl;
 
     // The only UI channel the box uses: chunked strategy-config JSON. The GUI
     // connector (sendStrategyConfig) sends a METADATA packet
@@ -482,16 +486,16 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
     // UTF-8 slices of the JSON, all on the same message_code (9612 config echo
     // channel; 9620/9621 legacy aliases). Reassemble per code, then hand the full
     // JSON to applyLegStrategyJson.
-    if (ui_req.header.message_code == 9612 ||
-        ui_req.header.message_code == 9620 ||
-        ui_req.header.message_code == 9621) {
-        const int kMsgBytes = static_cast<int>(sizeof(ui_req.message));  // 1500
+    if (ui_req_.header.message_code == 9612 ||
+        ui_req_.header.message_code == 9620 ||
+        ui_req_.header.message_code == 9621) {
+        const int kMsgBytes = static_cast<int>(sizeof(ui_req_.message));  // 1500
         int       len       = kMsgBytes;
-        while (len > 0 && ui_req.message[len - 1] == '\0')
+        while (len > 0 && ui_req_.message[len - 1] == '\0')
             --len;  // JSON text never contains NUL
-        std::string chunk(ui_req.message, len);
+        std::string chunk(ui_req_.message, len);
 
-        JsonReassembly& ra = jsonReassembly_[ui_req.header.message_code];
+        JsonReassembly& ra = jsonReassembly_[ui_req_.header.message_code];
 
         // Metadata header? It is the only fully-parseable packet that carries
         // "packet_count".
@@ -501,14 +505,14 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
             ra.received = 0;
             ra.buf.clear();
             ra.active = ra.expected > 0;
-            std::cout << ">>> [GUI-RX] META code=" << ui_req.header.message_code
+            std::cout << ">>> [GUI-RX] META code=" << ui_req_.header.message_code
                       << " packet_count=" << ra.expected << std::endl;
             return;
         }
 
         if (!ra.active) {
             std::cout << ">>> [GUI-RX] WARNING data chunk before metadata (code="
-                      << ui_req.header.message_code << ", " << len << "B) -- ignored"
+                      << ui_req_.header.message_code << ", " << len << "B) -- ignored"
                       << std::endl;
             return;
         }
@@ -516,7 +520,7 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
         ra.buf += chunk;
         ra.received++;
         std::cout << ">>> [GUI-RX] CHUNK " << ra.received << "/" << ra.expected
-                  << " code=" << ui_req.header.message_code << " bytes=" << len
+                  << " code=" << ui_req_.header.message_code << " bytes=" << len
                   << " (accumulated=" << ra.buf.size() << "B)" << std::endl;
 
         if (ra.received >= ra.expected) {
@@ -525,10 +529,10 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
             while (!full.empty() && full.back() == '\0')
                 full.pop_back();  // strip any padding
             std::cout << ">>> [GUI-RX] REASSEMBLED code="
-                      << ui_req.header.message_code << " total=" << full.size()
+                      << ui_req_.header.message_code << " total=" << full.size()
                       << "B  JSON below:\n"
                       << full << "\n>>> [GUI-RX] END-JSON" << std::endl;
-            applyLegStrategyJson(ui_req.header.interface_id, full);
+            applyLegStrategyJson(ui_req_.header.interface_id, full);
         }
         return;
     }
@@ -537,37 +541,37 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req) {
 /**
  * @brief Push a heartbeat update to the UI layer.
  */
-int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token, int32_t cur_price, int32_t qty) {
+int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token_, int32_t cur_price_, int32_t qty_) {
     // Quote quoteC;
     // getLastQuote(token, quoteC);
     int  uid = 0;
-    auto itr = order_handle_.find(token);
+    auto itr = order_handle_.find(token_);
     // std::cout << "Token from Update order : " << token << "cliuid: " <<
     // clientUID.id_ << std::endl;
     if (itr != order_handle_.end()) {
         auto& order = itr->second;
-        qty -= order.get_filled_qty();
+        qty_ -= order.get_filled_qty();
         // std::cout << "QTY from UPdate order : " << qty << std::endl;
         if (order.get_current_state() !=
             static_cast<uint32_t>(
                 execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE)) {
             if (!order.is_response_pending()) {
-                if (qty > 0 && order.get_open_price() != cur_price) {
+                if (qty_ > 0 && order.get_open_price() != cur_price_) {
                     order.set_time_stamps(event_timestamp_, trigger_timestamp_,
                                           aef::infra::get_realtime_in_nanos());
-                    uid = order.update_order(cur_price, qty);
+                    uid = order.update_order(cur_price_, qty_);
                     LOG_DEBUG(
                         "[ORDER] FIRE MODIFY token=%d side=%-4s price=%d qty=%d uid=%d",
-                        token, omsSideName(static_cast<int>(order.get_side())), cur_price,
-                        qty, uid);
+                        token_, omsSideName(static_cast<int>(order.get_side())), cur_price_,
+                        qty_, uid);
                     if (uid) {
-                        portfolio_mgr_.on_order_modify(order.get_uid(), cur_price, qty);
+                        portfolio_mgr_.on_order_modify(order.get_uid(), cur_price_, qty_);
                     }
                 }
             }
         } else {
             if (!order.is_response_pending()) {
-                if (qty > 0 && order.get_open_price() != cur_price) {
+                if (qty_ > 0 && order.get_open_price() != cur_price_) {
                     clientUID.composite_id_.request_id =
                         ++requestId;  // print_depth(token);
                     if (clientUID.composite_id_.request_id >= MAX_REQUEST_ID) {
@@ -575,14 +579,14 @@ int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token, int32_t 
                     } else {
                         order.set_time_stamps(event_timestamp_, trigger_timestamp_,
                                               aef::infra::get_realtime_in_nanos());
-                        uid = order.place_order(cur_price, qty, clientUID.id_);
+                        uid = order.place_order(cur_price_, qty_, clientUID.id_);
                         LOG_DEBUG(
                             "[ORDER] FIRE NEW    token=%d side=%-4s price=%d qty=%d uid=%d",
-                            token, omsSideName(static_cast<int>(order.get_side())),
-                            cur_price, qty, uid);
+                            token_, omsSideName(static_cast<int>(order.get_side())),
+                            cur_price_, qty_, uid);
                         if (uid) {
-                            portfolio_mgr_.on_order_placed(uid, token, order.get_side(),
-                                                           cur_price, qty);
+                            portfolio_mgr_.on_order_placed(uid, token_, order.get_side(),
+                                                           cur_price_, qty_);
                         }
                         //     cout << strategyNumber << " " <<
                         //     clientUID.composite_id_.client_id << " " <<
@@ -645,7 +649,7 @@ auto MinixStrategy::update_order(OrderObjectPtrT& order_, int32_t token_, int32_
     return uid;
 }
 
-void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string name_) {
+void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string_view name_) {
     constexpr static double      TenYearsInSeconds = 315513000 * 10e9;
     aef::infra::ui_cmd::UIStruct ui{};
     ui.header.message_code   = 9955;
@@ -687,7 +691,7 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t 
     std::memcpy(ui.message, &response, sizeof(response));
     sentoUI(ui);
 }
-void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_, int interface_) {
+void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_, int32_t interface_) {
     std::cout << __FUNCTION__ << std::endl;
     aef::infra::ui_cmd::UIStruct ui{};
     ui.header.message_code   = 9956;
@@ -702,8 +706,8 @@ void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_, int interfac
 /**
  * @brief Cancel an order if eligible and notify portfolio manager.
  */
-bool MinixStrategy::cancel_order(OrderMap& order_handle_, int32_t token) {
-    auto itr = order_handle_.find(token);
+bool MinixStrategy::cancel_order(OrderMap& order_handle_, int32_t token_) {
+    auto itr = order_handle_.find(token_);
     if (itr != order_handle_.end()) {
         // std::cout<<" Cancel"<<std::endl;
         auto& order1 = itr->second;
@@ -712,7 +716,7 @@ bool MinixStrategy::cancel_order(OrderMap& order_handle_, int32_t token) {
             // getLastQuote(token, quoteC);
             order1.set_time_stamps(event_timestamp_, trigger_timestamp_,
                                    aef::infra::get_realtime_in_nanos());
-            LOG_DEBUG("[ORDER] FIRE CANCEL token=%d side=%-4s", token,
+            LOG_DEBUG("[ORDER] FIRE CANCEL token=%d side=%-4s", token_,
                       omsSideName(static_cast<int>(order1.get_side())));
             if (order1.cancel_order()) {
                 portfolio_mgr_.on_order_cancel(order1.get_uid());
@@ -724,9 +728,9 @@ bool MinixStrategy::cancel_order(OrderMap& order_handle_, int32_t token) {
     return true;
 }
 
-extern "C" AlgoBase* create(void* context) {
+extern "C" AlgoBase* create(void* context_) {
     std::cout << __FILE__ << ":" << __FUNCTION__ << std::endl;
-    return new MinixStrategy(static_cast<AlgoBase::ContextHandle>(context));
+    return new MinixStrategy(static_cast<AlgoBase::ContextHandle>(context_));
 }
 
-extern "C" void destroy(AlgoBase* strat) { delete strat; }
+extern "C" void destroy(AlgoBase* strat_) { delete strat_; }

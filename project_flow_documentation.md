@@ -211,7 +211,20 @@ Ratio spread strategies operate on 2 to 6 legs where each leg is weighted by a p
 * Slippage Cycle Completion Check: Verifies that normalized cycle quantities are equal: `_cycleTradedLot[i] / _ratios[i] == _cycleTradedLot[j] / _ratios[j]`.
 * Slippage Calculation: Accumulated slippage per leg is scaled by its corresponding ratio: $\text{slippage} = \sum (\text{actualHedgePrice} - \text{expectedHedgePrice}) \times \text{Ratio}_i$.
 
+### Dynamic Bidding & Multi-Stage Hedging Flow
+1. **Bidding Phase**: Quoting on `_biddingLeg` occurs passively based on market depth and user target spread (`param_._spread`).
+2. **Hedge Priority Guard**: In `OnTick` and on trade confirmations, if any ratio mismatch (`HasUnhedgedLots`) is detected, the bidding leg is cancelled immediately, and hedge orders are serviced with top priority.
+3. **Phase 1 Hedging (Calculated Spread with Per-Retry Tick Step Escalation)**:
+   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at the exact calculated limit price:
+     $$P_{\text{hedge}} = \frac{\text{TargetRawSpread} - \sum_{i \ne \text{hedge}} \text{Sign}_i \times P_i \times \text{Ratio}_i}{\text{Sign}_{\text{hedge}} \times \text{Ratio}_{\text{hedge}}}$$
+   - On each subsequent modification / retry attempt $k$, price steps aggressively by 1 tick:
+     - **BUY side**: $P_{\text{target}} = P_{\text{hedge}} + (k \times \text{TickSize})$
+     - **SELL side**: $P_{\text{target}} = P_{\text{hedge}} - (k \times \text{TickSize})$
+4. **Phase 2 Hedging (Aggressive Opposite Side Touch Execution)**:
+   - When hedge retries reach `_marketOrderRetries`, the order aggressively crosses the spread to the opposite touch (BUY at Ask, SELL at Bid) to guarantee fill and complete the trade. Stoppage is governed solely by `AllowedSlippage`.
+
 ---
 
 > [!WARNING]
 > If market data books are crossed ($\text{Bid} \ge \text{Ask}$), the strategy blocks trading updates (`booksReady()` returns false). This prevents the algorithm from executing trades on stale, single-sided, or invalid market feeds.
+
