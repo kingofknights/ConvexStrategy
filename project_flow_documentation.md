@@ -214,12 +214,11 @@ Ratio spread strategies operate on 2 to 6 legs where each leg is weighted by a p
 ### Dynamic Bidding & Multi-Stage Hedging Flow
 1. **Bidding Phase**: Quoting on `_biddingLeg` occurs passively based on market depth and user target spread (`param_._spread`).
 2. **Hedge Priority Guard**: In `OnTick` and on trade confirmations, if any ratio mismatch (`HasUnhedgedLots`) is detected, the bidding leg is cancelled immediately, and hedge orders are serviced with top priority.
-3. **Phase 1 Hedging (Calculated Spread with Per-Retry Tick Step Escalation)**:
-   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at the exact calculated limit price:
-     $$P_{\text{hedge}} = \frac{\text{TargetRawSpread} - \sum_{i \ne \text{hedge}} \text{Sign}_i \times P_i \times \text{Ratio}_i}{\text{Sign}_{\text{hedge}} \times \text{Ratio}_{\text{hedge}}}$$
+3. **Phase 1 Hedging (Stored Snapshot Price with Per-Retry Tick Step Escalation)**:
+   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at the stored market price snapshot `_windRate._price[leg]` captured when the bidding order was posted (with fallback to `CalculateHedgePrice()` if uninitialized).
    - On each subsequent modification / retry attempt $k$, price steps aggressively by 1 tick:
-     - **BUY side**: $P_{\text{target}} = P_{\text{hedge}} + (k \times \text{TickSize})$
-     - **SELL side**: $P_{\text{target}} = P_{\text{hedge}} - (k \times \text{TickSize})$
+     - **BUY side**: $P_{\text{target}} = P_{\text{stored}} + (k \times \text{TickSize})$
+     - **SELL side**: $P_{\text{target}} = P_{\text{stored}} - (k \times \text{TickSize})$
 4. **Phase 2 Hedging (Aggressive Opposite Side Touch Execution)**:
    - When hedge retries reach `_marketOrderRetries`, the order aggressively crosses the spread to the opposite touch (BUY at Ask, SELL at Bid) to guarantee fill and complete the trade. Stoppage is governed solely by `AllowedSlippage`.
 

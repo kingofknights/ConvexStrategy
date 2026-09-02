@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.8] - 2026-09-02
 
 ### Added
-- Implemented calculated spread pricing for hedge legs upon first leg (bidding leg) fill in `RatioLegStrategy::CalculateHedgePrice()`.
-- Implemented progressive per-retry tick step escalation in `RatioLegStrategy::ExecuteHedgeLeg()` (BUY side steps up by $+1\text{ tick}$, SELL side steps down by $-1\text{ tick}$ per retry).
+- Implemented dedicated log file creation per strategy object instance formatted as `{StrategyName}_{portfolio}_{timeHHMMSS}.log` in `RatioLegStrategy` (`writeLog` writes to both log file and stdout).
+- Implemented stored snapshot price placement for hedge legs upon first leg fill (`_windRate._price[leg]`) with fallback to calculated spread pricing in `RatioLegStrategy::ExecuteHedgeLeg()`.
+- Implemented progressive per-retry tick step escalation in `RatioLegStrategy::ExecuteHedgeLeg()` (BUY side steps up by $+1\text{ tick}$, SELL side steps down by $-1\text{ tick}$ per retry from stored price).
 - Implemented aggressive opposite side market touch execution (BUY at Ask, SELL at Bid) upon reaching max retries (`_marketOrderRetries`) to guarantee trade completion without stopping the strategy.
 - Added unhedged position prioritization in `RatioLegStrategy::OnTick` to immediately cancel bidding quotes and execute hedge orders first when ratio imbalance is detected.
 

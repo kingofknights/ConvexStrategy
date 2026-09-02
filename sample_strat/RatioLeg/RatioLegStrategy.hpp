@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,7 +75,18 @@ class RatioLegStrategy {
 
     template <typename... Args>
     void writeLog(fmt::format_string<Args...> fmt_str_, Args&&... args_) const {
-        std::cout << fmt::format(fmt_str_, std::forward<Args>(args_)...) << std::endl;
+        std::string msg = fmt::format(fmt_str_, std::forward<Args>(args_)...);
+        if (_logFile.is_open()) {
+            _logFile << msg;
+            if (msg.empty() || msg.back() != '\n') {
+                _logFile << '\n';
+            }
+            _logFile.flush();
+        }
+        std::cout << msg;
+        if (msg.empty() || msg.back() != '\n') {
+            std::cout << '\n';
+        }
     }
 
     void Print();
@@ -188,5 +200,9 @@ class RatioLegStrategy {
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;
 
-    TradeTracer _tracer;
+    TradeTracer           _tracer;
+    mutable std::ofstream _logFile;
+    std::string           _logFileName;
+    std::string           _stratName;
+    std::string           _portfolio;
 };

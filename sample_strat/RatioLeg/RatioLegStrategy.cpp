@@ -12,13 +12,64 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
+
+constexpr static std::string_view kLegRatioNames[] = {"0", "1", "2LegRatio", "3LegRatio", "4LegRatio", "5LegRatio", "6LegRatio"};
 
 RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t numLegs_, bool gapDiff_)
     : _ms(ms_), _strategyId(strategyId_), _interface(interface_), _numLegs(numLegs_), _gapDiff(gapDiff_) {
+    // ── Strategy Name & Portfolio for Log File ──────────────────────────────
+    if (json_.contains("Strategy")) {
+        const auto& stratJson = json_["Strategy"];
+        _stratName = stratJson.value("SubType", stratJson.value("StrategyName", ""));
+        if (stratJson.contains("Portfolio")) {
+            if (stratJson["Portfolio"].is_string()) {
+                _portfolio = stratJson["Portfolio"].get<std::string>();
+            } else if (stratJson["Portfolio"].is_number()) {
+                _portfolio = std::to_string(stratJson["Portfolio"].get<int>());
+            }
+        } else if (stratJson.contains("PortfolioName")) {
+            _portfolio = stratJson["PortfolioName"].get<std::string>();
+        }
+    }
+    if (_stratName.empty()) {
+        if (_gapDiff) {
+            _stratName = (_numLegs == 4) ? "Box" : "ConRev";
+        } else {
+            _stratName = (_numLegs == 3) ? "Butterfly" : ((_numLegs < std::size(kLegRatioNames)) ? std::string(kLegRatioNames[_numLegs]) : "RatioLeg");
+        }
+    }
+    if (_portfolio.empty()) {
+        if (json_.contains("Portfolio")) {
+            if (json_["Portfolio"].is_string()) {
+                _portfolio = json_["Portfolio"].get<std::string>();
+            } else if (json_["Portfolio"].is_number()) {
+                _portfolio = std::to_string(json_["Portfolio"].get<int>());
+            }
+        } else if (json_.contains("PortfolioName")) {
+            _portfolio = json_["PortfolioName"].get<std::string>();
+        }
+    }
+    if (_portfolio.empty()) {
+        _portfolio = std::to_string(_strategyId);
+    }
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+    localtime_r(&tt, &local_tm);
+    char timeBuf[16];
+    std::strftime(timeBuf, sizeof(timeBuf), "%H%M%S", &local_tm);
+
+    _logFileName = fmt::format("{}_{}_{}.log", _stratName, _portfolio, timeBuf);
+    _logFile.open(_logFileName, std::ios::out | std::ios::app);
+    writeLog(">>> [INIT] Opened log file: {}\n", _logFileName);
+
     _qoute.resize(_numLegs);
     _tokens.assign(_numLegs, 0);
     _tokensParam.assign(_numLegs, 0);
@@ -66,7 +117,12 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     }
 }
 
-RatioLegStrategy::~RatioLegStrategy() {}
+RatioLegStrategy::~RatioLegStrategy() {
+    writeLog(">>> [DESTROY] Closing log file: {}\n", _logFileName);
+    if (_logFile.is_open()) {
+        _logFile.close();
+    }
+}
 
 void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
     // ── Legs ─────────────────────────────────────────────────────────────────
@@ -248,8 +304,6 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
 }
 
 void RatioLegStrategy::OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_) {}
-
-constexpr static std::string_view kLegRatioNames[] = {"0", "1", "2LegRatio", "3LegRatio", "4LegRatio", "5LegRatio", "6LegRatio"};
 
 void RatioLegStrategy::ProcessTradeFill(MarketBidding& object_, size_t index_, bool traded_, int lot_, uint64_t value_) noexcept {
     if (traded_) {
@@ -585,10 +639,9 @@ auto RatioLegStrategy::CalculateHedgePrice(const MarketBidding& object_, const P
     double neededHedgeSpread = targetRawSpread - otherSpread;
     double rawPrice          = (neededHedgeSpread / hedgeSign) / _ratios[hedgeLeg_];
 
-    int tickSize    = _tickSize > 0 ? _tickSize : 5;
-    int targetPrice = static_cast<int>(std::round(rawPrice / tickSize)) * tickSize;
+    int targetPrice = static_cast<int>(std::round(rawPrice / _tickSize)) * _tickSize;
     if (targetPrice <= 0) {
-        targetPrice = tickSize;
+        targetPrice = _tickSize;
     }
     return targetPrice;
 }
@@ -613,16 +666,18 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const ParamLots& 
         ORDER_SIDE marketOppositeSide = (order->get_side() == BUY_SIDE) ? SELL_SIDE : BUY_SIDE;
         targetOrderPrice              = GetPrice(_qoute[leg_], marketOppositeSide, 0);
     } else {
-        // ponytail: each retry step increases aggressiveness by one tick
-        int calcPrice = CalculateHedgePrice(object_, param_, multiplier_, leg_);
-        int tickSize  = _tickSize > 0 ? _tickSize : 5;
+        // ponytail: place first order at stored snapshot price, then step aggressiveness by one tick per retry
+        int storedPrice = object_._windRate._price[leg_];
+        if (storedPrice <= 0) {
+            storedPrice = CalculateHedgePrice(object_, param_, multiplier_, leg_);
+        }
         if (order->get_side() == BUY_SIDE) {
-            targetOrderPrice = calcPrice + static_cast<int>(retryCount * tickSize);
+            targetOrderPrice = storedPrice + static_cast<int>(retryCount * _tickSize);
         } else {
-            targetOrderPrice = calcPrice - static_cast<int>(retryCount * tickSize);
+            targetOrderPrice = storedPrice - static_cast<int>(retryCount * _tickSize);
         }
         if (targetOrderPrice <= 0) {
-            targetOrderPrice = tickSize;
+            targetOrderPrice = _tickSize;
         }
     }
 
@@ -630,7 +685,7 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const ParamLots& 
         auto status = _ms->update_order(order, _tokens[leg_], targetOrderPrice, quantity, _uid);
         if (status != 0) {
             writeLog("SecondOrderBidding [{}LegRatio] [mode = {}, leg = {}, retry = {}/{}, token = {}, price = {}, qty = {}]\n",
-                     _numLegs, isAggressive ? "AGGRESSIVE_OPPOSITE" : "CALCULATED_PLUS_TICKS", leg_, retryCount, _marketOrderRetries, _tokens[leg_], targetOrderPrice, quantity);
+                     _numLegs, isAggressive ? "AGGRESSIVE_OPPOSITE" : "STORED_PLUS_TICKS", leg_, retryCount, _marketOrderRetries, _tokens[leg_], targetOrderPrice, quantity);
             object_._uniqueID[leg_] = _uid.id_;
             object_._hedgeRetryCount[leg_]++;
         }
