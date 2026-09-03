@@ -147,10 +147,7 @@ class RatioLegStrategy {
     [[nodiscard]] auto AdjustGap(double spread_) const noexcept -> double;
     [[nodiscard]] auto CalculateTradedLots(const MarketBidding& object_) const noexcept -> int;
 
-    void ProcessTradeFill(MarketBidding& object_, size_t index_, bool traded_, int lot_, uint64_t value_) noexcept;
     void CheckSlippageThreshold(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, int sideOfPack_, const oms_transaction& resp_);
-    auto ProcessLegResponse(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, const char* sideName_, size_t index_, int sideOfPack_, const oms_transaction& resp_, bool traded_, int lot_, uint64_t value_, int price_) -> bool;
-
     void ExecuteHedgeLeg(MarketBidding& object_, const ParamLots& param_, int multiplier_, size_t leg_, int targetHedgeLots_);
 
     MinixStrategy* _ms;

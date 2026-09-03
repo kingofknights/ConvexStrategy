@@ -376,7 +376,7 @@ int MinixStrategy::doWork() {
                 nlohmann::json response;
                 response["Status"]     = "Unsubscribed";
                 response["StrategyId"] = strategyId;
-                sendJsonChunkedToUI(9621, it->second->GetInterface(), response.dump());
+                sendJsonChunkedToUI(100001, it->second->GetInterface(), response.dump());
 
                 it->second->Stop();
             }
@@ -409,8 +409,8 @@ void MinixStrategy::sendStrategySpreadsToUI() {
         j["TrSpread"]   = static_cast<float>(ratio->GetRLP()) / 100.0F;
         j["B-ATP"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
         j["S-ATP"]      = static_cast<float>(ratio->GetSATP()) / 100.0F;
-        sendJsonChunkedToUI(9612, ratio->GetInterface(), j.dump());
-        ratio->Print();
+        sendJsonChunkedToUI(100002, ratio->GetInterface(), j.dump());
+        // ratio->Print();
     };
 
     for (auto& kv : ratioStrats_) sendRatioUI(kv.second);
@@ -486,9 +486,7 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) {
     // UTF-8 slices of the JSON, all on the same message_code (9612 config echo
     // channel; 9620/9621 legacy aliases). Reassemble per code, then hand the full
     // JSON to applyLegStrategyJson.
-    if (ui_req_.header.message_code == 9612 ||
-        ui_req_.header.message_code == 9620 ||
-        ui_req_.header.message_code == 9621) {
+    if (ui_req_.header.message_code == 100001) {
         const int kMsgBytes = static_cast<int>(sizeof(ui_req_.message));  // 1500
         int       len       = kMsgBytes;
         while (len > 0 && ui_req_.message[len - 1] == '\0')
@@ -572,8 +570,7 @@ int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token_, int32_t
         } else {
             if (!order.is_response_pending()) {
                 if (qty_ > 0 && order.get_open_price() != cur_price_) {
-                    clientUID.composite_id_.request_id =
-                        ++requestId;  // print_depth(token);
+                    ++clientUID.composite_id_.request_id;  // print_depth(token);
                     if (clientUID.composite_id_.request_id >= MAX_REQUEST_ID) {
                         LOG_ERROR(" Stop Trading AS max allowed Orders Breach");
                     } else {
@@ -624,7 +621,7 @@ auto MinixStrategy::update_order(OrderObjectPtrT& order_, int32_t token_, int32_
     } else {
         if (!order->is_response_pending()) {
             if (quantity_ > 0 && order->get_open_price() != price_) {
-                clientUid_.composite_id_.request_id = ++requestId;  // print_depth(token);
+                ++clientUid_.composite_id_.request_id;  // print_depth(token);
                 if (clientUid_.composite_id_.request_id >= MAX_REQUEST_ID) {
                     LOG_ERROR(" Stop Trading AS max allowed Orders Breach");
                 } else {
@@ -652,7 +649,7 @@ auto MinixStrategy::update_order(OrderObjectPtrT& order_, int32_t token_, int32_
 void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string_view name_) {
     constexpr static double      TenYearsInSeconds = 315513000 * 10e9;
     aef::infra::ui_cmd::UIStruct ui{};
-    ui.header.message_code   = 9955;
+    ui.header.message_code   = 100003;
     ui.header.interface_id   = interface_;
     ui.header.message_length = 1520;
     ui.header.component_id   = 1;
@@ -694,7 +691,7 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t 
 void MinixStrategy::sendTradeTracerToUI(const TradeTracer& tracer_, int32_t interface_) {
     std::cout << __FUNCTION__ << std::endl;
     aef::infra::ui_cmd::UIStruct ui{};
-    ui.header.message_code   = 9956;
+    ui.header.message_code   = 100004;
     ui.header.interface_id   = interface_;
     ui.header.message_length = 1520;
     ui.header.component_id   = 1;

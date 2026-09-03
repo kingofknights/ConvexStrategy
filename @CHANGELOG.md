@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Converted `_hedgeRetryCount` to per-leg tracking vector `std::vector<size_t>` in `MarketBidding`, eliminating 1-second time-based variables.
 - Refactored `RatioLegStrategy` into modular, single-responsibility functions (`HasUnhedgedLots`, `CheckHedgeLegsDepth`, `CheckBiddingLegDepth`, `EvaluateBidding`, `ComputeRawSpread`, `AdjustGap`, `CalculateTradedLots`, `ProcessTradeFill`, `CheckSlippageThreshold`, `ProcessLegResponse`, `ExecuteHedgeLeg`).
 - Replaced `std::string` value parameters with `std::string_view` across order response and bidding logic to prevent string reallocations.
-- Standardized all function parameters across `RatioLegStrategy` and `MinixStrategy` to strictly follow trailing underscore (`_`) suffix convention.
+- Removed periodic `Print()` logging from heartbeat and disabled verbose spread mismatch logs in bidding logic.
+
+### Fixed
+- Fixed trade tracer UI update issue in `RatioLegStrategy::CheckSlippageThreshold()` by removing the legacy `_windRate._price` non-zero guard that prevented `sendTradeTracerToUI()` from firing when all legs finished trading.
+- Corrected primary symbol initialization (`_tracer._symbol`) and side-aware slippage sign for trade tracer events.
 
 ## [1.5.7] - 2026-08-26
 

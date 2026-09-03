@@ -35,11 +35,11 @@ class MinixStrategy : public AlgoBase {
     ~MinixStrategy();
 
     // ---- AlgoBase callbacks ------------------------------------------------
-    void OnTick(const Quote& event_) override;                                              // TBT market data
+    void OnTick(const Quote& event_) override;                                             // TBT market data
     void onBcastData(const aef::infra::product::product_data& product_details_) override;  // broadcast/snapshot
     void OnOrderResponse(const oms_transaction& order_resp_) override;                     // OMS/exchange order responses
-    int  doWork() override;                                                                 // periodic engine hook
-    void onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) override;                 // chunked GUI strategy-config JSON
+    int  doWork() override;                                                                // periodic engine hook
+    void onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) override;                // chunked GUI strategy-config JSON
 
     using OrderMap = std::unordered_map<int32_t, execution_strat::order_instance>;
     /** @brief Place or modify an order entry in the supplied map. */
@@ -82,7 +82,6 @@ class MinixStrategy : public AlgoBase {
     // Order context shared with the box via update_order/cancel_order.
     execution_strat::PortfolioOrderManager portfolio_mgr_;
     client_uid                             clientUID;
-    int                                    requestId        = 0;
     uint64_t                               event_timestamp_ = 0, trigger_timestamp_ = 0;
 
     uint16_t         _flags  = 0;                           // market-data event flags requested per token

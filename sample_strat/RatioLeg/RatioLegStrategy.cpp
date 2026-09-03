@@ -26,7 +26,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     // ── Strategy Name & Portfolio for Log File ──────────────────────────────
     if (json_.contains("Strategy")) {
         const auto& stratJson = json_["Strategy"];
-        _stratName = stratJson.value("SubType", stratJson.value("StrategyName", ""));
+        _stratName            = stratJson.value("SubType", stratJson.value("StrategyName", ""));
         if (stratJson.contains("Portfolio")) {
             if (stratJson["Portfolio"].is_string()) {
                 _portfolio = stratJson["Portfolio"].get<std::string>();
@@ -59,9 +59,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
         _portfolio = std::to_string(_strategyId);
     }
 
-    auto now = std::chrono::system_clock::now();
-    std::time_t tt = std::chrono::system_clock::to_time_t(now);
-    std::tm local_tm{};
+    auto        now = std::chrono::system_clock::now();
+    std::time_t tt  = std::chrono::system_clock::to_time_t(now);
+    std::tm     local_tm{};
     localtime_r(&tt, &local_tm);
     char timeBuf[16];
     std::strftime(timeBuf, sizeof(timeBuf), "%H%M%S", &local_tm);
@@ -102,9 +102,13 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     for (size_t i = 0; i < _numLegs; ++i) {
         _ms->getProductDetails(_tokens[i], details[i]);
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
-        std::memset(_tracer._symbol, '\0', 11);
-        std::memcpy(_tracer._symbol, details[i].symbol, 11);
-        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], _tracer._symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
+        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], details[i].symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
+    }
+
+    if (_numLegs > 0) {
+        std::memset(_tracer._symbol, '\0', sizeof(_tracer._symbol));
+        size_t symIdx = (_biddingLeg < _numLegs) ? _biddingLeg : 0;
+        std::strncpy(_tracer._symbol, details[symIdx].symbol, sizeof(_tracer._symbol) - 1);
     }
 
     _gap      = std::abs(details[0].strike_price_ - details[1].strike_price_);
@@ -271,7 +275,7 @@ void RatioLegStrategy::EvaluateBidding(MarketBidding& object_, const ParamLots& 
         OrderBiddingLogic(object_, param_, rate_, multiplier_, name_);
     } else {
         object_._order[_biddingLeg]->cancel_order();
-        writeLog("evaluateBidding {} StragegyId: {} [.hedgeLegsOk = {}, biddingLegOk = {}\n", _numLegs, _strategyId, hedgeOk, biddingOk);
+        // writeLog("evaluateBidding {} StragegyId: {} [.hedgeLegsOk = {}, biddingLegOk = {}\n", _numLegs, _strategyId, hedgeOk, biddingOk);
     }
 }
 
@@ -305,24 +309,16 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
 
 void RatioLegStrategy::OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_) {}
 
-void RatioLegStrategy::ProcessTradeFill(MarketBidding& object_, size_t index_, bool traded_, int lot_, uint64_t value_) noexcept {
-    if (traded_) {
-        object_._tradedLot[index_] += lot_;
-        object_._tradeValue[index_] += value_;
-        object_._cycleTradedLot[index_] += lot_;
-        object_._cycleTradeValue[index_] += value_;
-    }
-}
-
 void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, int sideOfPack_, const oms_transaction& resp_) {
-    if (object_._cycleTradedLot[0] <= 0) return;
-    int firstLegLot = object_._cycleTradedLot[0] / _ratios[0];
-    if (firstLegLot <= 0) return;
+    if (_numLegs == 0 || _lotSize <= 0 || _ratios[0] <= 0) return;
 
-    for (size_t i = 0; i < _numLegs; ++i) {
-        if (object_._cycleTradedLot[i] != firstLegLot * _ratios[i]) return;
-        if (i != _biddingLeg && object_._windRate._price[i] <= 0) return;
+    // ponytail: fast pack calculation across legs
+    int cyclePacks = object_._cycleTradedLot[0] / _ratios[0];
+    for (size_t i = 1; i < _numLegs; ++i) {
+        if (_ratios[i] <= 0) return;
+        cyclePacks = std::min(cyclePacks, object_._cycleTradedLot[i] / _ratios[i]);
     }
+    if (cyclePacks <= 0) return;
 
     float tradedSpread = 0.0f;
     for (size_t i = 0; i < _numLegs; ++i) {
@@ -332,24 +328,44 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
         tradedSpread += (sides_[i] == BUY_SIDE ? -legAvgPrice : legAvgPrice) * _ratios[i];
     }
 
+    float adjustedTradedSpread = static_cast<float>(AdjustGap(tradedSpread));
+
     _tracer._orderId      = resp_.packet_.exchange_order_id;
     _tracer._time         = resp_.hdr_.exchange_timestamp;
     _tracer._qtyRemaining = 0;
     _tracer._strategyId   = _strategyId;
     _tracer._side         = sideOfPack_;
     _tracer._price        = param_._spread / 100.0F;
-    _tracer._ltp          = tradedSpread / 100.0F;
-    _tracer._ltq          = object_._cycleTradedLot[0] / _ratios[0];
-    _tracer._slippage     = (param_._spread - tradedSpread) / 100.0F;
+    _tracer._ltp          = adjustedTradedSpread / 100.0F;
+    _tracer._ltq          = cyclePacks;
+    _tracer._slippage     = (param_._spread - adjustedTradedSpread) / 100.0F;
+
+    if (_tracer._symbol[0] == '\0') {
+        ProductDetails d{};
+        size_t         symIdx = (_biddingLeg < _numLegs) ? _biddingLeg : 0;
+        if (_ms->getProductDetails(_tokens[symIdx], d) && d.symbol[0] != '\0') {
+            std::strncpy(_tracer._symbol, d.symbol, sizeof(_tracer._symbol) - 1);
+        } else {
+            std::strncpy(_tracer._symbol, _stratName.c_str(), sizeof(_tracer._symbol) - 1);
+        }
+    }
 
     writeLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
              _numLegs, _tracer._symbol, _strategyId, _tracer._orderId, _tracer._time, sideOfPack_, _tracer._price, _tracer._ltp, _tracer._ltq, _tracer._slippage);
 
     float slippage = _tracer._slippage;
     _ms->sendTradeTracerToUI(_tracer, _interface);
+
     for (size_t i = 0; i < _numLegs; ++i) {
-        object_._cycleTradedLot[i]  = 0;
-        object_._cycleTradeValue[i] = 0;
+        int usedLots = cyclePacks * _ratios[i];
+        if (object_._cycleTradedLot[i] > usedLots) {
+            uint64_t avgValPerLot = object_._cycleTradeValue[i] / object_._cycleTradedLot[i];
+            object_._cycleTradedLot[i] -= usedLots;
+            object_._cycleTradeValue[i] -= static_cast<uint64_t>(usedLots) * avgValPerLot;
+        } else {
+            object_._cycleTradedLot[i]  = 0;
+            object_._cycleTradeValue[i] = 0;
+        }
     }
 
     if (_allowedSlippage > 0 && slippage > _allowedSlippage) {
@@ -359,48 +375,54 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
     }
 }
 
-auto RatioLegStrategy::ProcessLegResponse(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, const char* sideName_, size_t index_, int sideOfPack_, const oms_transaction& resp_, bool traded_, int lot_, uint64_t value_, int price_) -> bool {
-    if (resp_.hdr_.uid_.id_ != object_._uniqueID[index_]) return false;
-
-    object_._order[index_]->handle_confirmation(resp_);
-    ProcessTradeFill(object_, index_, traded_, lot_, value_);
-    if (_biddingLeg == index_ && traded_) {
-        object_._lastBiddingFillPrice = price_;
-    }
-    if (traded_) {
-        CheckSlippageThreshold(object_, sides_, param_, sideOfPack_, resp_);
-    }
-    return true;
-}
-
 void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     if (_strategyId != resp_.hdr_.uid_.composite_id_.strategy_id) return;
 
     std::string_view stratName = (_numLegs < std::size(kLegRatioNames)) ? kLegRatioNames[_numLegs] : "RatioLeg";
     _ms->sendOrderResponse(resp_, _interface, stratName);
 
-    bool     traded   = (resp_.hdr_.transaction_code == OMS_TRADE);
+    int idx = FindLegIndex(resp_.packet_.product_id_);
+    if (idx < 0) return;
+
+    auto side   = static_cast<ORDER_SIDE>(resp_.packet_.flags_.order_side);
+    bool isLong = (side == _longSide[idx]);
+    if (!isLong && side != _shortSide[idx]) return;
+
+    MarketBidding& object = isLong ? _longOrders : _shortOrders;
+
+    // ponytail: fast O(1) order confirmation handling
+    object._order[idx]->handle_confirmation(resp_);
+    object._uniqueID[idx] = resp_.hdr_.uid_.id_;
+
+    if (resp_.hdr_.transaction_code != OMS_TRADE) return;
+
     auto     price    = resp_.packet_.price_;
     auto     quantity = resp_.packet_.quantity_;
-    int      lot      = quantity / _lotSize;
+    int      lot      = (_lotSize > 0) ? (quantity / _lotSize) : 0;
     uint64_t value    = static_cast<uint64_t>(price) * quantity;
 
-    for (size_t i = 0; i < _numLegs; ++i) {
-        if (ProcessLegResponse(_longOrders, _longSide, _longParam, "Long", i, BUY_SIDE, resp_, traded, lot, value, price) ||
-            ProcessLegResponse(_shortOrders, _shortSide, _shortParam, "Short", i, SELL_SIDE, resp_, traded, lot, value, price)) {
-            break;
-        }
+    writeLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, qty: {}\n",
+             idx, resp_.packet_.product_id_, (side == BUY_SIDE ? "BUY" : "SELL"), static_cast<int>(side), price, quantity);
+
+    object._tradedLot[idx] += lot;
+    object._tradeValue[idx] += value;
+    object._cycleTradedLot[idx] += lot;
+    object._cycleTradeValue[idx] += value;
+
+    if (static_cast<size_t>(idx) == _biddingLeg) {
+        object._lastBiddingFillPrice = price;
     }
 
-    if (traded) {
-        if (HasUnhedgedLots(_longOrders)) {
-            _longOrders._order[_biddingLeg]->cancel_order();
-            SecondOrderBidding(_longOrders, _longParam, 1);
-        }
-        if (HasUnhedgedLots(_shortOrders)) {
-            _shortOrders._order[_biddingLeg]->cancel_order();
-            SecondOrderBidding(_shortOrders, _shortParam, -1);
-        }
+    const auto& sides      = isLong ? _longSide : _shortSide;
+    const auto& param      = isLong ? _longParam : _shortParam;
+    int         sideOfPack = isLong ? BUY_SIDE : SELL_SIDE;
+    int         multiplier = isLong ? 1 : -1;
+
+    CheckSlippageThreshold(object, sides, param, sideOfPack, resp_);
+
+    if (HasUnhedgedLots(object)) {
+        object._order[_biddingLeg]->cancel_order();
+        SecondOrderBidding(object, param, multiplier);
     }
 }
 
@@ -420,7 +442,7 @@ auto RatioLegStrategy::AdjustGap(double spread_) const noexcept -> double {
 
 auto RatioLegStrategy::GetBCmp() const -> WindRate {
     std::array<int, MAX_LEGS> prices{};
-    double rawSpread = ComputeRawSpread(_longSide, prices);
+    double                    rawSpread = ComputeRawSpread(_longSide, prices);
     return WindRate{
         ._price  = prices,
         ._spread = static_cast<float>(AdjustGap(rawSpread)),
@@ -429,7 +451,7 @@ auto RatioLegStrategy::GetBCmp() const -> WindRate {
 
 auto RatioLegStrategy::GetSCmp() const -> WindRate {
     std::array<int, MAX_LEGS> prices{};
-    double rawSpread = ComputeRawSpread(_shortSide, prices);
+    double                    rawSpread = ComputeRawSpread(_shortSide, prices);
     return WindRate{
         ._price  = prices,
         ._spread = static_cast<float>(AdjustGap(rawSpread)),
@@ -578,7 +600,6 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots
 
     if ((param_._spread > rate_._spread) || (object_._tradedLot[_biddingLeg] >= param_._totalQuantity)) {
         object_._order[_biddingLeg]->cancel_order();
-        writeLog("[RatioLeg] {} StragegyId: {} user spread > market spread {} > {}", _numLegs, _strategyId, param_._spread, rate_._spread);
         return;
     }
 
@@ -595,7 +616,7 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots
         if (status != 0) {
             writeLog("[RatioLeg] {} StragegyId: {} spread [._user = {}, ._market = {}, ._multiplier = {}, ._name = {}], {}\n",
                      __FUNCTION__, _strategyId, param_._spread, rate_._spread, multiplier_, name_, marketPrice);
-            object_._uniqueID[_biddingLeg] = _uid.id_;
+            object_._uniqueID[_biddingLeg] = status;
             object_._windRate              = rate_;
         } else {
             writeLog("[RatioLeg] {} StragegyId: {} failed to place order [._status = {}, ._price = {}, ._quantity = {}]", _numLegs, _strategyId, status, marketPrice, quantity);
@@ -686,7 +707,7 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const ParamLots& 
         if (status != 0) {
             writeLog("SecondOrderBidding [{}LegRatio] [mode = {}, leg = {}, retry = {}/{}, token = {}, price = {}, qty = {}]\n",
                      _numLegs, isAggressive ? "AGGRESSIVE_OPPOSITE" : "STORED_PLUS_TICKS", leg_, retryCount, _marketOrderRetries, _tokens[leg_], targetOrderPrice, quantity);
-            object_._uniqueID[leg_] = _uid.id_;
+            object_._uniqueID[leg_] = status;
             object_._hedgeRetryCount[leg_]++;
         }
     }
