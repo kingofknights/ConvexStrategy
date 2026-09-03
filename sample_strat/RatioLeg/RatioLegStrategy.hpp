@@ -200,6 +200,4 @@ class RatioLegStrategy {
     TradeTracer           _tracer;
     mutable std::ofstream _logFile;
     std::string           _logFileName;
-    std::string           _stratName;
-    std::string           _portfolio;
 };

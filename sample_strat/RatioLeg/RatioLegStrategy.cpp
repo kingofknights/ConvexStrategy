@@ -23,42 +23,6 @@ constexpr static std::string_view kLegRatioNames[] = {"0", "1", "2LegRatio", "3L
 
 RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t numLegs_, bool gapDiff_)
     : _ms(ms_), _strategyId(strategyId_), _interface(interface_), _numLegs(numLegs_), _gapDiff(gapDiff_) {
-    // ── Strategy Name & Portfolio for Log File ──────────────────────────────
-    if (json_.contains("Strategy")) {
-        const auto& stratJson = json_["Strategy"];
-        _stratName            = stratJson.value("SubType", stratJson.value("StrategyName", ""));
-        if (stratJson.contains("Portfolio")) {
-            if (stratJson["Portfolio"].is_string()) {
-                _portfolio = stratJson["Portfolio"].get<std::string>();
-            } else if (stratJson["Portfolio"].is_number()) {
-                _portfolio = std::to_string(stratJson["Portfolio"].get<int>());
-            }
-        } else if (stratJson.contains("PortfolioName")) {
-            _portfolio = stratJson["PortfolioName"].get<std::string>();
-        }
-    }
-    if (_stratName.empty()) {
-        if (_gapDiff) {
-            _stratName = (_numLegs == 4) ? "Box" : "ConRev";
-        } else {
-            _stratName = (_numLegs == 3) ? "Butterfly" : ((_numLegs < std::size(kLegRatioNames)) ? std::string(kLegRatioNames[_numLegs]) : "RatioLeg");
-        }
-    }
-    if (_portfolio.empty()) {
-        if (json_.contains("Portfolio")) {
-            if (json_["Portfolio"].is_string()) {
-                _portfolio = json_["Portfolio"].get<std::string>();
-            } else if (json_["Portfolio"].is_number()) {
-                _portfolio = std::to_string(json_["Portfolio"].get<int>());
-            }
-        } else if (json_.contains("PortfolioName")) {
-            _portfolio = json_["PortfolioName"].get<std::string>();
-        }
-    }
-    if (_portfolio.empty()) {
-        _portfolio = std::to_string(_strategyId);
-    }
-
     auto        now = std::chrono::system_clock::now();
     std::time_t tt  = std::chrono::system_clock::to_time_t(now);
     std::tm     local_tm{};
@@ -66,7 +30,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     char timeBuf[16];
     std::strftime(timeBuf, sizeof(timeBuf), "%H%M%S", &local_tm);
 
-    _logFileName = fmt::format("{}_{}_{}.log", _stratName, _portfolio, timeBuf);
+    _logFileName = fmt::format("{}Ratio_{}_{}.log", _numLegs, _strategyId, timeBuf);
     _logFile.open(_logFileName, std::ios::out | std::ios::app);
     writeLog(">>> [INIT] Opened log file: {}\n", _logFileName);
 
@@ -345,8 +309,11 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
         size_t         symIdx = (_biddingLeg < _numLegs) ? _biddingLeg : 0;
         if (_ms->getProductDetails(_tokens[symIdx], d) && d.symbol[0] != '\0') {
             std::strncpy(_tracer._symbol, d.symbol, sizeof(_tracer._symbol) - 1);
+        } else if (!_name.empty()) {
+            std::strncpy(_tracer._symbol, _name.c_str(), sizeof(_tracer._symbol) - 1);
         } else {
-            std::strncpy(_tracer._symbol, _stratName.c_str(), sizeof(_tracer._symbol) - 1);
+            auto defSym = fmt::format("{}Ratio", _numLegs);
+            std::strncpy(_tracer._symbol, defSym.c_str(), sizeof(_tracer._symbol) - 1);
         }
     }
 

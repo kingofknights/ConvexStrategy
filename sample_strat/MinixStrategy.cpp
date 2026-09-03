@@ -121,7 +121,7 @@ void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& 
         response["Status"]     = status_;
         response["StrategyId"] = strategyId_;
         std::cout << "SendStatus " << response.dump() << std::endl;
-        sendJsonChunkedToUI(9621, interface_, response.dump());
+        sendJsonChunkedToUI(100001, interface_, response.dump());
     };
 
     std::cout << "applyLegStrategyJson" << std::endl;
