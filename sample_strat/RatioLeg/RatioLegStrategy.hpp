@@ -47,6 +47,14 @@ class RatioLegStrategy {
         float _spread        = 0;
     };
 
+    struct LegSideCache {
+        std::array<ORDER_SIDE, MAX_LEGS> _oppQuoteSide{};
+        std::array<int, MAX_LEGS>        _signedRatio{};
+        std::array<double, MAX_LEGS>     _hedgeTargetDepthQty{};
+        std::array<int, MAX_LEGS>        _sliceQty{};
+        double                           _targetRawSpread = 0.0;
+    };
+
     struct MarketBidding {
         std::vector<OrderObjectPtrT> _order;
         std::vector<uint32_t>        _uniqueID;
@@ -56,6 +64,7 @@ class RatioLegStrategy {
         std::vector<uint64_t>        _cycleTradeValue;
         std::vector<size_t>          _hedgeRetryCount;
         int32_t                      _lastBiddingFillPrice = 0;
+        bool                         _isUnhedged           = false;
         WindRate                     _windRate;
 
         void resize(size_t n_) {
@@ -66,6 +75,8 @@ class RatioLegStrategy {
             _cycleTradedLot.assign(n_, 0);
             _cycleTradeValue.assign(n_, 0);
             _hedgeRetryCount.assign(n_, 0);
+            _isUnhedged           = false;
+            _lastBiddingFillPrice = 0;
             _windRate._price.fill(0);
         }
     };
@@ -97,11 +108,11 @@ class RatioLegStrategy {
     void OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_);
     void OnOrderResponse(const oms_transaction& resp_);
 
-    void OrderBiddingLogic(MarketBidding& object_, const ParamLots& param_, const WindRate& rate_, int multiplier_, const char* name_);
-    void SecondOrderBidding(MarketBidding& object_, const ParamLots& param_, int multiplier_);
+    void OrderBiddingLogic(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_, int multiplier_, const char* name_);
+    void SecondOrderBidding(MarketBidding& object_, const LegSideCache& cache_, const ParamLots& param_, int multiplier_);
     void CheckHedgeTimeout();
 
-    [[nodiscard]] auto CalculateHedgePrice(const MarketBidding& object_, const ParamLots& param_, int multiplier_, size_t hedgeLeg_) const -> int;
+    [[nodiscard]] auto CalculateHedgePrice(const MarketBidding& object_, const LegSideCache& cache_, int multiplier_, size_t hedgeLeg_) const -> int;
 
     [[nodiscard]] auto GetInterface() const -> int32_t;
     [[nodiscard]] auto GetStrategyID() const -> uint32_t;
@@ -138,20 +149,25 @@ class RatioLegStrategy {
         return -1;
     }
 
-    [[nodiscard]] auto HasUnhedgedLots(const MarketBidding& object_) const noexcept -> bool;
-    [[nodiscard]] auto CheckHedgeLegsDepth(const MarketBidding& object_, const ParamLots& param_) const -> bool;
-    [[nodiscard]] auto CheckBiddingLegDepth(const MarketBidding& object_) const -> bool;
-    void               EvaluateBidding(MarketBidding& object_, const ParamLots& param_, const WindRate& rate_, int multiplier_, const char* name_);
+    [[nodiscard]] inline auto HasUnhedgedLots(const MarketBidding& object_) const noexcept -> bool {
+        return object_._isUnhedged;
+    }
+    void               UpdateUnhedgedStatus(MarketBidding& object_) noexcept;
+    void               RebuildCache();
 
-    [[nodiscard]] auto ComputeRawSpread(const std::vector<ORDER_SIDE>& sides_, std::array<int, MAX_LEGS>& prices_) const -> double;
+    [[nodiscard]] auto CheckHedgeLegsDepth(const MarketBidding& object_, const LegSideCache& cache_) const -> bool;
+    [[nodiscard]] auto CheckBiddingLegDepth(const MarketBidding& object_) const -> bool;
+    void               EvaluateBidding(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_, int multiplier_, const char* name_);
+
+    [[nodiscard]] auto ComputeRawSpread(const LegSideCache& cache_, std::array<int, MAX_LEGS>& prices_) const -> double;
     [[nodiscard]] auto AdjustGap(double spread_) const noexcept -> double;
     [[nodiscard]] auto CalculateTradedLots(const MarketBidding& object_) const noexcept -> int;
 
     void CheckSlippageThreshold(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, int sideOfPack_, const oms_transaction& resp_);
-    void ExecuteHedgeLeg(MarketBidding& object_, const ParamLots& param_, int multiplier_, size_t leg_, int targetHedgeLots_);
+    void ExecuteHedgeLeg(MarketBidding& object_, const LegSideCache& cache_, const ParamLots& param_, int multiplier_, size_t leg_, int targetHedgeLots_);
 
-    MinixStrategy* _ms;
-    client_uid     _uid;
+    MinixStrategy* const _ms;
+    client_uid           _uid;
 
     int            _eventCount = 0;
     const uint32_t _strategyId;
@@ -196,6 +212,14 @@ class RatioLegStrategy {
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     bool _isBidding = false;
+
+    // ── Cached fast-path lookup ───────────────────────────────────────────────
+    LegSideCache                 _longCache;
+    LegSideCache                 _shortCache;
+    int                          _tradeGearPriceOffset = 0;
+    int                          _minTickDiffThreshold = 0;
+    std::array<double, MAX_LEGS> _buyCostCoeff{};
+    std::array<double, MAX_LEGS> _sellCostCoeff{};
 
     TradeTracer           _tracer;
     mutable std::ofstream _logFile;

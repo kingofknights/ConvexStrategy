@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.10] - 2026-09-03
+
+### Added
+- Implemented `LegSideCache` in `RatioLegStrategy` to precompute opposite quote sides, signed ratios, target hedge depth quantities, order slice quantities, and gap-adjusted target spreads once during `ParamUpdate` and constructor.
+- Added `_isUnhedged` flag to `MarketBidding` updated strictly on `OMS_TRADE` responses, replacing dynamic integer division loops on every tick with an $O(1)$ boolean check.
+- Precomputed `_tradeGearPriceOffset`, `_minTickDiffThreshold`, `_buyCostCoeff`, and `_sellCostCoeff` in `RatioLegStrategy::RebuildCache`.
+
+### Changed
+- Enforced `const` qualifiers across member pointers, local variables, parameters, and references across `RatioLegStrategy`.
+
+### Fixed
+- Fixed `RatioLegStrategy::GetOrderCount` reading `.qty` instead of `order_count_` from `st_mbp_info`.
+
 ## [1.5.9] - 2026-09-03
 
 ### Changed
