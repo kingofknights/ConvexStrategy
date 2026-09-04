@@ -13,7 +13,6 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,19 +83,11 @@ class RatioLegStrategy {
     RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t numLegs_, bool gapDiff_);
     ~RatioLegStrategy();
 
+    // ponytail: use fmt::print directly to file and stdout, eliminating std::ofstream and intermediate string allocations
     template <typename... Args>
-    void writeLog(fmt::format_string<Args...> fmt_str_, Args&&... args_) const {
-        std::string msg = fmt::format(fmt_str_, std::forward<Args>(args_)...);
-        if (_logFile.is_open()) {
-            _logFile << msg;
-            if (msg.empty() || msg.back() != '\n') {
-                _logFile << '\n';
-            }
-            _logFile.flush();
-        }
-        std::cout << msg;
-        if (msg.empty() || msg.back() != '\n') {
-            std::cout << '\n';
+    void WriteLog(fmt::format_string<Args...> fmt_str_, Args&&... args_) const {
+        if (_logFile) {
+            fmt::print(_logFile, fmt_str_, std::forward<Args>(args_)...);
         }
     }
 
@@ -129,6 +120,8 @@ class RatioLegStrategy {
     [[nodiscard]] auto GetCutPL() const -> double;
     [[nodiscard]] auto GetNetPL() const -> double;
     [[nodiscard]] auto GetM2M() const -> int;
+    [[nodiscard]] auto GetStatus() const -> StrategyStatus;
+    void               SetStatus(StrategyStatus status_);
     [[nodiscard]] auto IsActive() const -> bool;
     [[nodiscard]] auto IsStopped() const -> bool;
 
@@ -152,8 +145,8 @@ class RatioLegStrategy {
     [[nodiscard]] inline auto HasUnhedgedLots(const MarketBidding& object_) const noexcept -> bool {
         return object_._isUnhedged;
     }
-    void               UpdateUnhedgedStatus(MarketBidding& object_) noexcept;
-    void               RebuildCache();
+    void UpdateUnhedgedStatus(MarketBidding& object_) noexcept;
+    void RebuildCache();
 
     [[nodiscard]] auto CheckHedgeLegsDepth(const MarketBidding& object_, const LegSideCache& cache_) const -> bool;
     [[nodiscard]] auto CheckBiddingLegDepth(const MarketBidding& object_) const -> bool;
@@ -176,7 +169,7 @@ class RatioLegStrategy {
     const bool     _gapDiff;
     std::string    _name;
 
-    bool _active = false;
+    StrategyStatus _status = StrategyStatus_INACTIVE;
 
     int             _gap        = 0;
     int             _lotSize    = 0;
@@ -221,7 +214,7 @@ class RatioLegStrategy {
     std::array<double, MAX_LEGS> _buyCostCoeff{};
     std::array<double, MAX_LEGS> _sellCostCoeff{};
 
-    TradeTracer           _tracer;
-    mutable std::ofstream _logFile;
-    std::string           _logFileName;
+    TradeTracer _tracer;
+    std::FILE*  _logFile = nullptr;
+    std::string _logFileName;
 };

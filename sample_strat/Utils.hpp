@@ -27,6 +27,64 @@ struct TradeTracer {
     char     _symbol[11];
 };
 
+// ponytail: 4-byte enum for strategy lifecycle / running status
+enum StrategyStatus : int32_t {
+    StrategyStatus_INACTIVE = 0,
+    StrategyStatus_ACTIVE   = 1,
+    StrategyStatus_APPLIED  = 2,
+};
+
+inline auto StrategyStatusToString(StrategyStatus status_) -> std::string_view {
+    switch (status_) {
+        case StrategyStatus_ACTIVE:   return "ACTIVE";
+        case StrategyStatus_APPLIED:  return "APPLIED";
+        case StrategyStatus_INACTIVE: return "INACTIVE";
+        default:                      return "UNKNOWN";
+    }
+}
+
+inline auto StringToStrategyStatus(std::string_view status_) -> StrategyStatus {
+    std::string s;
+    s.reserve(status_.size());
+    for (char c : status_) {
+        s.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+
+    if (s == "ACTIVE" || s == "SUBSCRIBE" || s == "SUBSCRIBED" || s == "START") {
+        return StrategyStatus_ACTIVE;
+    }
+    if (s == "APPLIED" || s == "APPLY") {
+        return StrategyStatus_APPLIED;
+    }
+    return StrategyStatus_INACTIVE;
+}
+
+// ponytail: packed POD struct replaces JSON for spread, PnL, and status updates to UI (code 100002)
+struct StrategySpreadUpdate {
+    uint32_t       _strategyId;
+    StrategyStatus _status;     // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
+    float          _bcmp;
+    float          _scmp;
+    float          _cost;
+    float          _flp;
+    float          _gap;
+    int32_t        _bTrQ;       // buy traded lots
+    int32_t        _sTrQ;       // sell traded lots
+    float          _m2m;
+    float          _netPL;      // NLP
+    float          _rlp;
+    float          _cutPL;      // CLP
+    float          _trSpread;
+    float          _bATP;
+    float          _sATP;
+};
+
+// ponytail: packed POD struct replaces JSON for strategy lifecycle updates to UI (code 100001)
+struct StrategyStatusUpdate {
+    uint32_t       _strategyId;
+    StrategyStatus _status;     // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
+};
+
 struct UserPortfolio {
     UserIdT    _user;
     PortfolioT _portfolio;

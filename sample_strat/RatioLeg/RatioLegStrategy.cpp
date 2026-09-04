@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 
 constexpr static std::string_view kLegRatioNames[] = {"0", "1", "2LegRatio", "3LegRatio", "4LegRatio", "5LegRatio", "6LegRatio"};
 
@@ -27,12 +28,18 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     const std::time_t tt  = std::chrono::system_clock::to_time_t(now);
     std::tm           local_tm{};
     localtime_r(&tt, &local_tm);
+    char dateBuf[16];
+    std::strftime(dateBuf, sizeof(dateBuf), "%d%m%Y", &local_tm);
     char timeBuf[16];
     std::strftime(timeBuf, sizeof(timeBuf), "%H%M%S", &local_tm);
 
-    _logFileName = fmt::format("{}Ratio_{}_{}.log", _numLegs, _strategyId, timeBuf);
-    _logFile.open(_logFileName, std::ios::out | std::ios::app);
-    writeLog(">>> [INIT] Opened log file: {}\n", _logFileName);
+    const std::string logDir = fmt::format("log/{}", dateBuf);
+    std::error_code   ec;
+    std::filesystem::create_directories(logDir, ec);
+
+    _logFileName = fmt::format("{}/{}Ratio_{}_{}.log", logDir, _numLegs, _strategyId, timeBuf);
+    _logFile     = std::fopen(_logFileName.c_str(), "a");
+    WriteLog(">>> [INIT] Opened log file: {}\n", _logFileName);
 
     _qoute.resize(_numLegs);
     _tokens.assign(_numLegs, 0);
@@ -66,7 +73,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     for (size_t i = 0; i < _numLegs; ++i) {
         _ms->getProductDetails(_tokens[i], details[i]);
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
-        writeLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], details[i].symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
+        WriteLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], details[i].symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
     }
 
     if (_numLegs > 0) {
@@ -87,9 +94,10 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
 }
 
 RatioLegStrategy::~RatioLegStrategy() {
-    writeLog(">>> [DESTROY] Closing log file: {}\n", _logFileName);
-    if (_logFile.is_open()) {
-        _logFile.close();
+    WriteLog(">>> [DESTROY] Closing log file: {}\n", _logFileName);
+    if (_logFile) {
+        std::fclose(_logFile);
+        _logFile = nullptr;
     }
 }
 
@@ -193,7 +201,7 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _priceDepth      = std::min<size_t>(_priceDepth, 5U);
         _allowedBidDepth = std::min<size_t>(_allowedBidDepth, 5U);
 
-        writeLog(
+        WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
@@ -208,13 +216,21 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
 
     // ── Strategy meta ─────────────────────────────────────────────────────────
     if (json_.contains("Strategy")) {
-        const auto& strategy = json_["Strategy"];
-        _isBidding           = strategy.value("IsBidding", false);
+        const auto& strategy     = json_["Strategy"];
+        _isBidding               = strategy.value("IsBidding", false);
         const std::string status = strategy.value("Status", "None");
-        _name                = strategy.value("SubType", "Garbaged");
-        if (status == "Applied") {
-            _active = true;
-        } else if (status == "Unsubscribed") {
+        _name                    = strategy.value("SubType", "Garbaged");
+
+        _status = StringToStrategyStatus(status);
+
+        std::cout << "[RatioLeg:UpdateConfig] strat=" << _strategyId
+                  << " raw_status='" << status
+                  << "' -> _status=" << static_cast<int>(_status)
+                  << " (" << StrategyStatusToString(_status) << ")" << std::endl;
+        WriteLog("[RatioLeg:UpdateConfig] strat={} raw_status='{}' -> _status={} ({})\n",
+                 _strategyId, status, static_cast<int>(_status), StrategyStatusToString(_status));
+
+        if (_status == StrategyStatus_INACTIVE) {
             Stop();
         }
     }
@@ -222,7 +238,9 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
 }
 
 void RatioLegStrategy::Stop() {
-    _active = false;
+    _status = StrategyStatus_INACTIVE;
+    std::cout << "[RatioLeg:Stop] strat=" << _strategyId << " _status=INACTIVE" << std::endl;
+    WriteLog("[RatioLeg:Stop] strat={} _status=INACTIVE\n", _strategyId);
     for (size_t i = 0; i < _numLegs; ++i) {
         if (_longOrders._order[i]) {
             _longOrders._order[i]->cancel_order();
@@ -275,7 +293,7 @@ void RatioLegStrategy::OnTick(const Quote& event_, int64_t nowTs_) {
 
     ++_eventCount;
     _qoute[idx] = event_;
-    if (!_active) return;
+    if (!IsActive()) return;
 
     // ponytail: O(1) unhedged check - zero division/loops on tick hot path
     if (_longOrders._isUnhedged || _shortOrders._isUnhedged) {
@@ -310,7 +328,7 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
     float tradedSpread = 0.0f;
     for (size_t i = 0; i < _numLegs; ++i) {
         const float legAvgPrice = static_cast<float>(object_._cycleTradeValue[i]) / (object_._cycleTradedLot[i] * _lotSize);
-        writeLog("[SLIPPAGE {}Leg] [strat = {}] [leg = {}] Val: {}, Lot: {}, LotSize: {}, AvgPrice: {}\n",
+        WriteLog("[SLIPPAGE {}Leg] [strat = {}] [leg = {}] Val: {}, Lot: {}, LotSize: {}, AvgPrice: {}\n",
                  _numLegs, _strategyId, i, object_._cycleTradeValue[i], object_._cycleTradedLot[i], _lotSize, legAvgPrice);
         tradedSpread += (sides_[i] == BUY_SIDE ? -legAvgPrice : legAvgPrice) * _ratios[i];
     }
@@ -340,7 +358,7 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
         }
     }
 
-    writeLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
+    WriteLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
              _numLegs, _tracer._symbol, _strategyId, _tracer._orderId, _tracer._time, sideOfPack_, _tracer._price, _tracer._ltp, _tracer._ltq, _tracer._slippage);
 
     const float slippage = _tracer._slippage;
@@ -359,7 +377,7 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
     }
 
     if (_allowedSlippage > 0 && slippage > _allowedSlippage) {
-        writeLog("[SLIPPAGE {}Leg] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", _numLegs, slippage, _allowedSlippage);
+        WriteLog("[SLIPPAGE {}Leg] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", _numLegs, slippage, _allowedSlippage);
         Stop();
         _ms->Registerfortermination(_strategyId);
     }
@@ -391,7 +409,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     const int      lot      = (_lotSize > 0) ? (quantity / _lotSize) : 0;
     const uint64_t value    = static_cast<uint64_t>(price) * quantity;
 
-    writeLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, qty: {}\n",
+    WriteLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, qty: {}\n",
              idx, resp_.packet_.product_id_, (side == BUY_SIDE ? "BUY" : "SELL"), static_cast<int>(side), price, quantity);
 
     object._tradedLot[idx] += lot;
@@ -606,12 +624,12 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots
     if (quantity > 0 && diff >= _minTickDiffThreshold) {
         const auto status = _ms->update_order(order, _tokens[_biddingLeg], marketPrice, quantity, _uid);
         if (status != 0) {
-            writeLog("[RatioLeg] {} StragegyId: {} spread [._user = {}, ._market = {}, ._multiplier = {}, ._name = {}], {}\n",
+            WriteLog("[RatioLeg] {} StragegyId: {} spread [._user = {}, ._market = {}, ._multiplier = {}, ._name = {}], {}\n",
                      __FUNCTION__, _strategyId, param_._spread, rate_._spread, multiplier_, name_, marketPrice);
             object_._uniqueID[_biddingLeg] = status;
             object_._windRate              = rate_;
         } else {
-            writeLog("[RatioLeg] {} StragegyId: {} failed to place order [._status = {}, ._price = {}, ._quantity = {}]", _numLegs, _strategyId, status, marketPrice, quantity);
+            WriteLog("[RatioLeg] {} StragegyId: {} failed to place order [._status = {}, ._price = {}, ._quantity = {}]\n", _numLegs, _strategyId, status, marketPrice, quantity);
         }
     }
 }
@@ -673,7 +691,7 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const LegSideCach
     if (targetOrderPrice > 0 && targetOrderPrice != currentPlacePrice) {
         const auto status = _ms->update_order(order, _tokens[leg_], targetOrderPrice, quantity, _uid);
         if (status != 0) {
-            writeLog("SecondOrderBidding [{}LegRatio] [mode = {}, leg = {}, retry = {}/{}, token = {}, price = {}, qty = {}]\n",
+            WriteLog("SecondOrderBidding [{}LegRatio] [mode = {}, leg = {}, retry = {}/{}, token = {}, price = {}, qty = {}]\n",
                      _numLegs, isAggressive ? "AGGRESSIVE_OPPOSITE" : "STORED_PLUS_TICKS", leg_, retryCount, _marketOrderRetries, _tokens[leg_], targetOrderPrice, quantity);
             object_._uniqueID[leg_] = status;
             object_._hedgeRetryCount[leg_]++;
@@ -691,7 +709,7 @@ void RatioLegStrategy::SecondOrderBidding(MarketBidding& object_, const LegSideC
 }
 
 void RatioLegStrategy::CheckHedgeTimeout() {
-    if (!_active) return;
+    if (!IsActive()) return;
     if (_longOrders._isUnhedged) {
         _longOrders._order[_biddingLeg]->cancel_order();
         SecondOrderBidding(_longOrders, _longCache, _longParam, 1);
@@ -736,13 +754,23 @@ auto RatioLegStrategy::CheckPriceDepth(const Quote& event_, size_t depth_, ORDER
     return true;
 }
 
-auto RatioLegStrategy::IsActive() const -> bool { return _active; }
-auto RatioLegStrategy::IsStopped() const -> bool { return !_active; }
+auto RatioLegStrategy::IsActive() const -> bool { return _status == StrategyStatus_APPLIED; }
+auto RatioLegStrategy::IsStopped() const -> bool { return _status == StrategyStatus_INACTIVE; }
+auto RatioLegStrategy::GetStatus() const -> StrategyStatus { return _status; }
+
+void RatioLegStrategy::SetStatus(StrategyStatus status_) {
+    _status = status_;
+    std::cout << "[RatioLeg:SetStatus] strat=" << _strategyId
+              << " _status=" << static_cast<int>(_status)
+              << " (" << StrategyStatusToString(_status) << ")" << std::endl;
+    WriteLog("[RatioLeg:SetStatus] strat={} _status={} ({})\n",
+             _strategyId, static_cast<int>(_status), StrategyStatusToString(_status));
+}
 
 void RatioLegStrategy::Print() {
-    writeLog("------------------- Ratio StragegyId: {} [._eventCount = {}]", _strategyId, _eventCount);
+    WriteLog("------------------- Ratio StragegyId: {} [._eventCount = {}]\n", _strategyId, _eventCount);
     for (size_t index = 0; index < _numLegs; ++index) {
-        writeLog("token {} Buy [._price = {}] Sell [._price = {}] LTP = {}, LTQ = {}", _tokens[index], int(_qoute[index].message.bid_levels[0].price), int(_qoute[index].message.ask_levels[0].price),
+        WriteLog("token {} Buy [._price = {}] Sell [._price = {}] LTP = {}, LTQ = {}\n", _tokens[index], int(_qoute[index].message.bid_levels[0].price), int(_qoute[index].message.ask_levels[0].price),
                  int(_qoute[index].message.ltp_), int(_qoute[index].message.ltq_));
     }
     _eventCount = 0;

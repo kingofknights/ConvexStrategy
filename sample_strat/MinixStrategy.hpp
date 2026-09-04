@@ -60,8 +60,9 @@ class MinixStrategy : public AlgoBase {
 
     // Once per ~1s, echo strategy updates back to the GUI.
     void sendStrategySpreadsToUI();
-    // GUI framing: one metadata packet {"packet_count":N,...} then N 1500-byte chunks.
-    void sendJsonChunkedToUI(int32_t message_code_, int32_t interface_, const std::string& payload_);
+    // ponytail: direct binary POD sending to UI matching trade tracer pattern
+    void sendStrategySpreadToUI(const StrategySpreadUpdate& update_, int32_t interface_);
+    void sendStrategyStatusToUI(uint32_t strategyId_, StrategyStatus status_, int32_t interface_);
     void sendTradeTracerToUI(const TradeTracer& tracer_, int32_t interface_);
 
     struct JsonReassembly {

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.11] - 2026-09-04
+
+### Added
+- Implemented direct binary packed C POD struct protocol to send UI updates via `UIStruct::message` (`StrategySpreadUpdate` on code `100002` [64 bytes] and `StrategyStatusUpdate` on code `100001` [8 bytes]), matching the Trade Tracker (`100004`) pattern.
+- Added 4-byte `StrategyStatus` enum (`StrategyStatus_INACTIVE = 0`, `StrategyStatus_ACTIVE = 1`, `StrategyStatus_APPLIED = 2`) and helper functions `StrategyStatusToString` and `StringToStrategyStatus` in `sample_strat/Utils.hpp`.
+- Added `UI_BINARY_PROTOCOL_SPEC.md` documenting binary protocol wire layout, byte offset map, and UI parsing integration guide for the frontend team.
+
+### Changed
+- Replaced legacy chunked JSON dispatch (`sendJsonChunkedToUI`) in `MinixStrategy` with zero-allocation binary methods `sendStrategySpreadToUI` and `sendStrategyStatusToUI`.
+- Removed `_active` boolean flag from `RatioLegStrategy` and transitioned execution gating to rely directly on `_status` (`IsActive` returns true for `StrategyStatus_APPLIED`, `IsStopped` returns true for `StrategyStatus_INACTIVE`).
+- Optimized file logging in `RatioLegStrategy` using `fmt::print` with `std::FILE*`.
+- Updated `project_flow_documentation.md` to document the 64-byte binary POD UI protocol.
+
+### Fixed
+- Fixed strategy status reporting `INACTIVE` upon receiving "Subscribe" action by supporting case-insensitive variants in `StringToStrategyStatus` and decoupling status lookup from the legacy `_active` flag.
+
 ## [1.5.10] - 2026-09-03
 
 ### Added

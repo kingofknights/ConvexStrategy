@@ -116,12 +116,10 @@ void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& 
     using aef::infra::ui_cmd::StrategyDatafromui;
     using aef::infra::ui_cmd::TokenDatafromui;
 
-    auto sendStatus = [this, interface_](std::string status_, int strategyId_) {
-        json response;
-        response["Status"]     = status_;
-        response["StrategyId"] = strategyId_;
-        std::cout << "SendStatus " << response.dump() << std::endl;
-        sendJsonChunkedToUI(100001, interface_, response.dump());
+    // ponytail: send binary status update directly without JSON
+    auto sendStatus = [this, interface_](std::string_view status_, int strategyId_) {
+        const auto statusEnum = StringToStrategyStatus(status_);
+        sendStrategyStatusToUI(static_cast<uint32_t>(strategyId_), statusEnum, interface_);
     };
 
     std::cout << "applyLegStrategyJson" << std::endl;
@@ -133,7 +131,7 @@ void MinixStrategy::applyLegStrategyJson(int32_t interface_, const std::string& 
         std::string name       = strategy.value("SubType", "");
         std::string status     = strategy.value("Status", "");
         int         strategyId = ljInt(strategy, "StrategyId", 0);
-        std::cout << name << " " << status << " " << strategyId << std::endl;
+        std::cout << "[applyLegStrategyJson] SubType='" << name << "' Status='" << status << "' StrategyId=" << strategyId << std::endl;
 
         if (name == "2LegRatio") {
             sendStatus(status, strategyId);
@@ -174,28 +172,49 @@ void MinixStrategy::handleRatioLegStrategy(const nlohmann::json& root_,
         auto     status           = strategy["Status"].get<std::string>();
         uint32_t strategyID       = strategy["StrategyId"].get<uint32_t>();
         strategyJson_[strategyID] = jsonText_;
-        if (status == "Subscribed" or status == "New") {
+
+        const StrategyStatus targetStatus = StringToStrategyStatus(status);
+        std::string          upperStatus;
+        upperStatus.reserve(status.size());
+        for (char c : status) {
+            upperStatus.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+
+        if (upperStatus == "SUBSCRIBED" || upperStatus == "SUBSCRIBE" || upperStatus == "NEW" || upperStatus == "ACTIVE") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator == ratioStrats_.end()) {
-                ratioStrats_[strategyID] = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
+                std::cout << "[handleRatioLegStrategy] Creating new RatioLegStrategy for strat=" << strategyID
+                          << " with status=" << StrategyStatusToString(targetStatus) << std::endl;
+                auto* strat = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
+                strat->SetStatus(targetStatus);
+                ratioStrats_[strategyID] = strat;
+            } else {
+                std::cout << "[handleRatioLegStrategy] Updating existing RatioLegStrategy for strat=" << strategyID
+                          << " with status=" << StrategyStatusToString(targetStatus) << std::endl;
+                iterator->second->ParamUpdate(root_);
+                iterator->second->SetStatus(targetStatus);
             }
-        } else if (status == "Applied") {
+        } else if (upperStatus == "APPLIED" || upperStatus == "APPLY") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
                 iterator->second->ParamUpdate(root_);
+                iterator->second->SetStatus(targetStatus);
             } else {
-                auto strat               = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
+                auto strat = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
+                strat->SetStatus(targetStatus);
                 ratioStrats_[strategyID] = strat;
                 strat->ParamUpdate(root_);
             }
-        } else if (status == "Unsubscribed") {
+        } else if (upperStatus == "UNSUBSCRIBED" || upperStatus == "UNSUBSCRIBE" || upperStatus == "STOP") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
+                std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyID << std::endl;
                 iterator->second->Stop();
             }
-        } else if (status == "Deleted") {
+        } else if (upperStatus == "DELETED" || upperStatus == "DELETE") {
             auto iterator = ratioStrats_.find(strategyID);
             if (iterator != ratioStrats_.end()) {
+                std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyID << std::endl;
                 iterator->second->Stop();
                 delete iterator->second;
                 ratioStrats_.erase(iterator);
@@ -373,11 +392,7 @@ int MinixStrategy::doWork() {
         for (int strategyId : _strategiesToTerminate) {
             auto it = ratioStrats_.find(static_cast<uint32_t>(strategyId));
             if (it != ratioStrats_.end()) {
-                nlohmann::json response;
-                response["Status"]     = "Unsubscribed";
-                response["StrategyId"] = strategyId;
-                sendJsonChunkedToUI(100001, it->second->GetInterface(), response.dump());
-
+                sendStrategyStatusToUI(static_cast<uint32_t>(strategyId), StrategyStatus_INACTIVE, it->second->GetInterface());
                 it->second->Stop();
             }
         }
@@ -391,68 +406,59 @@ void MinixStrategy::Registerfortermination(int strategyId_) {
 }
 
 void MinixStrategy::sendStrategySpreadsToUI() {
-    auto sendRatioUI = [&](auto* ratio) {
-        json j;
-        j["StrategyId"] = ratio->GetStrategyID();
-        j["Status"]     = "Updates";
-        j["BCmp"]       = ratio->GetBCmp()._spread / 100.0F;
-        j["SCmp"]       = ratio->GetSCmp()._spread / 100.0F;
-        j["Cost"]       = static_cast<float>(ratio->GetCost()) / 100.0F;
-        j["FLP"]        = static_cast<float>(ratio->GetFLP()) / 100.0F;
-        j["Gap"]        = ratio->GetGap();
-        j["B-TrQ"]      = ratio->GetLongTradedLots();
-        j["S-TrQ"]      = ratio->GetShortTradedLots();
-        j["M2M"]        = static_cast<float>(ratio->GetM2M()) / 100.0F;
-        j["NLP"]        = static_cast<float>(ratio->GetNetPL()) / 100.0F;
-        j["RLP"]        = static_cast<float>(ratio->GetRLP()) / 100.0F;
-        j["CLP"]        = static_cast<float>(ratio->GetCutPL()) / 100.0F;
-        j["TrSpread"]   = static_cast<float>(ratio->GetRLP()) / 100.0F;
-        j["B-ATP"]      = static_cast<float>(ratio->GetBATP()) / 100.0F;
-        j["S-ATP"]      = static_cast<float>(ratio->GetSATP()) / 100.0F;
-        sendJsonChunkedToUI(100002, ratio->GetInterface(), j.dump());
+    auto sendRatioUI = [this](auto* ratio) {
+        StrategySpreadUpdate update{};
+        update._strategyId = ratio->GetStrategyID();
+        update._status     = ratio->GetStatus();
+        update._bcmp       = ratio->GetBCmp()._spread / 100.0F;
+        update._scmp       = ratio->GetSCmp()._spread / 100.0F;
+        update._cost       = static_cast<float>(ratio->GetCost()) / 100.0F;
+        update._flp        = static_cast<float>(ratio->GetFLP()) / 100.0F;
+        update._gap        = static_cast<float>(ratio->GetGap());
+        update._bTrQ       = ratio->GetLongTradedLots();
+        update._sTrQ       = ratio->GetShortTradedLots();
+        update._m2m        = static_cast<float>(ratio->GetM2M()) / 100.0F;
+        update._netPL      = static_cast<float>(ratio->GetNetPL()) / 100.0F;
+        update._rlp        = static_cast<float>(ratio->GetRLP()) / 100.0F;
+        update._cutPL      = static_cast<float>(ratio->GetCutPL()) / 100.0F;
+        update._trSpread   = static_cast<float>(ratio->GetRLP()) / 100.0F;
+        update._bATP       = static_cast<float>(ratio->GetBATP()) / 100.0F;
+        update._sATP       = static_cast<float>(ratio->GetSATP()) / 100.0F;
+        sendStrategySpreadToUI(update, ratio->GetInterface());
         // ratio->Print();
     };
 
     for (auto& kv : ratioStrats_) sendRatioUI(kv.second);
 }
 
-void MinixStrategy::sendJsonChunkedToUI(int32_t message_code_, int32_t interface_, const std::string& payload_) {
-    constexpr size_t max_chunk_size = 1500;
-    int32_t          current_ts     = static_cast<int32_t>(
-        std::chrono::system_clock::now().time_since_epoch().count() / 1000000);
-    int packet_count =
-        static_cast<int>((payload_.size() + max_chunk_size - 1) / max_chunk_size);
-    if (packet_count < 1)
-        packet_count = 1;
+// ponytail: send binary spread update to UI matching trade tracer pattern (code 100002)
+void MinixStrategy::sendStrategySpreadToUI(const StrategySpreadUpdate& update_, int32_t interface_) {
+    aef::infra::ui_cmd::UIStruct ui{};
+    ui.header.message_code   = 100002;
+    ui.header.interface_id   = interface_;
+    ui.header.message_length = 1520;
+    ui.header.component_id   = 1;
+    ui.header.timestamp      = 0;
+    std::memset(ui.message, 0, sizeof(ui.message));
+    std::memcpy(ui.message, &update_, sizeof(update_));
+    sentoUI(ui);
+}
 
-    {
-        aef::infra::ui_cmd::UIStruct ui{};
-        ui.header.message_code   = message_code_;
-        ui.header.component_id   = 1;
-        ui.header.timestamp      = current_ts;
-        ui.header.interface_id   = interface_;
-        ui.header.message_length = 1520;
-        nlohmann::json header;
-        header["packet_count"] = packet_count;
-        header["timestamp"]    = current_ts;
-        std::string h          = header.dump();
-        std::memset(ui.message, 0, sizeof(ui.message));
-        std::memcpy(ui.message, h.c_str(), std::min(h.size(), max_chunk_size));
-        sentoUI(ui);
-    }
-    for (int i = 0; i < packet_count; i++) {
-        std::string chunk =
-            payload_.substr(static_cast<size_t>(i) * max_chunk_size, max_chunk_size);
-        aef::infra::ui_cmd::UIStruct ui{};
-        ui.header.message_code   = message_code_;
-        ui.header.interface_id   = interface_;
-        ui.header.message_length = 1520;
-        ui.header.component_id   = 1;
-        ui.header.timestamp      = current_ts;
-        std::memset(ui.message, 0, sizeof(ui.message));
-        std::memcpy(ui.message, chunk.c_str(), chunk.size());
-        sentoUI(ui);
-    }
+// ponytail: send binary lifecycle status update to UI (code 100001)
+void MinixStrategy::sendStrategyStatusToUI(uint32_t strategyId_, StrategyStatus status_, int32_t interface_) {
+    StrategyStatusUpdate update{};
+    update._strategyId = strategyId_;
+    update._status     = status_;
+
+    aef::infra::ui_cmd::UIStruct ui{};
+    ui.header.message_code   = 100001;
+    ui.header.interface_id   = interface_;
+    ui.header.message_length = 1520;
+    ui.header.component_id   = 1;
+    ui.header.timestamp      = 0;
+    std::memset(ui.message, 0, sizeof(ui.message));
+    std::memcpy(ui.message, &update, sizeof(update));
+    sentoUI(ui);
 }
 
 void MinixStrategy::onBcastData(
@@ -647,7 +653,12 @@ auto MinixStrategy::update_order(OrderObjectPtrT& order_, int32_t token_, int32_
 }
 
 void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t interface_, std::string_view name_) {
-    constexpr static double      TenYearsInSeconds = 315513000 * 10e9;
+    OrderResponse responseType = GetOrderResponsee(response_.hdr_.transaction_code);
+
+    if (responseType == OrderResponse_NONE) {
+        return;
+    }
+
     aef::infra::ui_cmd::UIStruct ui{};
     ui.header.message_code   = 100003;
     ui.header.interface_id   = interface_;
@@ -668,7 +679,7 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t 
     response._userDetails                   = details;
 
     OrderResponseInfoT info = {};
-    info._response          = GetOrderResponsee(response_.hdr_.transaction_code);
+    info._response          = responseType;
     info._timestamp         = response_.hdr_.exchange_timestamp;
     info._orderId           = response_.packet_.exchange_order_id;
     info._uniqueId          = response_.hdr_.uid_.id_;
@@ -682,9 +693,6 @@ void MinixStrategy::sendOrderResponse(const oms_transaction& response_, int32_t 
     }
 
     response._response = info;
-    if (info._response == OrderResponse_NONE) {
-        return;
-    }
     std::memcpy(ui.message, &response, sizeof(response));
     sentoUI(ui);
 }

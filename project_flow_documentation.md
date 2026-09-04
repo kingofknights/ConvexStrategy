@@ -60,9 +60,10 @@ Communication with the front-end graphical interface requires a reassembly layer
 * **`delete`**: Stops the target strategy, unsubscribes the relevant tokens, deallocates the strategy object, and purges references.
 
 ### C. Sending Updates Back (From Strategy to GUI)
-Every ~1 second, the engine’s `doWork()` loop calls `sendStrategySpreadsToUI()`. It constructs the update JSON, appends the latest metric fields, and packages it:
-1. Pushes a Metadata packet with `packet_count` to message code `9612` (Interface ID `22`).
-2. Iterates and transfers the payload in 1500-byte segments.
+Every ~1 second, the engine’s `doWork()` loop calls `sendStrategySpreadsToUI()`. It sends binary POD structs directly to the UI (Trade Tracker pattern):
+1. **Strategy Spread & PnL Updates** (`StrategySpreadUpdate`): Dispatched on message code `100002` via single `memcpy` into `UIStruct::message`. Contains strategy ID, 4-byte `StrategyStatus` enum (`StrategyStatus_INACTIVE = 0`, `StrategyStatus_ACTIVE = 1`, `StrategyStatus_APPLIED = 2`), spread metrics (`BCmp`, `SCmp`, `FLP`, `Gap`), execution metrics (`B-TrQ`, `S-TrQ`), and PnL (`M2M`, `NLP`, `RLP`, `CLP`, `B-ATP`, `S-ATP`).
+2. **Strategy Lifecycle Status Updates** (`StrategyStatusUpdate`): Dispatched on message code `100001` via single `memcpy` into `UIStruct::message` for state transitions (`StrategyStatus` enum).
+3. Zero JSON serialization, chunking, or heap allocations are used. Total `StrategySpreadUpdate` payload is 64 bytes.
 
 ---
 
