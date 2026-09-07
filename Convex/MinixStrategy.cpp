@@ -535,7 +535,7 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) {
 /**
  * @brief Push a heartbeat update to the UI layer.
  */
-int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token_, int32_t cur_price_, int32_t qty_) {
+int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token_, int32_t cur_price_, int32_t orderQuantity_) {
     // Quote quoteC;
     // getLastQuote(token, quoteC);
     int  uid = 0;
@@ -544,42 +544,42 @@ int MinixStrategy::update_order(OrderMap& order_handle_, int32_t token_, int32_t
     // clientUID.id_ << std::endl;
     if (itr != order_handle_.end()) {
         auto& order = itr->second;
-        qty_ -= order.get_filled_qty();
+        orderQuantity_ -= order.get_filled_qty();
         // std::cout << "QTY from UPdate order : " << qty << std::endl;
         if (order.get_current_state() !=
             static_cast<uint32_t>(
                 execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE)) {
             if (!order.is_response_pending()) {
-                if (qty_ > 0 && order.get_open_price() != cur_price_) {
+                if (orderQuantity_ > 0 && order.get_open_price() != cur_price_) {
                     order.set_time_stamps(event_timestamp_, trigger_timestamp_,
                                           aef::infra::get_realtime_in_nanos());
-                    uid = order.update_order(cur_price_, qty_);
+                    uid = order.update_order(cur_price_, orderQuantity_);
                     LOG_DEBUG(
                         "[ORDER] FIRE MODIFY token=%d side=%-4s price=%d qty=%d uid=%d",
                         token_, omsSideName(static_cast<int>(order.get_side())), cur_price_,
-                        qty_, uid);
+                        orderQuantity_, uid);
                     if (uid) {
-                        portfolio_mgr_.on_order_modify(order.get_uid(), cur_price_, qty_);
+                        portfolio_mgr_.on_order_modify(order.get_uid(), cur_price_, orderQuantity_);
                     }
                 }
             }
         } else {
             if (!order.is_response_pending()) {
-                if (qty_ > 0 && order.get_open_price() != cur_price_) {
+                if (orderQuantity_ > 0 && order.get_open_price() != cur_price_) {
                     ++clientUID.composite_id_.request_id;  // print_depth(token);
                     if (clientUID.composite_id_.request_id >= MAX_REQUEST_ID) {
                         LOG_ERROR(" Stop Trading AS max allowed Orders Breach");
                     } else {
                         order.set_time_stamps(event_timestamp_, trigger_timestamp_,
                                               aef::infra::get_realtime_in_nanos());
-                        uid = order.place_order(cur_price_, qty_, clientUID.id_);
+                        uid = order.place_order(cur_price_, orderQuantity_, clientUID.id_);
                         LOG_DEBUG(
                             "[ORDER] FIRE NEW    token=%d side=%-4s price=%d qty=%d uid=%d",
                             token_, omsSideName(static_cast<int>(order.get_side())),
-                            cur_price_, qty_, uid);
+                            cur_price_, orderQuantity_, uid);
                         if (uid) {
                             portfolio_mgr_.on_order_placed(uid, token_, order.get_side(),
-                                                           cur_price_, qty_);
+                                                           cur_price_, orderQuantity_);
                         }
                         //     cout << strategyNumber << " " <<
                         //     clientUID.composite_id_.client_id << " " <<

@@ -43,7 +43,7 @@ class MinixStrategy : public AlgoBase {
 
     using OrderMap = std::unordered_map<int32_t, execution_strat::order_instance>;
     /** @brief Place or modify an order entry in the supplied map. */
-    int  update_order(OrderMap& order_handle_, int32_t token_, int32_t price_, int32_t qty_);
+    int  update_order(OrderMap& order_handle_, int32_t token_, int32_t price_, int32_t orderQuantity_);
     auto update_order(OrderObjectPtrT& order_, int32_t token_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> int;
     /** @brief Cancel an active order if present. */
     bool cancel_order(OrderMap& order_handle_, int32_t token_);

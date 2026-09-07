@@ -18,7 +18,10 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -ggdb -O0 -g3 -mtune=g
 
 
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(
+    ${CMAKE_SOURCE_DIR}/vendor/minix/include
+    ${CMAKE_SOURCE_DIR}/vendor/minix
+)
 link_directories(${CMAKE_SOURCE_DIR}/lib)
 
 add_subdirectory(vendor)

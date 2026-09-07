@@ -49,8 +49,8 @@ class RatioLegStrategy {
     struct LegSideCache {
         std::array<ORDER_SIDE, MAX_LEGS> _oppQuoteSide{};
         std::array<int, MAX_LEGS>        _signedRatio{};
-        std::array<double, MAX_LEGS>     _hedgeTargetDepthQty{};
-        std::array<int, MAX_LEGS>        _sliceQty{};
+        std::array<double, MAX_LEGS>     _hedgeTargetDepthQuantity{};
+        std::array<int, MAX_LEGS>        _sliceQuantity{};
         double                           _targetRawSpread = 0.0;
     };
 
@@ -126,9 +126,9 @@ class RatioLegStrategy {
     [[nodiscard]] auto IsStopped() const -> bool;
 
   protected:
-    [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
-    [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
-    [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t index_) const -> int;
+    [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
+    [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
+    [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
     [[nodiscard]] auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int;
 
     [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
@@ -136,8 +136,8 @@ class RatioLegStrategy {
 
   private:
     [[nodiscard]] inline auto FindLegIndex(int token_) const noexcept -> int {
-        for (size_t i = 0; i < _numLegs; ++i) {
-            if (_tokens[i] == token_) return static_cast<int>(i);
+        for (size_t instrumentIndex = 0; instrumentIndex < _numLegs; ++instrumentIndex) {
+            if (_tokens[instrumentIndex] == token_) return static_cast<int>(instrumentIndex);
         }
         return -1;
     }
@@ -198,7 +198,7 @@ class RatioLegStrategy {
     size_t _orderDepth         = 0;
     size_t _priceDepth         = 0;
     size_t _allowedBidDepth    = 0;
-    int    _thresholdQty       = 0;
+    int    _thresholdQuantity  = 0;
     int    _allowedSlippage    = 0;
     int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;

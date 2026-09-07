@@ -21,20 +21,13 @@ ConvexStrategy/
 ├── CMakeLists.txt                  # Top-level build config
 ├── @CHANGELOG.md                   # Versioned changelog (ALWAYS update on commit)
 ├── project_flow_documentation.md   # Architecture & flow doc (keep in sync)
-├── include/                        # Platform headers (do NOT modify)
-│   ├── AlgoBase.hpp                # Base class: OnTick, onBcastData, OnOrderResponse, onUIRequest
-│   ├── oms_api.hpp                 # OMS transaction codes, order structs
-│   ├── rms_api.hpp                 # Risk management API
-│   ├── ui_api.hpp                  # UI message structs (9612, 9620, 9621)
-│   ├── ProductInfo.hpp             # product_data snapshot struct, option types
-│   ├── Quote.hpp                   # Quote struct for tick events
-│   ├── TimeUtils.hpp               # Exchange epoch conversion utilities
-│   └── common.hpp                  # Shared typedefs
-├── vendor/                         # Vendor code (OMS order & portfolio managers)
-│   ├── CMakeLists.txt              # Vendor object library
-│   ├── order_instance.hpp/.cpp     # OMS order lifecycle state machine
-│   ├── PortfolioOrderManager.hpp/.cpp # Position & PnL bookkeeper
-│   └── nlohmann/                   # JSON library (header-only, do NOT modify)
+├── vendor/                         # Vendor libraries (nlohmann & minix platform)
+│   ├── CMakeLists.txt              # Vendor build config
+│   ├── nlohmann/                   # JSON library (header-only, do NOT modify)
+│   └── minix/                      # Minix platform framework & engine headers
+│       ├── CMakeLists.txt          # Minix object library build config
+│       ├── include/                # Platform & order headers (AlgoBase, oms_api, order_instance, PortfolioOrderManager, etc.)
+│       └── src/                    # Minix framework sources (order_instance.cpp, PortfolioOrderManager.cpp)
 └── Convex/                         # Strategy implementation (MinixStrategy & Ratio)
     ├── CMakeLists.txt              # Compiles SampleAlgo shared library
     ├── MinixStrategy.hpp/.cpp      # Central orchestrator & entry point (create/destroy hooks)
@@ -103,6 +96,19 @@ States: `STRAT_INITIAL_STATE → STRAT_ORDER_PLACED → STRAT_OMS_PLACED → STR
 ### Book Validity Guard
 - `booksReady()` blocks all execution if `Bid >= Ask` (crossed book).
 
+### HFT Coding & Mathematical Standards
+- **Explicit Non-Abbreviated Naming**:
+  - NEVER use cryptic abbreviations (`idx` → `index`, `qty` → `quantity`, `px` → `price`, `od` → `orderData`, `inst` → `instrument`).
+  - Differentiate market depth book levels from strategy order parameters: use `levelPrice` and `levelQuantity` for book depth scanning, and `orderQuantity` and `quantityAhead` for order queue position tracking.
+- **Prevent Variable & Index Shadowing**:
+  - NEVER allow local variables or parameters to shadow member fields or instrument indices (`instrumentIndex`, `futuresIndex`, `optionIndex`, `corrIndex`).
+  - Portfolio risk accumulators depend on accurate strike index resolution; index shadowing causes inventory drift, premature position limit blocking, and suppresses profitable trade entries.
+- **Price Grid Quantization & Symmetric Arithmetic**:
+  - Assume `lotSize > 0` and `tickSize > 0` unconditionally.
+  - All price rounding MUST use the `RoundOFF` template formula:
+    `price > 0 ? ((price + tickSize / 2) / tickSize) * tickSize : ((price - tickSize / 2) / tickSize) * tickSize`.
+  - Unify symmetric BUY/SELL branching via ternary operators (`?:`) and directional sign multipliers (`(side == BUY) ? 1 : -1`) to reduce code size, eliminate branch mispredictions, and minimize critical tick dispatch latency.
+
 ---
 
 ## 6. Build System
@@ -131,7 +137,7 @@ CMake target: `SampleAlgo` (shared library). Each new strategy `.cpp` must be ad
 
 4. **Response-pending guard** — always check `is_response_pending()` before modifying or cancelling an order.
 
-5. **Do not modify platform headers** in `include/` — these are provided by the MOSS engine and may be overwritten on upgrade.
+5. **Do not modify vendor code** in `vendor/` — `vendor/minix/include/` contains platform headers provided by the MOSS engine; `vendor/minix/src/` contains minix framework sources. Never edit these.
 
 6. **Keep `project_flow_documentation.md` in sync** — if architectural changes are made (new strategies, new UI protocol fields, new execution modes), update this doc.
 
@@ -167,11 +173,11 @@ Gap      = (K2 - K1) x 100 x boxRatio
 | Need to... | Look in |
 |-----------|---------|
 | Add a new strategy type | `MinixStrategy.cpp` → `applyLegStrategyJson` + new class in `Convex/` |
-| Change order placement logic | `order_instance.hpp/.cpp` |
-| Change position / PnL math | `PortfolioOrderManager.hpp/.cpp` |
-| Change UI message format | `MinixStrategy::sendStrategySpreadsToUI` + `ui_api.hpp` |
+| Change order placement logic | `vendor/minix/include/order_instance.hpp`, `vendor/minix/src/order_instance.cpp` |
+| Change position / PnL math | `vendor/minix/include/PortfolioOrderManager.hpp`, `vendor/minix/src/PortfolioOrderManager.cpp` |
+| Change UI message format | `MinixStrategy::sendStrategySpreadsToUI` + `vendor/minix/include/ui_api.hpp` |
 | Change subscription flags | `MinixStrategy` constructor |
 | Add a new execution mode | Strategy class `run()` method + `MinixStrategy` mode routing |
 | Fix EOD square-off timing | `eodTs_` computation in strategy constructor / `run()` |
-| Understand OMS codes | `include/oms_api.hpp` |
-| Understand market snapshot fields | `include/ProductInfo.hpp` |
+| Understand OMS codes | `vendor/minix/include/oms_api.hpp` |
+| Understand market snapshot fields | `vendor/minix/include/ProductInfo.hpp` |

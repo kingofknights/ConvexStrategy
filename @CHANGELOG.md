@@ -5,16 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-09-07
+
+### Changed
+- Moved all Minix platform sources and headers into `vendor/minix/` to consolidate all vendor code under a single directory:
+  - Platform headers (`AlgoBase.hpp`, `oms_api.hpp`, `rms_api.hpp`, `ui_api.hpp`, `ProductInfo.hpp`, `Quote.hpp`, `TimeUtils.hpp`, `common.hpp`, `LoggerExports.hpp`, `LoggerFrontend.hpp`, `MboTypes.hpp`, `MbpTypes.hpp`, `order_instance.hpp`, `PortfolioOrderManager.hpp`) moved to `vendor/minix/include/`.
+  - Framework sources (`order_instance.cpp`, `PortfolioOrderManager.cpp`) moved to `vendor/minix/src/`.
+  - Removed top-level `include/` and standalone `minix/` directories.
+- Updated `vendor/minix/CMakeLists.txt` to compile sources from `src/` and expose correct include paths.
+- Updated `vendor/CMakeLists.txt` to `add_subdirectory(minix)`.
+- Updated root `CMakeLists.txt`: `include_directories` now points to `vendor/minix/include` and `vendor/minix`; removed `add_subdirectory(minix)` (now handled inside `vendor`).
+- Updated `Convex/CMakeLists.txt` include directories to `vendor/minix` and `vendor/minix/include`.
+- Updated `GEMINI.md`, `.agents/AGENTS.md`, and `project_flow_documentation.md` to reflect new directory structure and file paths.
+
 ## [1.6.0] - 2026-09-07
 
 ### Added
-- Created dedicated top-level `vendor/` directory with `vendor/CMakeLists.txt` compiling vendor code (`order_instance.*`, `PortfolioOrderManager.*`) as a position-independent CMake `OBJECT` library.
+- Created dedicated `minix/` directory with `minix/CMakeLists.txt` compiling internal Minix platform code (`order_instance.*`, `PortfolioOrderManager.*`) as a position-independent CMake `OBJECT` library.
+- Created `vendor/CMakeLists.txt` exposing third-party libraries (`nlohmann/json.hpp`) as an interface library.
+- Added `RoundOFF` template formula in `Convex/Utils.hpp` for price grid quantization.
 
 ### Changed
 - Renamed strategy directory `sample_strat/` to `Convex/` via `git mv` to reflect project naming conventions.
-- Moved vendor code (`order_instance.hpp`, `order_instance.cpp`, `PortfolioOrderManager.hpp`, `PortfolioOrderManager.cpp`, and `nlohmann/`) into `vendor/` directory without altering vendor logic.
-- Updated root `CMakeLists.txt` to register `vendor` and `Convex` via `add_subdirectory`.
-- Updated `Convex/CMakeLists.txt` to link `vendor` OBJECT library and include `${PROJECT_SOURCE_DIR}/vendor`.
+- Separated code architecture by domain: `minix/` for internal platform components, `vendor/` for third-party libraries, `include/` for platform SDK headers, and `Convex/` for strategy implementation.
+- Updated root `CMakeLists.txt` to register `vendor`, `minix`, and `Convex` via `add_subdirectory`.
+- Updated `Convex/CMakeLists.txt` to link `minix` and `vendor` libraries.
+- Applied HFT coding and mathematical standards to `Convex/`: non-abbreviated naming (`instrumentIndex`, `levelIndex`, `buyQuantity`, `sellQuantity`, `netQuantity`, `orderQuantity`, `_sliceQuantity`, `_hedgeTargetDepthQuantity`, `_thresholdQuantity`), eliminated shadowing, and unified symmetric BUY/SELL branching with directional sign multipliers.
 - Updated documentation and agent guidance in `project_flow_documentation.md`, `GEMINI.md`, and `.agents/AGENTS.md`.
 
 ## [1.5.11] - 2026-09-04

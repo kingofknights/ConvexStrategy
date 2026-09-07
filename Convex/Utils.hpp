@@ -13,6 +13,13 @@ constexpr static double OptionSellCost = 0.001920434;
 constexpr static double FutureBuyCost  = 0.000042774;
 constexpr static double FutureSellCost = 0.000522774;
 
+// ponytail: HFT standard RoundOFF template formula for price grid quantization
+template <typename PriceType, typename TickType>
+[[nodiscard]] constexpr inline auto RoundOFF(PriceType price, TickType tickSize) noexcept -> PriceType {
+    return price > 0 ? ((price + tickSize / 2) / tickSize) * tickSize
+                     : ((price - tickSize / 2) / tickSize) * tickSize;
+}
+
 #pragma pack(push, 1)
 struct TradeTracer {
     uint64_t _time;
