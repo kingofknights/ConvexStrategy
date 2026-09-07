@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -54,7 +55,9 @@ class RatioLegStrategy {
         double                           _targetRawSpread = 0.0;
     };
 
-    struct MarketBidding {
+    class MarketBidding {
+        friend RatioLegStrategy;
+
         std::vector<OrderObjectPtrT> _order;
         std::vector<uint32_t>        _uniqueID;
         std::vector<int32_t>         _tradedLot;
@@ -99,11 +102,9 @@ class RatioLegStrategy {
     void OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_);
     void OnOrderResponse(const oms_transaction& resp_);
 
-    void OrderBiddingLogic(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_, int multiplier_, const char* name_);
-    void SecondOrderBidding(MarketBidding& object_, const LegSideCache& cache_, const ParamLots& param_, int multiplier_);
+    void OrderBiddingLogic(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_);
+    void SecondOrderBidding(MarketBidding& object_, const LegSideCache& cache_);
     void CheckHedgeTimeout();
-
-    [[nodiscard]] auto CalculateHedgePrice(const MarketBidding& object_, const LegSideCache& cache_, int multiplier_, size_t hedgeLeg_) const -> int;
 
     [[nodiscard]] auto GetInterface() const -> int32_t;
     [[nodiscard]] auto GetStrategyID() const -> uint32_t;
@@ -126,38 +127,39 @@ class RatioLegStrategy {
     [[nodiscard]] auto IsStopped() const -> bool;
 
   protected:
-    [[nodiscard]] auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
-    [[nodiscard]] auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
-    [[nodiscard]] auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) const -> int;
-    [[nodiscard]] auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> int;
+    [[nodiscard]] static auto GetPrice(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
+    [[nodiscard]] static auto GetQuantity(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
+    [[nodiscard]] static auto GetOrderCount(const Quote& event_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
+    [[nodiscard]] static auto GetAvailableQuantity(const Quote& event_, size_t depth_, ORDER_SIDE side_) noexcept -> int;
 
-    [[nodiscard]] auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
-    [[nodiscard]] auto CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) const -> bool;
+    [[nodiscard]] static auto CheckOrderDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
+    [[nodiscard]] static auto CheckPriceDepth(const Quote& event_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
+
+    [[nodiscard]] static auto HasUnhedgedLots(const MarketBidding& object_) noexcept -> bool;
 
   private:
-    [[nodiscard]] inline auto FindLegIndex(int token_) const noexcept -> int {
+    [[nodiscard]] auto FindLegIndex(int token_) const noexcept -> size_t {
         for (size_t instrumentIndex = 0; instrumentIndex < _numLegs; ++instrumentIndex) {
-            if (_tokens[instrumentIndex] == token_) return static_cast<int>(instrumentIndex);
+            if (_tokens[instrumentIndex] == token_) {
+                return instrumentIndex;
+            }
         }
-        return -1;
+        return INT_MAX;
     }
 
-    [[nodiscard]] inline auto HasUnhedgedLots(const MarketBidding& object_) const noexcept -> bool {
-        return object_._isUnhedged;
-    }
     void UpdateUnhedgedStatus(MarketBidding& object_) noexcept;
     void RebuildCache();
 
     [[nodiscard]] auto CheckHedgeLegsDepth(const MarketBidding& object_, const LegSideCache& cache_) const -> bool;
     [[nodiscard]] auto CheckBiddingLegDepth(const MarketBidding& object_) const -> bool;
-    void               EvaluateBidding(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_, int multiplier_, const char* name_);
+    void               EvaluateBidding(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_);
 
     [[nodiscard]] auto ComputeRawSpread(const LegSideCache& cache_, std::array<int, MAX_LEGS>& prices_) const -> double;
     [[nodiscard]] auto AdjustGap(double spread_) const noexcept -> double;
     [[nodiscard]] auto CalculateTradedLots(const MarketBidding& object_) const noexcept -> int;
 
     void CheckSlippageThreshold(MarketBidding& object_, const std::vector<ORDER_SIDE>& sides_, const ParamLots& param_, int sideOfPack_, const oms_transaction& resp_);
-    void ExecuteHedgeLeg(MarketBidding& object_, const LegSideCache& cache_, const ParamLots& param_, int multiplier_, size_t leg_, int targetHedgeLots_);
+    void ExecuteHedgeLeg(MarketBidding& object_, const LegSideCache& cache_, size_t leg_, int targetHedgeLots_);
 
     MinixStrategy* const _ms;
     client_uid           _uid;

@@ -3,7 +3,6 @@
  * @brief Implementation for open-order and position tracking utilities.
  */
 #include "PortfolioOrderManager.hpp"
-#include "Utils.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -71,28 +70,18 @@ void PortfolioOrderManager::apply_fill(PositionState& pos, ORDER_SIDE side, int3
     }
 }
 
-void PortfolioOrderManager::on_trade(int32_t token, ORDER_SIDE side, int32_t qty, int32_t price, bool is_option)
+void PortfolioOrderManager::on_trade(int32_t token, ORDER_SIDE side, int32_t qty, int32_t price)
 {
     auto& pos = positions_[token];
     pos.mark_price = pos.mark_price > 0.0 ? pos.mark_price : static_cast<double>(price);
     apply_fill(pos, side, qty, price);
-
-    // ponytail: Subtract transaction costs based on actual traded value (paise)
-    double cost = 0.0;
-    double buyCostCoeff = is_option ? OptionBuyCost : FutureBuyCost;
-    double sellCostCoeff = is_option ? OptionSellCost : FutureSellCost;
-
-    if (side == ORDER_SIDE::BUY_SIDE) {
-        cost = static_cast<double>(qty) * static_cast<double>(price) * buyCostCoeff;
-    } else {
-        cost = static_cast<double>(qty) * static_cast<double>(price) * sellCostCoeff;
-    }
-    pos.realized_pnl -= cost;
 }
 
-void PortfolioOrderManager::on_order_response(const oms_transaction& resp, bool is_option)
+void PortfolioOrderManager::on_order_response(const oms_transaction& resp)
 {
-    const uint32_t uid = resp.hdr_.uid_.id_;
+    const uint32_t uid = resp.hdr_.uid_.composite_id_.request_id != 0
+                             ? resp.hdr_.uid_.composite_id_.request_id
+                             : resp.hdr_.uid_.id_;
     const auto token = resp.packet_.product_id_;
     const auto side = static_cast<ORDER_SIDE>(resp.packet_.flags_.order_side);
     const auto qty = resp.packet_.quantity_;
@@ -110,8 +99,12 @@ void PortfolioOrderManager::on_order_response(const oms_transaction& resp, bool 
         case OMS_API_TRANS_CODES::OMS_ORDER_CANCELLED:
             on_order_cancel(uid);
             break;
+        case OMS_API_TRANS_CODES::OMS_REQ_REJ:
+        case OMS_API_TRANS_CODES::OMS_REQ_REJ2L:
+            on_order_cancel(uid);
+            break;
         case OMS_API_TRANS_CODES::OMS_TRADE: {
-            on_trade(token, side, qty, price, is_option);
+            on_trade(token, side, qty, price);
             auto it = open_orders_.find(uid);
             if (it != open_orders_.end()) {
                 it->second.open_qty = std::max<int32_t>(0, it->second.open_qty - qty);

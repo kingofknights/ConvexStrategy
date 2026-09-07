@@ -45,12 +45,10 @@ class PortfolioOrderManager {
     void on_order_modify(uint32_t uid, int32_t new_price, int32_t new_qty);
     /** @brief Remove an order when cancellation succeeds. */
     void on_order_cancel(uint32_t uid);
-
     /** @brief Convert a fill into position and realized PnL updates. */
-    void on_trade(int32_t token, ORDER_SIDE side, int32_t qty, int32_t price, bool is_option = false);
+    void on_trade(int32_t token, ORDER_SIDE side, int32_t qty, int32_t price);
     /** @brief Route a raw OMS response to the appropriate handler. */
-    void on_order_response(const oms_transaction& resp, bool is_option = false);
-
+    void on_order_response(const oms_transaction& resp);
     /** @brief Update mark price used for unrealized PnL. */
     void update_mark_price(int32_t token, double mark_price);
 
