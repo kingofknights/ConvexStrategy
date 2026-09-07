@@ -34,21 +34,16 @@ ConvexStrategy/
 │   ├── Quote.hpp                        # Quote struct for tick events
 │   ├── TimeUtils.hpp                    # Exchange epoch conversion utilities
 │   └── common.hpp                       # Shared typedefs
-└── sample_strat/                        # All strategy implementation lives here
-    ├── CMakeLists.txt                   # Compiles all strategies into libSampleAlgo.so
+├── vendor/                              # Vendor code (OMS order & portfolio managers)
+│   ├── CMakeLists.txt                   # Vendor object library
+│   ├── order_instance.hpp / .cpp        # OMS order lifecycle state machine
+│   ├── PortfolioOrderManager.hpp / .cpp # Position & PnL bookkeeper
+│   └── nlohmann/                        # Vendored JSON library — do NOT modify
+└── Convex/                              # Strategy implementation (MinixStrategy & Ratio)
+    ├── CMakeLists.txt                   # Compiles SampleAlgo shared library
     ├── MinixStrategy.hpp / .cpp         # Central orchestrator & dynamic entry point
-    ├── PortfolioOrderManager.hpp / .cpp # Position & PnL bookkeeper
-    ├── order_instance.hpp / .cpp        # OMS order lifecycle state machine
-    ├── Utils.hpp                        # Shared helper utilities
-    ├── BoxSpread/
-    │   └── BoxSpreadStrategy.hpp / .cpp # 4-leg box spread strategy
-    ├── Butterfly/
-    │   └── ButterflyStrategy.hpp / .cpp # 3-leg butterfly spread strategy
-    ├── ConversionReversal/              # Conversion/reversal strategy
-    ├── Ratio2Leg/
-    │   └── Ratio2LegStrategy.hpp / .cpp # 2-leg ratio spread strategy
-    ├── Ratio3Leg/ … Ratio6Leg/          # Higher N-leg ratio strategies
-    └── nlohmann/                        # Vendored JSON library — do NOT modify
+    ├── RatioLeg/                        # Ratio leg strategy implementation
+    └── Utils.hpp                        # Shared helper utilities & binary protocol structs
 ```
 
 ---
@@ -130,7 +125,7 @@ ninja
 # build/libSampleAlgo.so
 ```
 
-Each new strategy `.cpp` file must be added to `sample_strat/CMakeLists.txt`.
+Each new strategy `.cpp` file must be added to `Convex/CMakeLists.txt`.
 
 ---
 
@@ -154,9 +149,9 @@ Each new strategy `.cpp` file must be added to `sample_strat/CMakeLists.txt`.
 7. **`nlohmann/` is read-only.** It is a vendored header-only library.
 
 8. **New strategy classes must follow established pattern:**
-   - `.hpp` / `.cpp` in their own subdirectory under `sample_strat/`.
+   - `.hpp` / `.cpp` in their own subdirectory under `Convex/`.
    - Registered and routed in `MinixStrategy` (`applyLegStrategyJson`, `OnTick`, `OnOrderResponse`).
-   - Added to `sample_strat/CMakeLists.txt`.
+   - Added to `Convex/CMakeLists.txt`.
 
 9. **Always use Caveman ultra and ponytail ultra skills.** The agent must operate under these active customization settings during code modifications and planning tasks.
 
@@ -184,7 +179,7 @@ SCmp     = NetCredit - Gap   # positive = sell arb opportunity
 
 | Task | File(s) to look at |
 |------|--------------------|
-| Add a new strategy type | `MinixStrategy.cpp` → `applyLegStrategyJson` + new class under `sample_strat/` |
+| Add a new strategy type | `MinixStrategy.cpp` → `applyLegStrategyJson` + new class under `Convex/` |
 | Change order placement logic | `order_instance.hpp / .cpp` |
 | Change position / PnL math | `PortfolioOrderManager.hpp / .cpp` |
 | Change UI message format | `MinixStrategy::sendStrategySpreadsToUI` + `ui_api.hpp` |

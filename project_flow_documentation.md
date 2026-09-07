@@ -11,10 +11,10 @@ The strategy library exposes the strategy dynamic loading hooks (`create` / `des
 | Component / File | Purpose |
 | :--- | :--- |
 | **[AlgoBase.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/AlgoBase.hpp)** | The base interface class provided by the platform. Defines tick, order response, broadcast, and UI event hooks. |
-| **[MinixStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.hpp)** / **[MinixStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.cpp)** | The dynamic entry-point and central orchestrator. Reassembles front-end configuration messages, handles the lifecycle of multiple box strategies, and routes market ticks/order responses. |
+| **[MinixStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.hpp)** / **[MinixStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.cpp)** | The dynamic entry-point and central orchestrator. Reassembles front-end configuration messages, handles the lifecycle of multiple box strategies, and routes market ticks/order responses. |
 | **[BoxSpreadStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/BoxSpreadStrategy.hpp)** / **[BoxSpreadStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/BoxSpreadStrategy.cpp)** | A concrete implementation of a 4-leg option box spread strategy. Contains the math for real-time spreads, execution state machines, and EOD square-offs. |
-| **[order_instance.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/order_instance.hpp)** / **[order_instance.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/order_instance.cpp)** | Convenience wrapper around the raw OMS order lifecycle, transitioning orders through placement, exchange confirmation, modification, and cancellation. |
-| **[PortfolioOrderManager.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/PortfolioOrderManager.hpp)** / **[PortfolioOrderManager.cpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/PortfolioOrderManager.cpp)** | A lightweight position bookkeeper. Processes order responses, keeps track of net token positions, and aggregates realized/unrealized PnL. |
+| **[order_instance.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/order_instance.hpp)** / **[order_instance.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/order_instance.cpp)** | Convenience wrapper around the raw OMS order lifecycle, transitioning orders through placement, exchange confirmation, modification, and cancellation. |
+| **[PortfolioOrderManager.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/PortfolioOrderManager.hpp)** / **[PortfolioOrderManager.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/PortfolioOrderManager.cpp)** | A lightweight position bookkeeper. Processes order responses, keeps track of net token positions, and aggregates realized/unrealized PnL. |
 | **[ProductInfo.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/ProductInfo.hpp)** | Contains definitions for snapshot flags, option types, and the `product_data` market snapshot struct. |
 | **[oms_api.hpp](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/include/oms_api.hpp)** | Defines transaction codes, error codes, request statuses, order sides, types, and body structures used to interface with the OMS. |
 
@@ -32,7 +32,7 @@ graph TD
 ```
 
 ### Configuration & Subscription Setup
-* In the constructor of **[MinixStrategy](file:///home/vikram.lodhi@corp.merillife.com/Downloads/MOSS_STRAT/sample_strat/MinixStrategy.cpp#L438)**, the strategy pulls configuration parameter paths via `get_strategy_config_file()`.
+* In the constructor of **[MinixStrategy](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.cpp)**, the strategy pulls configuration parameter paths via `get_strategy_config_file()`.
 * It registers itself for market data events on the symbols configured in `bcast.csv` using the subscription flags:
   * `TER_UPDATE_EVENT` (Trade Execution Range)
   * `MBP_UPDATE_EVENT` (Market By Price / Snapshot Depth)

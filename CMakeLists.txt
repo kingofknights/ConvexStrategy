@@ -21,4 +21,5 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -ggdb -O0 -g3 -mtune=g
 include_directories(${CMAKE_SOURCE_DIR}/include)
 link_directories(${CMAKE_SOURCE_DIR}/lib)
 
-add_subdirectory(sample_strat)
+add_subdirectory(vendor)
+add_subdirectory(Convex)

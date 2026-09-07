@@ -275,7 +275,7 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
 }
 
 MinixStrategy::~MinixStrategy() {
-    log_info("sample_strat : destructor");
+    log_info("Convex : destructor");
     for (auto& kv : ratioStrats_) delete kv.second;
     ratioStrats_.clear();
 }
@@ -354,16 +354,6 @@ static const char* omsSideName(int s_) {
 
 void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp_) {
     for (auto& kv : ratioStrats_) kv.second->OnOrderResponse(order_resp_);
-
-    LOG_DEBUG(
-        "[ORDER] RECV %-18s token=%d side=%-4s qty=%d price=%d uid=%d "
-        "err=%d reason=%d",
-        omsEventName(order_resp_.hdr_.transaction_code),
-        order_resp_.packet_.product_id_,
-        omsSideName(static_cast<int>(order_resp_.packet_.flags_.order_side)),
-        order_resp_.packet_.quantity_, order_resp_.packet_.price_,
-        order_resp_.hdr_.uid_.composite_id_.request_id,
-        order_resp_.hdr_.error_code, order_resp_.hdr_.reason_code);
 
     // ponytail: query product details to identify options vs futures
     ProductDetails details;

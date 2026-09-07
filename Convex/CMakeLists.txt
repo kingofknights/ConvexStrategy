@@ -1,5 +1,5 @@
-add_library(SampleAlgo SHARED MinixStrategy.cpp RatioLeg/RatioLegStrategy.cpp
-                              order_instance.cpp PortfolioOrderManager.cpp)
+# ponytail: our strategy code linked with vendor objects
+add_library(SampleAlgo SHARED MinixStrategy.cpp RatioLeg/RatioLegStrategy.cpp)
 
 set_target_properties(
   SampleAlgo
@@ -10,7 +10,9 @@ set_target_properties(
 
 target_include_directories(
   SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg ${PROJECT_SOURCE_DIR})
+                     ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg
+                     ${PROJECT_SOURCE_DIR}
+                     ${PROJECT_SOURCE_DIR}/vendor)
 
 # target_link_libraries(SampleAlgo AlgoBase #                   fmt::fmt
 # -static-libstdc++)
@@ -22,7 +24,7 @@ find_package(PkgConfig REQUIRED)
 # ${PostgreSQL_INCLUDE_DIRS})
 
 # Use dynamic linking with proper library order
-target_link_libraries(SampleAlgo PRIVATE AlgoBase)
+target_link_libraries(SampleAlgo PRIVATE AlgoBase vendor)
 
 # Let the linker resolve dependencies automatically
 target_link_options(SampleAlgo PRIVATE "-Wl,-rpath,\$ORIGIN")

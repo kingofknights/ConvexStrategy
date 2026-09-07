@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-07
+
+### Added
+- Created dedicated top-level `vendor/` directory with `vendor/CMakeLists.txt` compiling vendor code (`order_instance.*`, `PortfolioOrderManager.*`) as a position-independent CMake `OBJECT` library.
+
+### Changed
+- Renamed strategy directory `sample_strat/` to `Convex/` via `git mv` to reflect project naming conventions.
+- Moved vendor code (`order_instance.hpp`, `order_instance.cpp`, `PortfolioOrderManager.hpp`, `PortfolioOrderManager.cpp`, and `nlohmann/`) into `vendor/` directory without altering vendor logic.
+- Updated root `CMakeLists.txt` to register `vendor` and `Convex` via `add_subdirectory`.
+- Updated `Convex/CMakeLists.txt` to link `vendor` OBJECT library and include `${PROJECT_SOURCE_DIR}/vendor`.
+- Updated documentation and agent guidance in `project_flow_documentation.md`, `GEMINI.md`, and `.agents/AGENTS.md`.
+
 ## [1.5.11] - 2026-09-04
 
 ### Added
