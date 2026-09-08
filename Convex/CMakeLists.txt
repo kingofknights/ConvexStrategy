@@ -1,35 +1,22 @@
-# ponytail: our strategy code linked with minix objects
-add_library(SampleAlgo SHARED MinixStrategy.cpp RatioLeg/RatioLegStrategy.cpp)
+project(ConvexMoss)
 
-set_target_properties(
-  SampleAlgo
-  PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-             ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-# find_package(fmt REQUIRED)
+find_package(fmt REQUIRED)
+find_package(nlohmann_json REQUIRED)
+add_library(${PROJECT_NAME} SHARED MinixStrategy.cpp
+                                   RatioLeg/RatioLegStrategy.cpp)
 
 target_include_directories(
-  SampleAlgo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg
-                     ${PROJECT_SOURCE_DIR}
-                     ${PROJECT_SOURCE_DIR}/vendor/minix
-                     ${PROJECT_SOURCE_DIR}/vendor/minix/include
-                     ${PROJECT_SOURCE_DIR}/vendor)
+  ${PROJECT_NAME}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}/RatioLeg
+          ${PROJECT_SOURCE_DIR}
+          ${PROJECT_SOURCE_DIR}/vendor/minix
+          ${PROJECT_SOURCE_DIR}/vendor/minix/include
+          ${PROJECT_SOURCE_DIR}/vendor)
 
-# target_link_libraries(SampleAlgo AlgoBase #                   fmt::fmt
-# -static-libstdc++)
+target_link_libraries(${PROJECT_NAME} PRIVATE AlgoBase minix)
+target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt-header-only)
+target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+target_link_options(${PROJECT_NAME} PRIVATE "-Wl,-rpath,\$ORIGIN")
 
-find_package(PkgConfig REQUIRED)
-# pkg_check_modules(LIBPQXX REQUIRED libpqxx) find_package(PostgreSQL REQUIRED)
-
-# target_include_directories(SampleAlgo PRIVATE ${LIBPQXX_INCLUDE_DIRS}
-# ${PostgreSQL_INCLUDE_DIRS})
-
-# Use dynamic linking with proper library order
-target_link_libraries(SampleAlgo PRIVATE AlgoBase minix vendor)
-
-# Let the linker resolve dependencies automatically
-target_link_options(SampleAlgo PRIVATE "-Wl,-rpath,\$ORIGIN")
-
-target_compile_options(SampleAlgo PRIVATE -D__STDC_FORMAT_MACROS)
-target_compile_definitions(SampleAlgo PRIVATE FMT_HEADER_ONLY)
+target_compile_options(${PROJECT_NAME} PRIVATE -D__STDC_FORMAT_MACROS)

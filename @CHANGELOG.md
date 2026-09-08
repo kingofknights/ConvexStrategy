@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-09-08
+
+### Changed
+- Decoupled independent long and short side bidding evaluation in `RatioLegStrategy::OnTick`: unhedged state recovery on one side no longer blocks evaluation on the opposite side.
+- Streamlined `EvaluateBidding` and `OrderBiddingLogic` by removing redundant unhedged checks already handled on the tick hot-path.
+- Refactored trade tracer and slippage calculations in `RatioLegStrategy::CheckSlippageThreshold`:
+  - Accurately compute `_qtyRemaining` from allowed total quantity minus traded lots.
+  - Correctly evaluate and filter `_tracer._slippage` against `_allowedSlippage`.
+  - Immediately invoke `Stop()` on slippage breach without deferred termination queue.
+- Removed deferred termination queue (`_strategiesToTerminate`, `Registerfortermination`) in `MinixStrategy`.
+- Updated build system to modern CMake:
+  - Renamed target to `ConvexMoss` in `Convex/CMakeLists.txt`.
+  - Replaced vendored `nlohmann` JSON with system `find_package(nlohmann_json REQUIRED)` and `find_package(fmt REQUIRED)`.
+  - Enforced `CMAKE_CXX_STANDARD 20` and enabled `CMAKE_EXPORT_COMPILE_COMMANDS`.
+- Added diagnostic failure logging in `OrderBiddingLogic` when order placement fails.
+- Cleaned up formatting and member alignment in `vendor/minix/include/order_instance.hpp`.
+
 ## [1.7.0] - 2026-09-07
 
 ### Changed

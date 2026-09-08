@@ -5,7 +5,7 @@
 #include "ProductInfo.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
-
+#define FMT_HEADER_ONLY
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 #include <fmt/ranges.h>
@@ -273,12 +273,6 @@ auto RatioLegStrategy::CheckBiddingLegDepth(const MarketBidding& object_) const 
 }
 
 void RatioLegStrategy::EvaluateBidding(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_) {
-    if (object_._isUnhedged) {
-        object_._order[_biddingLeg]->cancel_order();
-        SecondOrderBidding(object_, cache_);
-        return;
-    }
-
     if (CheckHedgeLegsDepth(object_, cache_) && CheckBiddingLegDepth(object_)) {
         OrderBiddingLogic(object_, param_, cache_, rate_);
     } else {
@@ -299,20 +293,18 @@ void RatioLegStrategy::OnTick(const Quote& event_, [[maybe_unused]] int64_t nowT
     }
 
     // ponytail: O(1) unhedged check - zero division/loops on tick hot path
-    if (_longOrders._isUnhedged || _shortOrders._isUnhedged) {
-        if (_longOrders._isUnhedged) {
-            _longOrders._order[_biddingLeg]->cancel_order();
-            SecondOrderBidding(_longOrders, _longCache);
-        }
-        if (_shortOrders._isUnhedged) {
-            _shortOrders._order[_biddingLeg]->cancel_order();
-            SecondOrderBidding(_shortOrders, _shortCache);
-        }
-        return;
+    if (_longOrders._isUnhedged) {
+        _longOrders._order[_biddingLeg]->cancel_order();
+        SecondOrderBidding(_longOrders, _longCache);
+    } else {
+        EvaluateBidding(_longOrders, _longParam, _longCache, GetBCmp());
     }
-
-    EvaluateBidding(_longOrders, _longParam, _longCache, GetBCmp());
-    EvaluateBidding(_shortOrders, _shortParam, _shortCache, GetSCmp());
+    if (_shortOrders._isUnhedged) {
+        _shortOrders._order[_biddingLeg]->cancel_order();
+        SecondOrderBidding(_shortOrders, _shortCache);
+    } else {
+        EvaluateBidding(_shortOrders, _shortParam, _shortCache, GetSCmp());
+    }
 }
 
 void RatioLegStrategy::OnBcast(const aef::infra::product::product_data& pd_, int64_t nowTs_) {
@@ -338,22 +330,24 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
         tradedSpread += (sides_[i] == BUY_SIDE ? -legAvgPrice : legAvgPrice) * static_cast<double>(_ratios[i]);
     }
 
-    const auto adjustedTradedSpread = static_cast<float>(AdjustGap(tradedSpread));
+    const auto  adjustedTradedSpread = static_cast<float>(AdjustGap(tradedSpread));
+    const float slippage             = (param_._spread - adjustedTradedSpread) / 100.0F;
+    const int   quantityTraded       = (sideOfPack_ == BUY_SIDE ? GetLongTradedLots() : GetShortTradedLots());
+    const int   quantityAllowed      = (sideOfPack_ == BUY_SIDE ? _longParam._totalQuantity : _shortParam._totalQuantity);
 
     _tracer._orderId      = resp_.packet_.exchange_order_id;
     _tracer._time         = resp_.hdr_.exchange_timestamp;
-    _tracer._qtyRemaining = 0;
+    _tracer._qtyRemaining = quantityAllowed - quantityTraded;
     _tracer._strategyId   = _strategyId;
     _tracer._side         = sideOfPack_;
     _tracer._price        = param_._spread / 100.0F;
     _tracer._ltp          = adjustedTradedSpread / 100.0F;
     _tracer._ltq          = cyclePacks;
-    _tracer._slippage     = (param_._spread - adjustedTradedSpread) / 100.0F;
+    _tracer._slippage     = slippage >= static_cast<float>(_allowedSlippage) ? slippage : 0;
 
     WriteLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
              _numLegs, _tracer._symbol, _strategyId, _tracer._orderId, _tracer._time, sideOfPack_, _tracer._price, _tracer._ltp, _tracer._ltq, _tracer._slippage);
 
-    const float slippage = _tracer._slippage;
     _ms->SendTradeTracerToUi(_tracer, _interface);
 
     for (size_t i = 0; i < _numLegs; ++i) {
@@ -368,10 +362,9 @@ void RatioLegStrategy::CheckSlippageThreshold(MarketBidding& object_, const std:
         }
     }
 
-    if (_allowedSlippage > 0 && slippage > _allowedSlippage) {
+    if (_allowedSlippage > 0 && slippage > static_cast<float>(_allowedSlippage)) {
         WriteLog("[SLIPPAGE {}Leg] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", _numLegs, slippage, _allowedSlippage);
         Stop();
-        _ms->Registerfortermination(_strategyId);
     }
 }
 
@@ -589,11 +582,6 @@ auto RatioLegStrategy::GetCost() const -> double {
 }
 
 void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots& param_, const LegSideCache& cache_, const WindRate& rate_) {
-    if (object_._isUnhedged) {
-        SecondOrderBidding(object_, cache_);
-        return;
-    }
-
     if ((param_._spread > rate_._spread) || (object_._tradedLot[_biddingLeg] >= param_._totalQuantity)) {
         object_._order[_biddingLeg]->cancel_order();
         return;
@@ -614,6 +602,7 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots
             WriteLog("[RatioLeg] {} StragegyId: {} spread [._user = {}, ._market = {}, ], {}\n", __FUNCTION__, _strategyId, param_._spread, rate_._spread, marketPrice);
             object_._uniqueID[_biddingLeg] = status;
             object_._windRate              = rate_;
+            WriteLog("[RatioLeg] {} StragegyId: {} failed to place order [._status = {}, ._price = {}, ._quantity = {}]\n", _numLegs, _strategyId, status, marketPrice, quantity);
         }
     }
 }

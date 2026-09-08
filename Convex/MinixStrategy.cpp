@@ -155,8 +155,6 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
     root["algoid"].get_to(_algoid);
     root["omsid"].get_to(_omsid);
 
-    std::cout << std::fixed << std::setprecision(2);
-
     // Market-data event flags requested per token: TER + MBP depth + OI + TBT.
     _flags = static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::TER_UPDATE_EVENT) |
              static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::MBP_UPDATE_EVENT) |
@@ -204,7 +202,7 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& order_resp_) {
     _portfolio_mgr.on_order_response(order_resp_);
 }
 
-int MinixStrategy::doWork() {
+auto MinixStrategy::doWork() -> int {
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     if (now - _lastSpreadSendMs >= 1000) {
         _lastSpreadSendMs = now;
@@ -214,22 +212,7 @@ int MinixStrategy::doWork() {
     for (auto& [strategyId, ratio] : _ratioStrats) {
         ratio->CheckHedgeTimeout();
     }
-
-    if (!_strategiesToTerminate.empty()) {
-        for (uint32_t strategyId : _strategiesToTerminate) {
-            auto iterator = _ratioStrats.find((strategyId));
-            if (iterator != _ratioStrats.end()) {
-                SendStrategyStatusToUi(strategyId, StrategyStatus_INACTIVE, iterator->second->GetInterface());
-                iterator->second->Stop();
-            }
-        }
-        _strategiesToTerminate.clear();
-    }
     return 0;
-}
-
-void MinixStrategy::Registerfortermination(uint32_t strategyId_) {
-    _strategiesToTerminate.push_back(strategyId_);
 }
 
 void MinixStrategy::SendStrategySpreadsToUi() {
