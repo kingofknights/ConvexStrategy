@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-09-09
+
+### Changed
+- Applied `_tradeGear` aggressive tick offset to hedge leg orders in `RatioLegStrategy::ExecuteHedgeLeg`:
+  - BUY hedge orders offset aggressively by `+ (_tradeGear * _tickSize)`.
+  - SELL hedge orders offset aggressively by `- (_tradeGear * _tickSize)`.
+  - Stored snapshot pricing and retry tick steps compound on top of the `_tradeGear` aggressive base offset.
+  - Added safe fallback to current opposite market touch if stored snapshot price is non-positive (`<= 0`).
+- Removed aggressive offset `_tradeGearPriceOffset` from `RatioLegStrategy::OrderBiddingLogic` so the primary quoting leg remains strictly passive at the market touch.
+- Precomputed `_tradeGearPriceOffset` and `_minTickDiffThreshold` unconditionally in `RatioLegStrategy::RebuildCache` before lot size validity checks.
+- Documented `TradeGear` execution parameter and engine behavior in `strategy_parameters.md`.
+
 ## [1.8.0] - 2026-09-08
 
 ### Changed

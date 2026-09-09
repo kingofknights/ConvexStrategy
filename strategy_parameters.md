@@ -36,3 +36,9 @@ This document outlines the usage and logic behind the key execution parameters d
 ### 7. Market Order Retries (`MarketOrderRetries` / `_marketOrderRetries`)
 * **Description:** The maximum number of progressive tick-stepped limit modifications permitted for hedge legs before escalating to aggressive market touch execution.
 * **Engine Behavior:** For each retry attempt $k < \text{MarketOrderRetries}$, the hedge limit price is adjusted by 1 tick closer to the market. When retries reach `MarketOrderRetries`, the order is aggressively placed at the opposite side market touch (BUY at Ask, SELL at Bid) to guarantee execution. The strategy is **never** stopped on max retries — stoppage is governed exclusively by `AllowedSlippage`.
+
+### 8. Trade Gear (`TradeGear` / `_tradeGear`)
+* **Description:** The number of aggressive ticks applied when placing orders on hedge legs.
+* **Details:** Configured as an integer tick count. Converted internally to `_tradeGearPriceOffset = _tradeGear * _tickSize`.
+* **Engine Behavior:** When a fill occurs on the primary bidding leg and hedge legs must execute, the target limit price is offset by `_tradeGear` ticks in the aggressive direction (BUY: $\text{Ask} + \text{TradeGear} \times \text{TickSize}$; SELL: $\text{Bid} - \text{TradeGear} \times \text{TickSize}$). This accelerates fill latency and improves order queue priority. Each subsequent retry step adds one additional tick on top of this aggressive offset.
+

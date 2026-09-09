@@ -111,12 +111,12 @@ void RatioLegStrategy::UpdateUnhedgedStatus(MarketBidding& object_) noexcept {
 }
 
 void RatioLegStrategy::RebuildCache() {
+    _tradeGearPriceOffset = _tradeGear * _tickSize;
+    _minTickDiffThreshold = static_cast<int>(_minTickChange * _tickSize);
+
     if (_lotSize <= 0) {
         return;
     }
-
-    _tradeGearPriceOffset = _tradeGear * _tickSize;
-    _minTickDiffThreshold = static_cast<int>(_minTickChange * _tickSize);
 
     const double thresholdPercentage = _thresholdQuantity > 0 ? _thresholdQuantity : 100.0;
 
@@ -588,9 +588,7 @@ void RatioLegStrategy::OrderBiddingLogic(MarketBidding& object_, const ParamLots
     }
 
     OrderObjectPtrT& order             = object_._order[_biddingLeg];
-    const int        basePrice         = GetPrice(_qoute[_biddingLeg], order->get_side(), 0);
-    const int        sideMultiplier    = (order->get_side() == BUY_SIDE) ? 1 : -1;
-    const int        marketPrice       = basePrice + (sideMultiplier * _tradeGearPriceOffset);
+    const int        marketPrice       = GetPrice(_qoute[_biddingLeg], order->get_side(), 0);
     const int        currentPlacePrice = order->get_open_price();
     const int        diff              = std::abs(currentPlacePrice - marketPrice);
     const int        remainingLot      = param_._totalQuantity - object_._tradedLot[_biddingLeg];
@@ -620,18 +618,16 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const LegSideCach
     const int        quantity          = std::min(diff * _lotSize, cache_._sliceQuantity[leg_]);
     OrderObjectPtrT& order             = object_._order[leg_];
     const int        currentPlacePrice = order->get_open_price();
+    const int        sideMultiplier    = (order->get_side() == BUY_SIDE) ? 1 : -1;
 
-    int targetOrderPrice = 0;
-    if (isAggressive) {
-        targetOrderPrice = GetPrice(_qoute[leg_], cache_._oppQuoteSide[leg_], 0);
-    } else {
-        const int storedPrice    = object_._windRate._price[leg_];
-        const int tickDelta      = static_cast<int>(retryCount) * _tickSize;
-        const int sideMultiplier = (order->get_side() == BUY_SIDE) ? 1 : -1;
-        targetOrderPrice         = storedPrice + (sideMultiplier * tickDelta);
-        if (targetOrderPrice <= 0) {
-            targetOrderPrice = _tickSize;
-        }
+    // ponytail: hedge legs place aggressive orders offset by _tradeGear ticks (+ retry step)
+    const int storedPrice = object_._windRate._price[leg_];
+    const int basePrice   = (isAggressive || storedPrice <= 0) ? GetPrice(_qoute[leg_], cache_._oppQuoteSide[leg_], 0) : storedPrice;
+    const int tickDelta   = isAggressive ? 0 : static_cast<int>(retryCount) * _tickSize;
+
+    int targetOrderPrice = basePrice + (sideMultiplier * (_tradeGearPriceOffset + tickDelta));
+    if (targetOrderPrice <= 0) {
+        targetOrderPrice = _tickSize;
     }
 
     if (targetOrderPrice > 0 && targetOrderPrice != currentPlacePrice) {
