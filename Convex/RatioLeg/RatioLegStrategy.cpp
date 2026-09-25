@@ -70,7 +70,8 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* ms_, uint32_t strategyId_, int
     for (size_t i = 0; i < _numLegs; ++i) {
         _ms->getProductDetails(_tokens[i], details[i]);
         _isOption[i] = details[i].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
-        WriteLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {}\n", _numLegs, i, _tokens[i], details[i].symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_));
+        WriteLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {} ratio = {}\n",
+                 _numLegs, i, _tokens[i], details[i].symbol, int(details[i].strike_price_), int(details[i].lot_size_), int(details[i].tick_size_), _ratios[i]);
     }
 
     if (_numLegs > 0) {
@@ -100,14 +101,12 @@ RatioLegStrategy::~RatioLegStrategy() {
 
 void RatioLegStrategy::UpdateUnhedgedStatus(MarketBidding& object_) noexcept {
     if (_biddingLeg >= _numLegs || _ratios[_biddingLeg] <= 0) return;
-    const int biddingPacks = object_._tradedLot[_biddingLeg] / _ratios[_biddingLeg];
-    for (size_t h = 0; h < _numLegs; ++h) {
-        if (h != _biddingLeg && _ratios[h] > 0 && biddingPacks != (object_._tradedLot[h] / _ratios[h])) {
-            object_._isUnhedged = true;
-            return;
-        }
+    std::vector<int> position(_numLegs, 0);
+    for (IndexT index = 0; index < _numLegs; ++index) {
+        position[index] = object_._tradedLot[index] / _ratios[index];
     }
-    object_._isUnhedged = false;
+    auto minmax         = std::ranges::minmax(position);
+    object_._isUnhedged = minmax.min != minmax.max;
 }
 
 void RatioLegStrategy::RebuildCache() {
@@ -127,6 +126,9 @@ void RatioLegStrategy::RebuildCache() {
             cache_._signedRatio[instrumentIndex]              = (sides_[instrumentIndex] == BUY_SIDE ? -1 : 1) * _ratios[instrumentIndex];
             cache_._hedgeTargetDepthQuantity[instrumentIndex] = (param_._quantity * _ratios[instrumentIndex] * _lotSize) * (thresholdPercentage / 100.0);
             cache_._sliceQuantity[instrumentIndex]            = param_._quantity * _ratios[instrumentIndex] * _lotSize;
+
+            WriteLog("updateSideCache [.slice = {}, ._ratio = {}, ._index = {}, ._type = {}", cache_._sliceQuantity[instrumentIndex],
+                     _ratios[instrumentIndex], instrumentIndex, multiplier_);
         }
     };
 
@@ -238,7 +240,6 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
 
 void RatioLegStrategy::Stop() {
     _status = StrategyStatus_INACTIVE;
-    std::cout << "[RatioLeg:Stop] strat=" << _strategyId << " _status=INACTIVE" << std::endl;
     WriteLog("[RatioLeg:Stop] strat={} _status=INACTIVE\n", _strategyId);
     for (size_t i = 0; i < _numLegs; ++i) {
         if (_longOrders._order[i]) {
@@ -407,11 +408,11 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& resp_) {
     const auto& cache      = isLong ? _longCache : _shortCache;
     const int   sideOfPack = isLong ? BUY_SIDE : SELL_SIDE;
 
-    CheckSlippageThreshold(object, sides, param, sideOfPack, resp_);
-
     if (object._isUnhedged) {
         object._order[_biddingLeg]->cancel_order();
         SecondOrderBidding(object, cache);
+    } else {
+        CheckSlippageThreshold(object, sides, param, sideOfPack, resp_);
     }
 }
 
@@ -609,6 +610,7 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const LegSideCach
     const int diff = targetHedgeLots_ - object_._tradedLot[leg_];
     if (diff <= 0) {
         object_._hedgeRetryCount[leg_] = 0;
+        WriteLog("ExecuteHedgeLeg diff is less than zero target {} traded {} leg {} ", targetHedgeLots_, object_._tradedLot[leg_], leg_);
         return;
     }
 
@@ -637,7 +639,11 @@ void RatioLegStrategy::ExecuteHedgeLeg(MarketBidding& object_, const LegSideCach
                      _numLegs, isAggressive ? "AGGRESSIVE_OPPOSITE" : "STORED_PLUS_TICKS", leg_, retryCount, _marketOrderRetries, _tokens[leg_], targetOrderPrice, quantity);
             object_._uniqueID[leg_] = status;
             object_._hedgeRetryCount[leg_]++;
+        } else {
+            WriteLog("SecondOrderBiddingi Failed to place order leg {} price {} quantity {}", leg_, targetOrderPrice, quantity);
         }
+    } else {
+        WriteLog("SecondOrderBidding targetOrderPrice < 0 [{}]", targetOrderPrice);
     }
 }
 
@@ -653,9 +659,6 @@ void RatioLegStrategy::SecondOrderBidding(MarketBidding& object_, const LegSideC
 }
 
 void RatioLegStrategy::CheckHedgeTimeout() {
-    if (!IsActive()) {
-        return;
-    }
     if (_longOrders._isUnhedged) {
         _longOrders._order[_biddingLeg]->cancel_order();
         SecondOrderBidding(_longOrders, _longCache);

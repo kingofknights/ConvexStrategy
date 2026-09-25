@@ -235,7 +235,7 @@ void MinixStrategy::SendStrategySpreadsToUi() {
         update._bATP       = static_cast<float>(ratio_->GetBATP()) / 100.0F;
         update._sATP       = static_cast<float>(ratio_->GetSATP()) / 100.0F;
         SendStrategySpreadToUi(update, ratio_->GetInterface());
-        // ratio->Print();
+        ratio_->Print();
     };
 
     for (auto& [strategy, ratio] : _ratioStrats) {
