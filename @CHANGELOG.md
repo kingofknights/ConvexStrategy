@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.3] - 2026-10-01
+
+### Fixed
+- `CheckHedgeLegsDepth` now checks liquidity on the side a hedge takes (BUY hedge -> asks), not its own side.
+- Spread is reported as 0 and marked invalid (`WindRate::_valid`) when any leg price is missing; bidding is cancelled on an invalid spread.
+- `MinixStrategy::UpdateOrder` no longer subtracts filled qty a second time on modify, so partially filled hedge and bidding orders keep the right size.
+- `UpdateOrder` modify path returns 0 when nothing was sent, so hedge retry counts and `_windRate` only change on real sends.
+- `Stop()` keeps hedging an unhedged pack until flat; it no longer cancels hedge orders or clears `_isUnhedged`. Removed the per-tick `Stop()` call in `MinixStrategy::OnTick`.
+- `request_id` stops at `MAX_REQUEST_ID` with one log line instead of wrapping and reusing ids.
+- BATP/SATP are cached on hedged fills so unhedged in-flight lots no longer distort them.
+- Hedge legs no longer price off an empty book side (was resting a SELL hedge at one tick); the step waits for a real price.
+- `UpdateOrder` modifies on a size change too, so a resting hedge grows when more bidding lots fill.
+- Non-trade responses on an unhedged pack now also retry the bidding-order cancel (`Rehedge`); rejects wait for the next tick instead of resending at OMS speed.
+- `StrategySpreadUpdate._trSpread` (was a copy of RLP) is no longer filled; the slot is renamed `_reserved` and always sent as 0, so the 64-byte layout and B-ATP/S-ATP offsets are unchanged.
+- `GetM2M` returns `double` paise instead of `int`, removing overflow above ~₹2.1 crore.
+
+### Changed
+- Hedging is event-driven: removed `CheckHedgeTimeout()` polling from `doWork`; any non-trade order response on an unhedged pack sends the next hedge step at once.
+- Bidding leg is fixed to leg 0 (`EnableBid` / `LegID` no longer parsed).
+- Refactored `RatioLegStrategy` around a `Pack` struct (sides, params, cache, orders, fills per long/short pack); removed duplicated long/short code paths, the `*Param` leg copies, `OnBcast`, and unused fields (`_uniqueID`, `_isBidding`, `_name`, `_targetRawSpread`, `_lastBiddingFillPrice`, `HasUnhedgedLots`).
+- `MinixStrategy`: table-driven SubType dispatch, merged create/update branches in `HandleRatioLegStrategy`, removed unused `_strategyJson` and `_lastTickTs`.
+
+## [1.9.2] - 2026-10-01
+
+### Fixed
+- Fixed uneven ratio trades in `RatioLegStrategy`:
+  - Clamped `OrderBiddingLogic` order quantity to remainder lots needed to complete the current pack when partial fills exist, preventing slice overfill (e.g. 5 lots instead of 3).
+  - Fixed `UpdateUnhedgedStatus` to verify all hedge legs have caught up to bidding pack requirements, eliminating heap allocation (`std::vector`) on hot path.
+  - Fixed `isAggressive` condition in `ExecuteHedgeLeg` so `MarketOrderRetries: 0` immediately triggers aggressive market touch instead of stepping price down indefinitely to 5 paise.
+  - Added pending response guard in `ExecuteHedgeLeg` to prevent runaway retry increments during exchange flight.
+- Removed excessive tick-level log spam:
+  - Removed `WriteLog` calls for `diff <= 0`, failed placement, and price equality in `ExecuteHedgeLeg`.
+  - Removed high-frequency `failed to place order` log in `OrderBiddingLogic`.
+  - Commented out 1-second interval `ratio_->Print()` in `MinixStrategy::SendStrategySpreadsToUi`.
+
+## [1.9.1] - 2026-09-25
+
+### Fixed
+- Fixed pack vs lot unit mismatch in `RatioLegStrategy::OrderBiddingLogic`:
+  - Scaled `param_._totalQuantity` by `_ratios[_biddingLeg]` to convert frontend total pack quantity to bidding leg lots.
+  - Corrected order quantity clamping and strategy stop condition so bidding leg places full ratio pack slices.
+
 ## [1.9.0] - 2026-09-09
 
 ### Changed

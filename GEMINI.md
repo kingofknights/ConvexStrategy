@@ -1,20 +1,18 @@
-# ConvexStrategy — Agent Context & Rules (GEMINI.md)
+# ConvexStrategy — Agent Context, Architecture & Mathematical Specification
 
-> This file is loaded automatically at the start of every Gemini AI session for this workspace.
+> Loaded automatically at the start of every Gemini AI session for this workspace.
 
 ---
 
 ## 1. Project Overview
 
-**ConvexStrategy** is a C++ shared-library algo-trading strategy plugin for the **MOSS** (Meril Options Strategy System) engine. It compiles to `libSampleAlgo.so` and is dynamically loaded by the MOSS execution engine at runtime.
+**ConvexStrategy** is a high-performance C++20 shared-library algorithmic trading strategy plugin for the **MOSS** (Meril Options Strategy System) execution engine. It compiles to `build/Convex/libConvexMoss.so` and is dynamically loaded by the MOSS engine at runtime.
 
-The library implements multiple multi-leg options spread strategies (Box Spread, Butterfly, Ratio N-Leg) under a common orchestrator (`MinixStrategy`), communicating with a GUI frontend over a chunked JSON message protocol.
+The library implements multi-leg options spread strategies (Box Spread, Butterfly, Ratio N-Leg from 2 to 6 legs) under a common orchestrator (`MinixStrategy`), communicating with a GUI frontend over a chunked JSON control protocol and streaming high-frequency market quotes and binary UI telemetry.
 
-See also: [strategy_parameters.md](strategy_parameters.md) for detail on execution parameters (slippage, depth, tick changes, etc.).
-
-**Language:** C++17  
-**Build System:** CMake  
-**Output:** `build/libSampleAlgo.so`
+* **Language**: C++20
+* **Build System**: CMake + Ninja
+* **Target Output**: `build/Convex/libConvexMoss.so`
 
 ---
 
@@ -22,177 +20,180 @@ See also: [strategy_parameters.md](strategy_parameters.md) for detail on executi
 
 ```
 ConvexStrategy/
-├── CMakeLists.txt                       # Top-level build config
-├── @CHANGELOG.md                        # Versioned changelog — ALWAYS update on commit
-├── project_flow_documentation.md        # Architecture & flow doc — keep in sync
-├── vendor/                              # Vendor libraries (nlohmann & minix platform)
-│   ├── CMakeLists.txt                   # Vendor build config
-│   ├── nlohmann/                        # Vendored JSON library — do NOT modify
-│   └── minix/                           # Minix platform framework & engine headers
-│       ├── CMakeLists.txt               # Minix object library build config
-│       ├── include/                     # Platform & order headers (AlgoBase, oms_api, order_instance, PortfolioOrderManager, etc.)
-│       └── src/                         # Minix framework sources (order_instance.cpp, PortfolioOrderManager.cpp)
-└── Convex/                              # Strategy implementation (MinixStrategy & Ratio)
-    ├── CMakeLists.txt                   # Compiles SampleAlgo shared library
-    ├── MinixStrategy.hpp / .cpp         # Central orchestrator & dynamic entry point
-    ├── RatioLeg/                        # Ratio leg strategy implementation
-    └── Utils.hpp                        # Shared helper utilities & binary protocol structs
+├── CMakeLists.txt                  # Top-level build config
+├── @CHANGELOG.md                   # Versioned changelog (ALWAYS update before commit)
+├── project_flow_documentation.md   # Architectural & workflow doc (keep in sync)
+├── strategy_parameters.md          # Parameter reference (depth, slippage, tradeGear, etc.)
+├── .agents/
+│   └── AGENTS.md                   # Agent system rules, architecture & math specs
+├── vendor/                         # Vendor libraries (nlohmann & minix platform) — READ ONLY
+│   ├── CMakeLists.txt              # Vendor build config
+│   ├── nlohmann/                   # Vendored JSON library (header-only, DO NOT MODIFY)
+│   └── minix/                      # Minix platform framework & engine headers (DO NOT MODIFY)
+│       ├── CMakeLists.txt          # Minix object library build config
+│       ├── include/                # Platform headers (AlgoBase, oms_api, order_instance, etc.)
+│       └── src/                    # Platform sources (order_instance.cpp, PortfolioOrderManager.cpp)
+└── Convex/                         # Strategy implementation
+    ├── CMakeLists.txt              # Compiles ConvexMoss shared library
+    ├── MinixStrategy.hpp/.cpp      # Central orchestrator & entry points (create/destroy hooks)
+    ├── RatioLeg/                   # Ratio leg strategy implementation (2-Leg to 6-Leg)
+    │   ├── RatioLegStrategy.hpp
+    │   └── RatioLegStrategy.cpp
+    └── Utils.hpp                   # Shared helpers & binary protocol structs
 ```
 
 ---
 
-## 3. Core Architecture
+## 3. Core Architecture & Workflow
 
-### MinixStrategy — Central Orchestrator
-| Hook | Description |
-|------|-------------|
-| `create()` / `destroy()` | Dynamic loading hooks called by MOSS engine |
-| `onUIRequest()` | Receives chunked JSON from GUI (codes 9612/9620/9621), reassembles, dispatches |
-| `OnTick(Quote)` | High-frequency tick routing to all active strategy instances |
-| `onBcastData(product_data)` | Coarse broadcast snapshot routing |
-| `OnOrderResponse()` | Routes OMS responses to correct strategy + PortfolioOrderManager |
-| `doWork()` | ~1s heartbeat — calls `sendStrategySpreadsToUI()` |
+### Dynamic Lifecycle Hooks (`MinixStrategy`)
+* **`create()` / `destroy()`**: Dynamic entry points invoked by the MOSS engine on shared object load/unload.
+* **`onUIRequest()`**: Receives chunked JSON from the GUI frontend (message codes `9612`, `9620`, `9621`). Reassembles 1500-byte chunks into complete JSON payloads and dispatches to `applyLegStrategyJson()`.
+* **`OnTick(Quote)`**: High-frequency market quote dispatch to active strategies.
+* **`onBcastData(product_data)`**: Broadcast market snapshot routing.
+* **`OnOrderResponse(oms_transaction)`**: Routes OMS responses (placement, modification, cancellations, fills) to the target strategy and `PortfolioOrderManager`.
+* **`doWork()`**: Heartbeat thread (~1 second interval): pushes binary spread updates to UI via `SendStrategySpreadsToUi()`. Hedging is event-driven (ticks + order responses), not polled here.
 
-### GUI Chunked JSON Protocol
-1. First packet = metadata: `{ "packet_count": N }`
-2. Next N packets = 1500-byte data chunks
-3. Fully reassembled JSON → `applyLegStrategyJson()` → action dispatch
-
-### Strategy Lifecycle Actions
-| Action | Behaviour |
-|--------|-----------|
-| `add` / `edit` | Create or update strategy map entry |
-| `start` | Subscribe to leg tokens; set `running_ = true` |
-| `stop` | Cancel outstanding orders; trigger square-offs |
-| `delete` | Stop + unsubscribe + `delete` the strategy object |
+### Strategy Lifecycle States
+| Action / Status | Behavior |
+|-----------------|----------|
+| `SUBSCRIBED` / `ACTIVE` | Creates or updates strategy instance, subscribes to market feeds, sets `_status = StrategyStatus_APPLIED`. |
+| `APPLIED` / `APPLY` | Updates live parameters dynamically (`ParamUpdate`), rebuilds cache, and activates execution. |
+| `UNSUBSCRIBED` / `STOP` | Sets `_status = StrategyStatus_INACTIVE`, cancels all open orders on all legs, resets retry counters. |
+| `DELETED` / `DELETE` | Stops strategy, unregisters orders, unsubscribes products, and deallocates strategy memory (`delete`). |
 
 ---
 
-## 4. Execution Modes
+## 4. Frontend Units, Sizing & Pack Mathematics
 
-| Mode | Name | Behaviour |
-|------|------|-----------|
-| **1** | Aggressive | IOC/Limit at touch on all legs simultaneously |
-| **2** | Bidding | Passive limit on `isbidding` legs first; sweep hedges after fill |
-| **4** | All-Leg Bidding | Passive on all legs; escalate to aggressive on timeout |
+### The Fundamental Pack Principle
+In Ratio Spread strategies (e.g., Ratio 3 : 1 : 2):
+> **1 Lot from the Frontend = 1 Complete Ratio Pack**
+> A single unit of the spread requires every leg to trade in its exact configured ratio multiplier ($\text{Ratio}_i$).
 
----
-
-## 5. Key Patterns & Conventions
-
-### Prices Are Always in Paise
-All option prices are **multiplied by 100** internally (paise). Never mix rupee and paise values.
-
-### Order State Machine (`order_instance`)
-```
-STRAT_INITIAL_STATE → STRAT_ORDER_PLACED → STRAT_OMS_PLACED → STRAT_EXCHG_CONF
-```
-- **Always** check `is_response_pending()` before calling `update_order()` or `cancel_order()`.
-
-### Position Tracking (`PortfolioOrderManager`)
-- Triggers on OMS event code `6666` (OMS_TRADE).
-- Tracks `net_qty` per token.
-- Cashflow: `sign(side) × price × qty`.
-- Transaction costs: **Buy = 60p** per ₹10,000 notional | **Sell = 70p** per ₹10,000.
-
-### EOD Square-Off
-- Market open = first valid exchange clock tick.
-- `eodTs_` = open_ts + **22,440 seconds** → corresponds to `15:29:00`.
-- When `exchange_clock >= eodTs_`, calls `squareOffLeg()` for all legs with open positions.
-
-### Book Validity Guard
-- `booksReady()` must return `true` before any execution.
-- Returns `false` when `Bid >= Ask` (crossed book) — blocks all order placement.
-
-### HFT Coding & Mathematical Standards
-- **Explicit Non-Abbreviated Naming**:
-  - NEVER use cryptic abbreviations (`idx` → `index`, `qty` → `quantity`, `px` → `price`, `od` → `orderData`, `inst` → `instrument`).
-  - Differentiate market depth book levels from strategy order parameters: use `levelPrice` and `levelQuantity` for book depth scanning, and `orderQuantity` and `quantityAhead` for order queue position tracking.
-- **Prevent Variable & Index Shadowing**:
-  - NEVER allow local variables or parameters to shadow member fields or instrument indices (`instrumentIndex`, `futuresIndex`, `optionIndex`, `corrIndex`).
-  - Portfolio risk accumulators depend on accurate strike index resolution; index shadowing causes inventory drift, premature position limit blocking, and suppresses profitable trade entries.
-- **Price Grid Quantization & Symmetric Arithmetic**:
-  - Assume `lotSize > 0` and `tickSize > 0` unconditionally.
-  - All price rounding MUST use the `RoundOFF` template formula:
-    `price > 0 ? ((price + tickSize / 2) / tickSize) * tickSize : ((price - tickSize / 2) / tickSize) * tickSize`.
-  - Unify symmetric BUY/SELL branching via ternary operators (`?:`) and directional sign multipliers (`(side == BUY) ? 1 : -1`) to reduce code size, eliminate branch mispredictions, and minimize critical tick dispatch latency.
+### Parameter Parsing & Unit Conversions
+* **`LongBuyQty` / `ShortSellQty` (`param_._totalQuantity`)**: Total volume configured in **Packs**.
+* **`LongBuySoQ` / `ShortSellSoQ` (`param_._quantity`)**: Slice Order Quantity configured in **Packs**.
+* **Bidding Leg Total Lots**:
+  $$\text{totalBiddingLots} = \text{param\_.\_totalQuantity} \times \text{\_ratios}[\text{\_biddingLeg}]$$
+* **Remaining Bidding Lots**:
+  $$\text{remainingLot} = \text{totalBiddingLots} - \text{object\_.\_tradedLot}[\text{\_biddingLeg}]$$
+* **Traded Pack Calculation** (reported to GUI & slippage tracker):
+  $$\text{totalPacks} = \min_{i=0}^{N-1} \left(\frac{\text{object\_.\_tradedLot}[i]}{\text{\_ratios}[i]}\right)$$
+  Traded quantity is only considered $1$ when **all legs** have filled their respective ratio multipliers.
 
 ---
 
-## 6. Build System
+## 5. Partial Fill Management & Pack Remainder Clamping
 
-```bash
-# From the project root
-cd build
-cmake ..
-ninja
+### The Overfill Prevention Decision
+When a partial fill occurs on the primary quoting leg (e.g., 2 lots fill out of a 3-lot slice in a 3:1:2 ratio spread):
+* The quoting leg MUST NOT request a full new slice ($3$ lots), as that leads to overfilling ($2 + 3 = 5$ lots) and uneven ratio trades.
+* The order quantity in `OrderBiddingLogic` is strictly clamped to the **exact remainder lots** needed to complete the in-flight pack:
 
-# Output:
-# build/libSampleAlgo.so
-```
+$$\text{unhedgedRemainder} = \text{object\_.\_tradedLot}[\text{\_biddingLeg}] \pmod{\text{biddingRatio}}$$
+$$\text{packRemainderLots} = (\text{unhedgedRemainder} > 0) \mathbin{?} (\text{biddingRatio} - \text{unhedgedRemainder}) : \left(\frac{\text{cache\_.\_sliceQuantity}[\text{\_biddingLeg}]}{\text{\_lotSize}}\right)$$
+$$\text{quantity} = \min(\text{packRemainderLots}, \text{remainingLot}) \times \text{\_lotSize}$$
 
-Each new strategy `.cpp` file must be added to `Convex/CMakeLists.txt`.
-
----
-
-## 7. Mandatory Rules — Must Follow Every Session
-
-> **These rules are non-negotiable. Apply them to every code change and commit.**
-
-1. **`@CHANGELOG.md` must be updated before every commit.**  
-   Use format `[MAJOR.MINOR.PATCH] - YYYY-MM-DD` with `Added`, `Changed`, `Fixed` sections.
-
-2. **All prices operate in paise.** Never introduce rupee-level arithmetic in spread calculations.
-
-3. **No raw pointer leaks.** Strategies are `new`-allocated in `MinixStrategy`. Always `delete` in the `delete` action handler.
-
-4. **Response-pending guard.** Never modify or cancel an order while `is_response_pending()` is true.
-
-5. **Vendor code & platform headers in `vendor/` are read-only.** `vendor/minix/include/` contains engine and platform headers; do not modify vendor code.
-
-6. **Keep `project_flow_documentation.md` in sync.** Update it when adding new strategies, new UI fields, or new execution modes.
-
-7. **`nlohmann/` is read-only.** It is a vendored header-only library.
-
-8. **New strategy classes must follow established pattern:**
-   - `.hpp` / `.cpp` in their own subdirectory under `Convex/`.
-   - Registered and routed in `MinixStrategy` (`applyLegStrategyJson`, `OnTick`, `OnOrderResponse`).
-   - Added to `Convex/CMakeLists.txt`.
-
-9. **Always use Caveman ultra and ponytail ultra skills.** The agent must operate under these active customization settings during code modifications and planning tasks.
+This mathematical guard guarantees that the quoting leg stops precisely at multiples of its ratio multiplier and never creates unhedgeable fractional pack inventory.
 
 ---
 
-## 8. Spread Math Reference
+## 6. Unhedged State Machine & Hedging Mathematics
 
-### Box Spread (4-leg)
-```
-NetDebit = C_K1(ask) - P_K1(bid) - C_K2(bid) + P_K2(ask)
-NetCredit = C_K1(bid) - P_K1(ask) - C_K2(ask) + P_K2(bid)
-Gap      = (K2 - K1) × 100 × boxRatio
-BCmp     = Gap - NetDebit    # positive = buy arb opportunity
-SCmp     = NetCredit - Gap   # positive = sell arb opportunity
-```
+### Hedge Status Determination (`UpdateUnhedgedStatus`)
+A strategy is unhedged if any secondary (hedge) leg has traded fewer lots than required by the completed bidding packs:
+$$\text{biddingPacks} = \left\lfloor\frac{\text{object\_.\_tradedLot}[\text{\_biddingLeg}]}{\text{\_ratios}[\text{\_biddingLeg}]}\right\rfloor$$
+$$\text{isUnhedged} = \exists \text{ leg} \neq \text{\_biddingLeg} \text{ such that } \text{object\_.\_tradedLot}[\text{leg}] < (\text{biddingPacks} \times \text{\_ratios}[\text{leg}])$$
 
-### Ratio N-Leg
-- Each leg has `EntryRatio` and `ExitRatio` (integers from JSON).
-- Spread = weighted sum of leg prices × their ratio.
-- Entry and exit slices run as **independent** state machines and may run simultaneously.
+* Implemented with zero heap allocations on the hot path (`O(1)` memory).
+
+### Hedge Priority & Execution Flow
+1. **Immediate Quoting Cancellation**: Whenever `_isUnhedged == true`, any open order on `_biddingLeg` is cancelled immediately to halt exposure accumulation.
+2. **Target Hedge Lots**:
+   $$\text{targetHedgeLots} = \text{biddingPacks} \times \text{\_ratios}[\text{leg}]$$
+   $$\text{diff} = \text{targetHedgeLots} - \text{object\_.\_tradedLot}[\text{leg}]$$
+   $$\text{quantity} = \min(\text{diff} \times \text{\_lotSize}, \text{cache\_.\_sliceQuantity}[\text{leg}])$$
+3. **In-Flight Response Guard**:
+   ```cpp
+   if (order->is_response_pending()) return;
+   ```
+   Never modify an order or increment retry counters while an OMS/exchange confirmation is pending.
+4. **Hedge Order Pricing & Escalation**:
+   * Base Price: Captured snapshot price $\text{storedPrice} = \text{object\_.\_windRate.\_price}[\text{leg}]$, falling back to current opposite market touch if uninitialized or aggressive.
+   * Directional Side Multiplier: $+1$ for `BUY_SIDE`, $-1$ for `SELL_SIDE`.
+   * Aggressive Offset: $\text{\_tradeGearPriceOffset} = \text{\_tradeGear} \times \text{\_tickSize}$.
+   * Tick Step Delta: $\text{tickDelta} = \text{isAggressive} \mathbin{?} 0 : (\text{retryCount} \times \text{\_tickSize})$.
+   * Target Limit Price:
+     $$\text{targetOrderPrice} = \text{basePrice} + \text{sideMultiplier} \times (\text{\_tradeGearPriceOffset} + \text{tickDelta})$$
+   * Price Floor Guard: Clamped to $\ge \text{\_tickSize}$ (never $\le 0$).
+5. **Aggressive Escalation Condition**:
+   $$\text{isAggressive} = (\text{\_marketOrderRetries} == 0 \mathbin{\Vert} \text{retryCount} \ge \text{\_marketOrderRetries})$$
+   * If `MarketOrderRetries == 0`: immediately placed aggressively at the opposite touch (BUY at Ask, SELL at Bid) without progressive tick decay.
+   * If `MarketOrderRetries > 0`: steps aggressively closer to the market by 1 tick per retry until reaching `_marketOrderRetries`, then crosses the spread to opposite touch.
 
 ---
 
-## 9. File Quick-Reference
+## 7. Real-Time Spread, PnL & Cost Mathematics (Paise)
 
-| Task | File(s) to look at |
-|------|--------------------|
-| Add a new strategy type | `MinixStrategy.cpp` → `applyLegStrategyJson` + new class under `Convex/` |
-| Change order placement logic | `vendor/minix/include/order_instance.hpp`, `src/order_instance.cpp` |
-| Change position / PnL math | `vendor/minix/include/PortfolioOrderManager.hpp`, `src/PortfolioOrderManager.cpp` |
-| Change UI message format | `MinixStrategy::sendStrategySpreadsToUI` + `vendor/minix/include/ui_api.hpp` |
-| Change subscription flags | `MinixStrategy` constructor |
-| Add a new execution mode | Strategy `run()` method + `MinixStrategy` mode routing |
-| Fix EOD square-off timing | `eodTs_` in strategy constructor / `run()` |
-| Understand OMS event codes | `vendor/minix/include/oms_api.hpp` |
-| Understand market snapshot fields | `vendor/minix/include/ProductInfo.hpp` |
-| Review recent changes | `@CHANGELOG.md` |
-| Understand overall architecture | `project_flow_documentation.md` |
+### Internal Representation: Strictly Paise
+All prices, values, and calculations operate strictly in **paise** ($\text{Rupees} \times 100$). Never perform rupee-level arithmetic in spread or risk formulas.
+
+### Spread Formula
+$$\text{RawSpread} = \sum_{i=0}^{N-1} \text{SideSign}_i \times \text{Price}_i \times \text{Ratio}_i$$
+* $\text{SideSign}_i = -1$ if execution side is `BUY_SIDE`, $+1$ if `SELL_SIDE`.
+* For buying a spread (`GetBCmp`): leg prices evaluated at opposite touch (Ask for BUY, Bid for SELL).
+* For selling a spread (`GetSCmp`): leg prices evaluated at opposite touch (Bid for BUY, Ask for SELL).
+
+### Gap Adjustment
+If `_gapDiff` is active (Box, ConRev):
+$$\text{AdjustGap}(\text{spread}) = (\text{spread} < 0) \mathbin{?} (\text{spread} + \text{gap}) : (\text{spread} - \text{gap})$$
+
+### Realized PnL (RLP) & Transaction Costs
+$$\text{RLP} = \sum_{i=0}^{N-1} \min(\text{buyQuantity}_i, \text{sellQuantity}_i) \times (\text{avgSellPrice}_i - \text{avgBuyPrice}_i) - \text{totalCost}_i$$
+* Transaction costs:
+  * Options: Buy = 60p per ₹10,000 notional | Sell = 70p per ₹10,000 notional.
+  * Futures: Buy = 20p per ₹10,000 notional | Sell = 20p per ₹10,000 notional.
+
+### Mark to Market (M2M) & Net PnL
+$$\text{M2M} = \sum_{i=0}^{N-1} \text{netQuantity}_i \times (\text{markPrice}_i - \text{avgPrice}_i)$$
+* $\text{markPrice} = \text{Bid}[0]$ if $\text{netQuantity} > 0$ (long), $\text{Ask}[0]$ if $\text{netQuantity} < 0$ (short).
+* Net PnL: $\text{NetPL} = \text{RLP} + \text{M2M}$.
+
+### Slippage Guard (`CheckSlippageThreshold`)
+$$\text{tradedSpread} = \sum_{i=0}^{N-1} (\text{side}_i == \text{BUY} \mathbin{?} -\text{legAvgPrice}_i : \text{legAvgPrice}_i) \times \text{Ratio}_i$$
+$$\text{slippage} = \frac{\text{param\_.\_spread} - \text{AdjustGap}(\text{tradedSpread})}{100.0}$$
+* If `_allowedSlippage > 0` and $\text{slippage} > \text{\_allowedSlippage}$, the strategy immediately invokes `Stop()` to prevent adverse market damage.
+
+---
+
+## 8. Logging Architecture & Performance Rules
+
+### Zero-Allocation, Bounded Logging
+1. **Never log in the high-frequency tick path on benign or repeating conditions**:
+   * NEVER log `diff <= 0` inside `ExecuteHedgeLeg` (causes multi-gigabyte log explosions).
+   * NEVER log when `targetOrderPrice == currentPlacePrice` (order already placed).
+   * NEVER log when `is_response_pending()` is true.
+2. **Allowed Logging Points**:
+   * Strategy initialization and termination (`INIT`, `DESTROY`, `STOP`).
+   * Parameter reconfiguration (`ParamUpdate`).
+   * Order placed / modified successfully (when UID > 0).
+   * Trade executions (`[TRADE EVENT]`).
+   * Cycle completion and slippage evaluation (`[SLIPPAGE]`, `Tracer`).
+3. **Format Integrity**:
+   * Every log call MUST terminate with a newline `\n`. Missing newlines concatenate entries and corrupt downstream ingestion.
+
+---
+
+## 9. Non-Negotiable Coding Standards
+
+1. **Always Update `@CHANGELOG.md`** before committing using standard `[MAJOR.MINOR.PATCH] - YYYY-MM-DD` syntax.
+2. **Prices in Paise**: Never mix rupee and paise values.
+3. **Response-Pending Guard**: Always check `is_response_pending()` before calling `update_order()` or `cancel_order()`.
+4. **Vendor Directory Is Read-Only**: Never edit `vendor/minix/` or `vendor/nlohmann/`.
+5. **Explicit Non-Abbreviated Naming**:
+   * NEVER use cryptic abbreviations (`idx` → `index`, `qty` → `quantity`, `px` → `price`).
+   * Differentiate depth book levels from strategy parameters: use `levelPrice` / `levelQuantity` for book scans, and `orderQuantity` / `quantityAhead` for queue tracking.
+6. **Price Grid Quantization**: All price roundings must use `RoundOFF` formula.
+7. **Clean Memory Ownership**: Strategies allocated with `new` in `MinixStrategy` must be safely paired with `delete` on strategy deletion.
+8. **Documentation Sync**: Keep `.agents/AGENTS.md`, `GEMINI.md`, and `project_flow_documentation.md` in sync whenever architecture, parameters, or execution rules change.

@@ -43,7 +43,7 @@ class MinixStrategy final : public AlgoBase {
   private:
     void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
     void ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
-    void HandleRatioLegStrategy(const nlohmann::json& root_, const std::string& jsonText_, size_t numLegs_, int32_t interface_, bool gapDiff_);
+    void HandleRatioLegStrategy(const nlohmann::json& root_, size_t numLegs_, int32_t interface_, bool gapDiff_);
 
     // Once per ~1s, echo strategy updates back to the GUI.
     void SendStrategySpreadsToUi();
@@ -61,7 +61,6 @@ class MinixStrategy final : public AlgoBase {
     std::map<int32_t, JsonReassembly> _jsonReassembly;
 
     std::map<uint32_t, RatioLegStrategy*> _ratioStrats;
-    std::map<uint32_t, std::string>       _strategyJson;
     long long                             _lastSpreadSendMs = 0;  // last time BCmp/SCmp were pushed to the GUI
 
     execution_strat::PortfolioOrderManager _portfolio_mgr;
@@ -69,5 +68,4 @@ class MinixStrategy final : public AlgoBase {
 
     uint16_t _flags  = 0;                           // market-data event flags requested per token
     int32_t  _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
-    int64_t  _lastTickTs = 0;                       // monotonic seconds-of-day*1e9 clock (max of OnTick + broadcast paths)
 };

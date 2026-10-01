@@ -81,7 +81,7 @@ struct StrategySpreadUpdate {
     float          _netPL;      // NLP
     float          _rlp;
     float          _cutPL;      // CLP
-    float          _trSpread;
+    float          _reserved;   // was _trSpread; always 0, kept so B-ATP/S-ATP offsets do not move
     float          _bATP;
     float          _sATP;
 };

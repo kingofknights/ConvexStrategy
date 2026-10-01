@@ -207,21 +207,25 @@ Ratio spread strategies operate on 2 to 6 legs where each leg is weighted by a p
   * For buying a spread (BCmp), the leg prices are evaluated at their ask prices for BUY sides, and bid prices for SELL sides. For selling a spread (SCmp), the leg prices are evaluated at their bid prices for BUY sides, and ask prices for SELL sides.
 
 ### Quantity & Slippage Scaling
-* Bidding leg slice size: `param_._quantity * _ratios[_biddingLeg] * _lotSize`
-* Hedge leg target lots: `biddingPacks * _ratios[leg]` where `biddingPacks = tradedLot[_biddingLeg] / _ratios[_biddingLeg]`.
-* Slippage Cycle Completion Check: Verifies that normalized cycle quantities are equal: `_cycleTradedLot[i] / _ratios[i] == _cycleTradedLot[j] / _ratios[j]`.
-* Slippage Calculation: Accumulated slippage per leg is scaled by its corresponding ratio: $\text{slippage} = \sum (\text{actualHedgePrice} - \text{expectedHedgePrice}) \times \text{Ratio}_i$.
+* **Pack Definition**: Frontend "1 Lot" equals 1 complete ratio pack across all legs.
+  * Total Bidding Lots: $\text{totalBiddingLots} = \text{param\_.\_totalQuantity (packs)} \times \text{\_ratios}[\text{\_biddingLeg}]$.
+  * Bidding Leg Slice Size: `param_._quantity * _ratios[_biddingLeg] * _lotSize`.
+  * Partial Fill Remainder Clamping: When partial fills occur on `_biddingLeg`, order size is clamped to `(biddingRatio - (tradedLot % biddingRatio)) * lotSize` to complete the in-flight pack without overfilling.
+  * Hedge Leg Target Lots: `biddingPacks * _ratios[leg]` where `biddingPacks = tradedLot[_biddingLeg] / _ratios[_biddingLeg]`.
+* **Traded Pack Calculation**: $\text{totalPacks} = \min_{i=0}^{N-1} (\text{\_tradedLot}[i] / \text{\_ratios}[i])$.
+* **Slippage Calculation**: Accumulated slippage per leg is scaled by its corresponding ratio: $\text{slippage} = \frac{\text{param\_.\_spread} - \text{AdjustGap}(\text{tradedSpread})}{100.0}$.
 
 ### Dynamic Bidding & Multi-Stage Hedging Flow
-1. **Bidding Phase**: Quoting on `_biddingLeg` occurs passively based on market depth and user target spread (`param_._spread`).
-2. **Hedge Priority Guard**: In `OnTick` and on trade confirmations, if any ratio mismatch (`HasUnhedgedLots`) is detected, the bidding leg is cancelled immediately, and hedge orders are serviced with top priority.
+1. **Bidding Phase**: Quoting on `_biddingLeg` occurs passively based on market depth, user target spread (`param_._spread`), and pack-remainder boundaries.
+2. **Hedge Priority Guard**: In `OnTick` and on trade confirmations, if any ratio mismatch (`_isUnhedged`) is detected, the bidding leg is cancelled immediately, and hedge orders are serviced with top priority.
 3. **Phase 1 Hedging (Stored Snapshot Price with Per-Retry Tick Step Escalation)**:
-   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at the stored market price snapshot `_windRate._price[leg]` captured when the bidding order was posted (with fallback to `CalculateHedgePrice()` if uninitialized).
-   - On each subsequent modification / retry attempt $k$, price steps aggressively by 1 tick:
-     - **BUY side**: $P_{\text{target}} = P_{\text{stored}} + (k \times \text{TickSize})$
-     - **SELL side**: $P_{\text{target}} = P_{\text{stored}} - (k \times \text{TickSize})$
+   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at stored market price snapshot `_windRate._price[leg]` offset by `_tradeGear` aggressive ticks.
+   - On each modification attempt $k < \text{\_marketOrderRetries}$, price steps aggressively by 1 tick:
+     - **BUY side**: $P_{\text{target}} = P_{\text{base}} + (\text{\_tradeGearPriceOffset} + k \times \text{TickSize})$
+     - **SELL side**: $P_{\text{target}} = P_{\text{base}} - (\text{\_tradeGearPriceOffset} + k \times \text{TickSize})$
 4. **Phase 2 Hedging (Aggressive Opposite Side Touch Execution)**:
-   - When hedge retries reach `_marketOrderRetries`, the order aggressively crosses the spread to the opposite touch (BUY at Ask, SELL at Bid) to guarantee fill and complete the trade. Stoppage is governed solely by `AllowedSlippage`.
+   - When `_marketOrderRetries == 0` or retry count reaches `_marketOrderRetries`, the order aggressively crosses the spread to the opposite touch (BUY at Ask, SELL at Bid) to guarantee fill and complete the trade. Stoppage is governed solely by `AllowedSlippage`.
+   - While an OMS response is in flight (`is_response_pending()`), order modifications and retry increments are strictly suppressed.
 
 ---
 

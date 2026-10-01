@@ -11,8 +11,10 @@
 #include <nlohmann/json.hpp>
 #include <unistd.h>
 
+#include <array>
 #include <cstdint>
 #include <fstream>
+#include <string_view>
 
 /**
  * @brief Convert nanosecond timestamp to human readable UTC string.
@@ -26,15 +28,22 @@ auto OpenStream(const char* filename) -> std::ifstream {
 }
 
 void MinixStrategy::ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_) {
-    using aef::infra::ui_cmd::BuySell;
-    using aef::infra::ui_cmd::StrategyDatafromui;
-    using aef::infra::ui_cmd::TokenDatafromui;
-
-    // ponytail: send binary status update directly without JSON
-    auto sendStatus = [this, interface_](std::string_view status_, int strategyId_) {
-        const auto statusEnum = StringToStrategyStatus(status_);
-        SendStrategyStatusToUi(static_cast<uint32_t>(strategyId_), statusEnum, interface_);
+    // SubType -> leg count and whether the strike gap is part of the spread (Box / ConRev).
+    struct RatioType {
+        std::string_view _name;
+        size_t           _numLegs;
+        bool             _gapDiff;
     };
+    static constexpr std::array<RatioType, 8> RatioTypes{{
+        {"2LegRatio", 2, false},
+        {"3LegRatio", 3, false},
+        {"4LegRatio", 4, false},
+        {"5LegRatio", 5, false},
+        {"6LegRatio", 6, false},
+        {"Butterfly", 3, false},
+        {"Box", 4, true},
+        {"ConRev", 3, true},
+    }};
 
     try {
         nlohmann::json  root     = nlohmann::json::parse(jsonText_);
@@ -46,45 +55,24 @@ void MinixStrategy::ApplyLegStrategyJson(int32_t interface_, const std::string& 
 
         std::cout << "[applyLegStrategyJson] SubType='" << name << "' Status='" << status << "' StrategyId=" << strategyId << std::endl;
 
-        if (name == "2LegRatio") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 2, interface_, false);
-        } else if (name == "3LegRatio") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 3, interface_, false);
-        } else if (name == "4LegRatio") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 4, interface_, false);
-        } else if (name == "5LegRatio") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 5, interface_, false);
-        } else if (name == "6LegRatio") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 6, interface_, false);
-        } else if (name == "Butterfly") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 3, interface_, false);
-        } else if (name == "Box") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 4, interface_, true);
-        } else if (name == "ConRev") {
-            sendStatus(status, strategyId);
-            HandleRatioLegStrategy(root, jsonText_, 3, interface_, true);
+        for (const RatioType& type : RatioTypes) {
+            if (name == type._name) {
+                // ponytail: send binary status update directly without JSON
+                SendStrategyStatusToUi(static_cast<uint32_t>(strategyId), StringToStrategyStatus(status), interface_);
+                HandleRatioLegStrategy(root, type._numLegs, interface_, type._gapDiff);
+                break;
+            }
         }
-
     } catch (const std::exception& e) {
         std::cout << "applyLegStrategyJson failed: " << e.what() << std::endl;
     }
 }
 
-void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_,
-                                           const std::string&    jsonText_,
-                                           size_t numLegs_, int32_t interface_, bool gapDiff_) {
+void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t numLegs_, int32_t interface_, bool gapDiff_) {
     try {
-        auto     strategy         = root_["Strategy"];
-        auto     status           = strategy["Status"].get<std::string>();
-        uint32_t strategyID       = strategy["StrategyId"].get<uint32_t>();
-        _strategyJson[strategyID] = jsonText_;
+        const auto&    strategy   = root_.at("Strategy");
+        const auto     status     = strategy.at("Status").get<std::string>();
+        const uint32_t strategyID = strategy.at("StrategyId").get<uint32_t>();
 
         const StrategyStatus targetStatus = StringToStrategyStatus(status);
         std::string          upperStatus;
@@ -93,45 +81,30 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_,
             upperStatus.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
         }
 
-        if (upperStatus == "SUBSCRIBED" || upperStatus == "SUBSCRIBE" || upperStatus == "NEW" || upperStatus == "ACTIVE") {
-            auto iterator = _ratioStrats.find(strategyID);
+        auto iterator = _ratioStrats.find(strategyID);
+
+        if (upperStatus == "SUBSCRIBED" || upperStatus == "SUBSCRIBE" || upperStatus == "NEW" || upperStatus == "ACTIVE" ||
+            upperStatus == "APPLIED" || upperStatus == "APPLY") {
             if (iterator == _ratioStrats.end()) {
                 std::cout << "[handleRatioLegStrategy] Creating new RatioLegStrategy for strat=" << strategyID
                           << " with status=" << StrategyStatusToString(targetStatus) << std::endl;
-                auto* strat = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
-                strat->SetStatus(targetStatus);
-                _ratioStrats[strategyID] = strat;
+                iterator = _ratioStrats.emplace(strategyID, new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_)).first;
             } else {
                 std::cout << "[handleRatioLegStrategy] Updating existing RatioLegStrategy for strat=" << strategyID
                           << " with status=" << StrategyStatusToString(targetStatus) << std::endl;
                 iterator->second->ParamUpdate(root_);
-                iterator->second->SetStatus(targetStatus);
             }
-        } else if (upperStatus == "APPLIED" || upperStatus == "APPLY") {
-            auto iterator = _ratioStrats.find(strategyID);
-            if (iterator != _ratioStrats.end()) {
-                iterator->second->ParamUpdate(root_);
-                iterator->second->SetStatus(targetStatus);
-            } else {
-                auto* strat = new RatioLegStrategy(this, strategyID, interface_, root_, numLegs_, gapDiff_);
-                strat->SetStatus(targetStatus);
-                _ratioStrats[strategyID] = strat;
-                strat->ParamUpdate(root_);
-            }
+            iterator->second->SetStatus(targetStatus);
+        } else if (iterator == _ratioStrats.end()) {
+            return;
         } else if (upperStatus == "UNSUBSCRIBED" || upperStatus == "UNSUBSCRIBE" || upperStatus == "STOP") {
-            auto iterator = _ratioStrats.find(strategyID);
-            if (iterator != _ratioStrats.end()) {
-                std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyID << std::endl;
-                iterator->second->Stop();
-            }
+            std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyID << std::endl;
+            iterator->second->Stop();
         } else if (upperStatus == "DELETED" || upperStatus == "DELETE") {
-            auto iterator = _ratioStrats.find(strategyID);
-            if (iterator != _ratioStrats.end()) {
-                std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyID << std::endl;
-                iterator->second->Stop();
-                delete iterator->second;
-                _ratioStrats.erase(iterator);
-            }
+            std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyID << std::endl;
+            iterator->second->Stop();
+            delete iterator->second;
+            _ratioStrats.erase(iterator);
         }
     } catch (const std::exception& e) {
         std::cout << "[handleRatioLegStrategy] failed: " << e.what() << std::endl;
@@ -183,12 +156,8 @@ auto MinixStrategy::unSubscribeProduct(const int32_t product_id_, const uint16_t
 }
 
 void MinixStrategy::OnTick(const Quote& event_) {
-    int64_t lastTickTs = 0;
     for (auto& [strategyId, ratio] : _ratioStrats) {
-        ratio->OnTick(event_, lastTickTs);
-        if (ratio->IsStopped()) {
-            ratio->Stop();
-        }
+        ratio->OnTick(event_);
     }
 }
 
@@ -209,9 +178,6 @@ auto MinixStrategy::doWork() -> int {
         SendStrategySpreadsToUi();
     }
 
-    for (auto& [strategyId, ratio] : _ratioStrats) {
-        ratio->CheckHedgeTimeout();
-    }
     return 0;
 }
 
@@ -231,11 +197,10 @@ void MinixStrategy::SendStrategySpreadsToUi() {
         update._netPL      = static_cast<float>(ratio_->GetNetPL()) / 100.0F;
         update._rlp        = static_cast<float>(ratio_->GetRLP()) / 100.0F;
         update._cutPL      = static_cast<float>(ratio_->GetCutPL()) / 100.0F;
-        update._trSpread   = static_cast<float>(ratio_->GetRLP()) / 100.0F;
         update._bATP       = static_cast<float>(ratio_->GetBATP()) / 100.0F;
         update._sATP       = static_cast<float>(ratio_->GetSATP()) / 100.0F;
         SendStrategySpreadToUi(update, ratio_->GetInterface());
-        ratio_->Print();
+        // ratio_->Print();
     };
 
     for (auto& [strategy, ratio] : _ratioStrats) {
@@ -273,11 +238,7 @@ void MinixStrategy::SendStrategyStatusToUi(uint32_t strategyId_, StrategyStatus 
     sentoUI(updateUI);
 }
 
-void MinixStrategy::onBcastData(const aef::infra::product::product_data& product_details_) {
-    for (auto& [strategy, ratio] : _ratioStrats) {
-        ratio->OnBcast(product_details_, _lastTickTs);
-    }
-}
+void MinixStrategy::onBcastData([[maybe_unused]] const aef::infra::product::product_data& product_details_) {}
 
 /**
  * @brief Evaluate parsed CSV rows and fire configured orders.
@@ -343,27 +304,37 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) {
 auto MinixStrategy::UpdateOrder(OrderObjectPtrT& order_, int32_t token_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t {
     uint32_t uid   = clientUid_.id_;
     auto&    order = order_;
-    quantity_ -= order->get_filled_qty();
+    // quantity_ is the remaining open qty wanted. Callers derive it from traded lots, and
+    // order_instance::update_order adds filled qty back itself, so do not subtract it here.
     if (order->get_current_state() != static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE)) {
         if (order->is_response_pending()) {
-            return uid;
+            return 0;
         }
-        if (quantity_ > 0 && order->get_open_price() != price_) {
-            order->set_time_stamps(_event_timestamp, _trigger_timestamp, aef::infra::get_realtime_in_nanos());
-            const bool status = order->update_order(price_, quantity_);
-            if (status) {
-                _portfolio_mgr.on_order_modify(order->get_uid(), price_, quantity_);
-            }
+        // Modify on a price or a size change (a resting hedge grows when more lots are needed).
+        if (quantity_ <= 0 || (order->get_open_price() == price_ && order->get_open_qty() == quantity_)) {
+            return 0;
         }
+        order->set_time_stamps(_event_timestamp, _trigger_timestamp, aef::infra::get_realtime_in_nanos());
+        if (!order->update_order(price_, quantity_)) {
+            return 0;
+        }
+        _portfolio_mgr.on_order_modify(order->get_uid(), price_, quantity_);
+        return order->get_uid();
     } else {
         if (order->is_response_pending()) {
-            return uid;
+            return 0;
         }
         if (quantity_ <= 0 || order->get_open_price() == price_) {
-            return uid;
+            return 0;
         }
-        ++clientUid_.composite_id_.request_id;  // print_depth(token);
+        // request_id is a 22-bit field: stop at the limit instead of wrapping and reusing ids.
         if (clientUid_.composite_id_.request_id >= MAX_REQUEST_ID) {
+            return 0;
+        }
+        ++clientUid_.composite_id_.request_id;
+        if (clientUid_.composite_id_.request_id >= MAX_REQUEST_ID) {
+            std::cout << "[UpdateOrder] strat=" << clientUid_.composite_id_.strategy_id
+                      << " request_id limit " << MAX_REQUEST_ID << " reached, no new orders will be placed" << std::endl;
             return 0;
         }
         order->set_time_stamps(_event_timestamp, _trigger_timestamp, aef::infra::get_realtime_in_nanos());
@@ -409,7 +380,7 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
     info._placed._price     = response_.packet_.price_;
     info._placed._quantity  = response_.packet_.quantity_;
     info._token             = static_cast<TokenT>(response_.packet_.product_id_);
-    info._errorCode         = response_.packet_.exchange_response_code;
+    info._errorCode         = response_.packet_.exchange_error_code;
     if (info._fillNumber != 0) {
         info._traded = info._placed;
     }
