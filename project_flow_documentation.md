@@ -1,234 +1,217 @@
-# MOSS Strategy Architecture & Execution Flow Documentation
+# ConvexStrategy — Architecture & Execution Flow
 
-This document describes the architectural layout, core components, data flows, order execution logic, and spread calculations implemented in the `SampleAlgo` strategy shared library.
+This document describes how the `libConvexMoss.so` strategy library is put together, how events move through it, and the order execution rules of the ratio strategy. Parameter details are in [strategy_parameters.md](strategy_parameters.md); the UI wire format is in [UI_BINARY_PROTOCOL_SPEC.md](UI_BINARY_PROTOCOL_SPEC.md).
+
+All prices and values are **paise**. The engine is single-threaded: `OnTick`, `OnOrderResponse`, `doWork` and `onUIRequest` never run concurrently.
 
 ---
 
-## 1. System Components & Architecture
+## 1. Components
 
-The strategy library exposes the strategy dynamic loading hooks (`create` / `destroy`) to the main execution engine. It relies on a modular architecture consisting of the following key files:
-
-| Component / File | Purpose |
+| Component | Purpose |
 | :--- | :--- |
-| **[AlgoBase.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/include/AlgoBase.hpp)** | The base interface class provided by the platform. Defines tick, order response, broadcast, and UI event hooks. |
-| **[MinixStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.hpp)** / **[MinixStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.cpp)** | The dynamic entry-point and central orchestrator. Reassembles front-end configuration messages, handles the lifecycle of multiple box strategies, and routes market ticks/order responses. |
-| **[BoxSpreadStrategy.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/BoxSpread/BoxSpreadStrategy.hpp)** / **[BoxSpreadStrategy.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/BoxSpread/BoxSpreadStrategy.cpp)** | A concrete implementation of a 4-leg option box spread strategy. Contains the math for real-time spreads, execution state machines, and EOD square-offs. |
-| **[order_instance.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/include/order_instance.hpp)** / **[order_instance.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/src/order_instance.cpp)** | Convenience wrapper around the raw OMS order lifecycle, transitioning orders through placement, exchange confirmation, modification, and cancellation. |
-| **[PortfolioOrderManager.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/include/PortfolioOrderManager.hpp)** / **[PortfolioOrderManager.cpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/src/PortfolioOrderManager.cpp)** | A lightweight position bookkeeper. Processes order responses, keeps track of net token positions, and aggregates realized/unrealized PnL. |
-| **[ProductInfo.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/include/ProductInfo.hpp)** | Contains definitions for snapshot flags, option types, and the `product_data` market snapshot struct. |
-| **[oms_api.hpp](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/vendor/minix/include/oms_api.hpp)** | Defines transaction codes, error codes, request statuses, order sides, types, and body structures used to interface with the OMS. |
+| [`Convex/MinixStrategy.hpp/.cpp`](Convex/MinixStrategy.cpp) | Entry point (`create` / `destroy`) and hub. Reassembles GUI config, owns the strategies (`std::map<uint32_t, std::unique_ptr<RatioLegStrategy>>`), fans out ticks and order responses, places/modifies orders (`UpdateOrder`), and echoes state to the UI (`SendToUi`). |
+| [`Convex/RatioLeg/RatioLegStrategy.hpp/.cpp`](Convex/RatioLeg/RatioLegStrategy.cpp) | One N-leg ratio spread (2..6 legs). Leg 0 bids passively; the other legs hedge. Runs a long pack and a short pack independently. |
+| [`Convex/Utils.hpp`](Convex/Utils.hpp) | Cost constants, `StrategyStatus`, `UiMessageCode`, packed UI wire structs (size-checked with `static_assert`). |
+| [`vendor/minix/.../order_instance`](vendor/minix/src/order_instance.cpp) | Vendor wrapper of one order's OMS lifecycle. Read-only. |
+| [`vendor/minix/include/AlgoBase.hpp`](vendor/minix/include/AlgoBase.hpp) | Platform base class (feeds, product details, `send_order`, `sentoUI`, logging). Implemented in `lib/libAlgoBase.so`. |
+| [`tests/ratio_dry_run.cpp`](tests/ratio_dry_run.cpp) | Dry run: real strategy code against a fake `AlgoBase` and a mini exchange. |
 
 ---
 
-## 2. Dynamic Lifecycle & Initial Setup
+## 2. Start-up
 
 ```mermaid
 graph TD
-    A[MOSS Engine Loads libSampleAlgo.so] --> B["MinixStrategy Ctor / init()"]
-    B --> C[Read configuration JSON file]
-    C --> D[Extract Client ID, Algo ID, and OMS ID]
-    D --> E["Subscribe to static tokens in bcast.csv (flags: TER+MBP+OI+TBT)"]
-    E --> F[Check for simulation config 'LegStrategy_json' to auto-run box]
+    A[MOSS engine loads libConvexMoss.so] --> B["create() -> new MinixStrategy"]
+    B --> C["Read get_strategy_config_file() JSON"]
+    C --> D["client / algoid / omsid (order routing)"]
+    D --> E["Feed flags: TER + MBP + OI + TBT"]
+    E --> F[Wait for GUI strategy config]
 ```
 
-### Configuration & Subscription Setup
-* In the constructor of **[MinixStrategy](file:///home/vikram.lodhi@corp.merillife.com/Projects/ConvexStrategy/Convex/MinixStrategy.cpp)**, the strategy pulls configuration parameter paths via `get_strategy_config_file()`.
-* It registers itself for market data events on the symbols configured in `bcast.csv` using the subscription flags:
-  * `TER_UPDATE_EVENT` (Trade Execution Range)
-  * `MBP_UPDATE_EVENT` (Market By Price / Snapshot Depth)
-  * `OI_UPDATE_EVENT` (Open Interest Updates)
-  * `TBT_UPDATE_EVENT` (Tick-By-Tick Data Updates)
+No tokens are subscribed at start-up. Each strategy subscribes its own legs when it is created.
 
 ---
 
-## 3. UI Communication & Message Reassembly
+## 3. GUI → Strategy: config intake
 
-Communication with the front-end graphical interface requires a reassembly layer to circumvent message size limits.
+1. The GUI sends on message code `100001` (`UiMessageCode_STRATEGY_CONFIG`) a metadata packet `{"packet_count":N,...}` zero-padded to 1500 B, then N raw 1500 B slices of the strategy JSON.
+2. `onUIRequest` strips trailing NUL bytes, appends the slices, and after N slices calls `ApplyLegStrategyJson`.
+3. `ApplyLegStrategyJson` maps `Strategy.SubType` to a leg count and gap rule:
 
-### A. Reassembling Incoming Strategy Config (From GUI to Strategy)
-1. The GUI connector pushes data to `onUIRequest()` using message codes `9612`, `9620`, or `9621`.
-2. The first packet received is a **Metadata Packet** structured as a JSON string detailing the `packet_count` (N chunks).
-3. The next N packets contain **Data Chunks** (1500 bytes each).
-4. `MinixStrategy` concatenates these chunks in `JsonReassembly::buf`. Once the accumulated chunk count equals the expected total, it forwards the complete JSON string to `applyLegStrategyJson()`.
+| SubType | Legs | Strike gap in spread |
+| :--- | :--- | :--- |
+| `2LegRatio` .. `6LegRatio` | 2..6 | no |
+| `Butterfly` | 3 | no |
+| `Box` | 4 | yes |
+| `ConRev` | 3 | yes |
 
-### B. Translating JSON Parameters & Handling Actions
-`applyLegStrategyJson` translates the human-facing GUI parameters to the canonical wire structure. It performs the following action dispatches:
+4. `HandleRatioLegStrategy` acts on `Strategy.Status` (case-insensitive):
 
-* **`add` / `edit`**: Instantiates or updates a `BoxSpreadStrategy` map entry matching the `strategynumber`.
-* **`start`**: Subscribes to the underlying legs (if not subscribed) and turns on the execution flag (`running_ = true`).
-* **`stop`**: Halts trading, cancels outstanding orders, and triggers immediate square-offs for any open positions.
-* **`delete`**: Stops the target strategy, unsubscribes the relevant tokens, deallocates the strategy object, and purges references.
+| Status | Action |
+| :--- | :--- |
+| `SUBSCRIBE(D)`, `ACTIVE` | Create, or `ParamUpdate` an existing strategy; status `ACTIVE` (market data only). |
+| `APPLY`, `APPLIED` | Create or update; status `APPLIED` (bidding and hedging). |
+| `NEW` | Create or update; status `INACTIVE` via `Stop()`. |
+| `UNSUBSCRIBE(D)`, `STOP` | `Stop()`. |
+| `DELETE(D)` | `Stop()`, then destroy the strategy. |
 
-### C. Sending Updates Back (From Strategy to GUI)
-Every ~1 second, the engine’s `doWork()` loop calls `sendStrategySpreadsToUI()`. It sends binary POD structs directly to the UI (Trade Tracker pattern):
-1. **Strategy Spread & PnL Updates** (`StrategySpreadUpdate`): Dispatched on message code `100002` via single `memcpy` into `UIStruct::message`. Contains strategy ID, 4-byte `StrategyStatus` enum (`StrategyStatus_INACTIVE = 0`, `StrategyStatus_ACTIVE = 1`, `StrategyStatus_APPLIED = 2`), spread metrics (`BCmp`, `SCmp`, `FLP`, `Gap`), execution metrics (`B-TrQ`, `S-TrQ`), and PnL (`M2M`, `NLP`, `RLP`, `CLP`, `B-ATP`, `S-ATP`).
-2. **Strategy Lifecycle Status Updates** (`StrategyStatusUpdate`): Dispatched on message code `100001` via single `memcpy` into `UIStruct::message` for state transitions (`StrategyStatus` enum).
-3. Zero JSON serialization, chunking, or heap allocations are used. Total `StrategySpreadUpdate` payload is 64 bytes.
+5. The UI then receives the strategy's **actual** status on `100001` (`StrategyStatusUpdate`); INACTIVE if creation failed or the strategy was deleted.
+
+**Creation** (`RatioLegStrategy` constructor): open the log file, parse `Legs` (token, side) and `Ratio.LegRatios`, load product details for every leg, apply `Params`, create the orders, then subscribe. If a leg has no product details or a zero lot/tick size, the constructor throws before subscribing and no strategy is stored. Tokens, sides and ratios are fixed at creation; later updates change only `Params`.
 
 ---
 
-## 4. Market Data Event Processing
+## 4. Strategy → GUI: echo
 
-The strategy updates its cached order books and performs calculations when a tick or broadcast is received:
+| Code | Payload | When |
+| :--- | :--- | :--- |
+| `100001` | `StrategyStatusUpdate` (8 B) | After each config request. |
+| `100002` | `StrategySpreadUpdate` (64 B) | Every ~1 s from `doWork` (`steady_clock`): BCmp, SCmp, cost, FLP, gap, traded packs, M2M, NLP, RLP, CLP, B-ATP, S-ATP. |
+| `100003` | `ExternalOrderResponse` | Each placed / modified / cancelled / traded / rejected response. |
+| `100004` | `TradeTracer` (55 B) | Each time whole packs complete (slippage report). |
+
+---
+
+## 5. Event flow
 
 ```mermaid
 sequenceDiagram
-    participant Engine as Platform Engine
+    participant Engine
     participant Hub as MinixStrategy
-    participant Box as BoxSpreadStrategy
-    
-    rect rgb(240, 240, 240)
-        Note over Engine, Box: Tick Data Stream (High Frequency)
-        Engine->>Hub: OnTick(Quote)
-        Hub->>Hub: Extract Exchange/Event Timestamp
-        Hub->>Hub: Update Monotonic Clock (lastTickTs_)
-        Hub->>Box: onTick(Quote, lastTickTs_)
-        Box->>Box: Copy Ask/Bid Prices into contiguous Leg arrays
-        Box->>Box: run(event_token, nowTs)
+    participant Strategy as RatioLegStrategy
+    participant Order as order_instance
+
+    Engine->>Hub: OnTick(Quote)
+    Hub->>Hub: store event/trigger timestamps
+    Hub->>Strategy: OnTick (every strategy)
+    Strategy->>Strategy: store quote of that leg
+    Strategy->>Strategy: ProcessPack(long), ProcessPack(short)
+
+    Engine->>Hub: OnOrderResponse(oms_transaction)
+    Hub->>Strategy: route by client_uid.strategy_id
+    Strategy->>Order: handle_confirmation
+    alt OMS_TRADE
+        Strategy->>Strategy: OnTrade: book fill, unhedged?, slippage, ProcessPack
+    else OMS_REQ_REJ
+        Strategy->>Strategy: wait for next tick
+    else ack / cancel
+        Strategy->>Strategy: ProcessPack (act now)
     end
-    
-    rect rgb(230, 245, 230)
-        Note over Engine, Box: Broadcast Snapshots (Coarse Frequency)
-        Engine->>Hub: onBcastData(product_data)
-        Hub->>Hub: Decode LastTradeTime (NSE 1980 epoch -> Unix)
-        Hub->>Hub: Update Monotonic Clock (lastTickTs_)
-        Hub->>Box: onBcast(product_data, lastTickTs_)
-        Box->>Box: Refresh Top-5 Leg arrays from snapshot MBP
-        Box->>Box: run(pd.product_id_, nowTs)
-    end
+    Hub->>Engine: echo to UI (100003)
 ```
 
-> [!NOTE]
-> The box strategy decouples real-time spread calculations from the clock. The Monotonic Clock (`lastTickTs_`) is only used to evaluate relative timeouts (e.g., bidding escalations and EOD square-offs).
+The side in a response names the pack: the long and short packs trade opposite sides of every leg.
 
----
-
-## 5. Box Spread Mathematics
-
-A box spread strategy utilizes four options contracts consisting of two strikes: a lower strike $K_1$ and a higher strike $K_2$.
-
-### Arbitrage Edge Calculations (Paise)
-When all four roles ($Call_{K1}$, $Put_{K1}$, $Call_{K2}$, $Put_{K2}$) are successfully mapped, the box computes canonical spreads:
-
-* **Net Debit** (The premium cost required to purchase the box):
-  $$\text{NetDebit} = Call_{K1}.\text{Ask} - Put_{K1}.\text{Bid} - Call_{K2}.\text{Bid} + Put_{K2}.\text{Ask}$$
-
-* **Net Credit** (The premium revenue received when selling the box):
-  $$\text{NetCredit} = Call_{K1}.\text{Bid} - Put_{K1}.\text{Ask} - Call_{K2}.\text{Ask} + Put_{K2}.\text{Bid}$$
-
-* **BCmp (Market Buy Spread Edge)**:
-  $$\text{BCmp} = \text{Gap} - \text{NetDebit}$$
-  * A positive BCmp value represents an arbitrage profit when buying the box structure.
-
-* **SCmp (Market Sell Spread Edge)**:
-  $$\text{SCmp} = \text{NetCredit} - \text{Gap}$$
-  * A positive SCmp value represents an arbitrage profit when selling/reversing the box structure.
-
-> [!IMPORTANT]
-> Options prices are multiplied by $100$ to operate strictly in paise. The $\text{Gap}$ is computed as:
-> $$\text{Gap} = (K_2 - K_1) \times 100 \times \text{boxRatio}$$
-
----
-
-## 6. Execution Schemes & State Machines
-
-When a buy ($\text{BCmp} \ge B\text{-}Pr$) or sell ($\text{SCmp} \le S\text{-}Pr$) threshold is crossed, the strategy locks the trade direction and initiates execution based on one of three modes:
+### The pack decision (`ProcessPack`)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle : activeDir_ Resolved
-    
-    state "AGGRESSIVE (Mode 1)" as M1 {
-        Idle --> Sweep : Spread Triggered
-        Sweep --> [*] : Fire IOC/Limit on all 4 Legs at Touch
-    }
-    
-    state "BIDDING (Mode 2)" as M2 {
-        Idle --> BidsPosted : Place passive limit orders on isbidding legs
-        BidsPosted --> BidsPosted : Update orders to chase touch
-        BidsPosted --> HedgesPosted : isbidding leg fills detected
-        HedgesPosted --> HedgesPosted : Sweep remaining hedge legs at Touch
-        HedgesPosted --> [*] : All legs fully hedged
-    }
-    
-    state "ALL-LEG BIDDING (Mode 4)" as M4 {
-        Idle --> AllBidsPosted : Place passive limits on all 4 legs
-        AllBidsPosted --> AllBidsPosted : Chase touch passively
-        AllBidsPosted --> Escalation : Leg fills or revert timeout reached
-        Escalation --> [*] : Cross all unfilled legs to touch aggressively
-    }
+    direction LR
+    [*] --> Unhedged: hedge legs behind bidding packs
+    [*] --> Applied: hedged and status APPLIED
+    [*] --> Idle: hedged and not APPLIED
+    Unhedged: HedgePack — cancel bid, send hedge steps
+    Applied: EvaluateBidding — place, reprice or cancel bid
+    Idle: cancel bid (retries a cancel Stop could not send)
 ```
 
----
-
-## 7. Order Lifecycle & Position Tracking
-
-Orders are wrapper-tracked to handle confirmations and avoid latency issues:
-
-1. **State Machine (`order_instance`)**:
-   Tracks transition stages: `STRAT_INITIAL_STATE` $\rightarrow$ `STRAT_ORDER_PLACED` $\rightarrow$ `STRAT_OMS_PLACED` $\rightarrow$ `STRAT_EXCHG_CONF`. 
-   It ensures no modification (`update_order`) or cancellation (`cancel_order`) is dispatched while another response is pending (`is_response_pending()`).
-
-2. **Trades & Portfolio Management (`PortfolioOrderManager`)**:
-   * Listens to the `OMS_TRADE` event code (`6666`).
-   * When a fill is verified, it updates net positions (`net_qty`) and registers the transaction details.
-   * Cashflow adjustments are made based on the effective trade side:
-     $$\text{CashFlow} = \text{CashFlow} + (\text{Sign}_{\text{Side}} \times \text{Price} \times \text{Qty})$$
-   * Evaluates rolling realized PnL and updates mark prices on snap updates to reflect unrealized exposure.
-
-3. **Transaction Costs**:
-   Applied per fill on option traded values in paise:
-   * **Buy transactions**: $60$ Paise per Rs. $10,000$ value ($6,000$ Rs per Crore)
-   * **Sell transactions**: $70$ Paise per Rs. $10,000$ value ($7,000$ Rs per Crore)
+Every tick and every non-reject response runs this decision once per pack. Hedging runs in every status, so a stopped strategy still goes flat.
 
 ---
 
-## 8. End-of-Day (EOD) Operations
+## 6. Spread & bidding
 
-To prevent overnight option exposure, the system executes square-off safety protocols:
+**Spread** of a pack at the crossing side of the book (`QuoteSpread`):
 
-* **Time Anchor**: The strategy anchors the first tick with a valid exchange clock as the market open (representing `09:15:00`).
-* **Cutoff Marker**: It sets a target expiration timestamp (`eodTs_`) equivalent to the open timestamp plus a fixed offset of 22,440 seconds (corresponding to `15:29:00`).
-* **Liquidation Trigger**: When the exchange clock matches or exceeds `eodTs_`, the active execution cycle stops. It calls `squareOffLeg()` on each leg, which issues aggressive limit orders to close out remaining net positions (`signedPos`).
+$$\text{Spread} = \text{AdjustGap}\Big(\sum_{i=0}^{N-1} \text{SideSign}_i \times \text{Price}_i \times \text{Ratio}_i\Big)$$
 
----
+* $\text{SideSign}_i = -1$ for a BUY leg, $+1$ for a SELL leg (net-credit convention).
+* $\text{Price}_i$ is taken from the side a crossing order would take (`_takeSide`): ask for a BUY leg, bid for a SELL leg.
+* Any missing leg price makes the spread invalid (reported as 0).
+* With a strike gap (Box, ConRev): $\text{AdjustGap}(s) = s + \text{gap}$ if $s < 0$, else $s - \text{gap}$, where gap = |strike₀ − strike₁|.
+* BCmp is the long pack's spread, SCmp the short pack's.
 
----
+**Entry** (`EvaluateBidding`), in this order; any failure cancels the bid:
 
-## 9. Ratio N-Leg (2-Leg to 6-Leg) Strategy Mathematics
+1. Lots left: $\text{remaining} = \text{\_totalPacks} \times \text{Ratio}_0 - \text{tradedLots}_0 > 0$.
+2. Hedge-leg depth on the side each hedge takes: `OrderDepth` levels with orders, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `OrderDepth` levels.
+3. Bidding-leg depth: `AllowedBidDepth` priced levels on its own side.
+4. Valid spread and $\text{Spread} \ge \text{\_targetSpread}$.
 
-Ratio spread strategies operate on 2 to 6 legs where each leg is weighted by a per-leg ratio multiplier.
+**Order** on leg 0, resting at its own side's touch (BUY at bid, SELL at ask):
 
-### Real-Time Spread Calculations (Paise)
-* **Ratio Multipliers**: Leg ratios are parsed from the `"Ratio"` object (`"LegRatios"` array) in the JSON configuration.
-* **Spread formula**:
-  $$\text{Spread} = \sum_{i=0}^{N-1} \text{SideSign}_i \times \text{Price}_i \times \text{Ratio}_i$$
-  * Where $\text{SideSign}_i = -1$ if the execution side of the leg is `BUY_SIDE` and $+1$ if it is `SELL_SIDE`.
-  * For buying a spread (BCmp), the leg prices are evaluated at their ask prices for BUY sides, and bid prices for SELL sides. For selling a spread (SCmp), the leg prices are evaluated at their bid prices for BUY sides, and ask prices for SELL sides.
-
-### Quantity & Slippage Scaling
-* **Pack Definition**: Frontend "1 Lot" equals 1 complete ratio pack across all legs.
-  * Total Bidding Lots: $\text{totalBiddingLots} = \text{param\_.\_totalQuantity (packs)} \times \text{\_ratios}[\text{\_biddingLeg}]$.
-  * Bidding Leg Slice Size: `param_._quantity * _ratios[_biddingLeg] * _lotSize`.
-  * Partial Fill Remainder Clamping: When partial fills occur on `_biddingLeg`, order size is clamped to `(biddingRatio - (tradedLot % biddingRatio)) * lotSize` to complete the in-flight pack without overfilling.
-  * Hedge Leg Target Lots: `biddingPacks * _ratios[leg]` where `biddingPacks = tradedLot[_biddingLeg] / _ratios[_biddingLeg]`.
-* **Traded Pack Calculation**: $\text{totalPacks} = \min_{i=0}^{N-1} (\text{\_tradedLot}[i] / \text{\_ratios}[i])$.
-* **Slippage Calculation**: Accumulated slippage per leg is scaled by its corresponding ratio: $\text{slippage} = \frac{\text{param\_.\_spread} - \text{AdjustGap}(\text{tradedSpread})}{100.0}$.
-
-### Dynamic Bidding & Multi-Stage Hedging Flow
-1. **Bidding Phase**: Quoting on `_biddingLeg` occurs passively based on market depth, user target spread (`param_._spread`), and pack-remainder boundaries.
-2. **Hedge Priority Guard**: In `OnTick` and on trade confirmations, if any ratio mismatch (`_isUnhedged`) is detected, the bidding leg is cancelled immediately, and hedge orders are serviced with top priority.
-3. **Phase 1 Hedging (Stored Snapshot Price with Per-Retry Tick Step Escalation)**:
-   - Upon first leg fill (`_biddingLeg`), hedge legs are placed at stored market price snapshot `_windRate._price[leg]` offset by `_tradeGear` aggressive ticks.
-   - On each modification attempt $k < \text{\_marketOrderRetries}$, price steps aggressively by 1 tick:
-     - **BUY side**: $P_{\text{target}} = P_{\text{base}} + (\text{\_tradeGearPriceOffset} + k \times \text{TickSize})$
-     - **SELL side**: $P_{\text{target}} = P_{\text{base}} - (\text{\_tradeGearPriceOffset} + k \times \text{TickSize})$
-4. **Phase 2 Hedging (Aggressive Opposite Side Touch Execution)**:
-   - When `_marketOrderRetries == 0` or retry count reaches `_marketOrderRetries`, the order aggressively crosses the spread to the opposite touch (BUY at Ask, SELL at Bid) to guarantee fill and complete the trade. Stoppage is governed solely by `AllowedSlippage`.
-   - While an OMS response is in flight (`is_response_pending()`), order modifications and retry increments are strictly suppressed.
+* A partly filled pack is finished first: $\text{orderLots} = \text{Ratio}_0 - (\text{tradedLots}_0 \bmod \text{Ratio}_0)$ when the remainder is non-zero, else $\text{\_slicePacks} \times \text{Ratio}_0$.
+* $\text{quantity} = \min(\text{orderLots}, \text{remaining}) \times \text{lotSize}$.
+* Repriced only when the touch moved by at least `_repriceThreshold` (`TickSize` param × tick size).
+* Each successful send stores the leg prices in `_bidSnapshot`; hedges start from them.
 
 ---
 
-> [!WARNING]
-> If market data books are crossed ($\text{Bid} \ge \text{Ask}$), the strategy blocks trading updates (`booksReady()` returns false). This prevents the algorithm from executing trades on stale, single-sided, or invalid market feeds.
+## 7. Hedging
 
+A pack is **unhedged** when any hedge leg holds fewer lots than the completed bidding packs need:
+
+$$\text{biddingPacks} = \lfloor \text{tradedLots}_0 / \text{Ratio}_0 \rfloor, \qquad \text{unhedged} \iff \exists\, i > 0: \text{tradedLots}_i < \text{biddingPacks} \times \text{Ratio}_i$$
+
+While unhedged, `HedgePack` cancels the bid and, per hedge leg (`ExecuteHedgeLeg`):
+
+* $\text{missing} = \text{biddingPacks} \times \text{Ratio}_i - \text{tradedLots}_i$; nothing to do when $\le 0$.
+* $\text{quantity} = \min(\text{missing} \times \text{lotSize}, \text{sliceQuantity}_i)$.
+* Aggressive when `MarketOrderRetries == 0` or retries ≥ `MarketOrderRetries`.
+* Base price: the opposite touch when aggressive (or no snapshot), else `_bidSnapshot._price[i]`. An empty opposite side waits for a real price.
+* $\text{price} = \max(\text{base} + \text{sign} \times (\text{\_tradeGearOffset} + \text{retryOffset}),\ \text{tickSize})$, sign $+1$ BUY / $-1$ SELL, retryOffset = retries × tick when not aggressive.
+* A retry is one request actually sent. Retry counts reset when the pack becomes hedged.
+
+---
+
+## 8. Orders
+
+`order_instance` (vendor) tracks `STRAT_INITIAL_STATE → ORDER_PLACED → OMS_PLACED → EXCHG_CONF`, with modify and cancel bits. A fully traded or cancelled order resets to the initial state.
+
+`MinixStrategy::UpdateOrder(order, price, quantity, clientUid)` is the only place/modify path. It returns the uid when a request was sent, else 0:
+
+* Nothing is sent for `quantity <= 0`, `price <= 0`, or while a response is pending.
+* Initial state: place with the next `request_id`. `request_id` is a 22-bit field that starts at 0 per strategy and stops at `MAX_REQUEST_ID` (logged once) instead of wrapping.
+* Otherwise: modify only a confirmed order whose price or open quantity differs. `quantity` is the open quantity wanted; the vendor adds the filled quantity back.
+
+`CancelOrder` (strategy) cancels only a confirmed order with no pending response. Both guards exist because the vendor logs every request it refuses, and these paths run on every tick.
+
+---
+
+## 9. Fills, slippage and PnL
+
+`OnTrade` books lots and value per leg in `_tradedLots` / `_tradedValue` and in `_unreportedLots` / `_unreportedValue`. When the pack is hedged after a fill:
+
+* `_tradedSpread` (B-ATP / S-ATP) is refreshed from average leg prices.
+* `CheckSlippageThreshold` reports every newly completed pack: traded spread of those packs, slippage = (target − traded) / 100 rupees, a `TradeTracer` to the UI, and `Stop()` when `AllowedSlippage > 0` and slippage exceeds it. Lots beyond the reported packs carry to the next report at their average value.
+
+| Figure | Formula |
+| :--- | :--- |
+| Traded packs (B-TrQ / S-TrQ) | $\min_i \lfloor \text{tradedLots}_i / \text{Ratio}_i \rfloor$ |
+| RLP | $\sum_i \min(\text{buyQty}_i, \text{sellQty}_i) \times (\text{avgSell}_i - \text{avgBuy}_i) - \text{costs}$, across both packs |
+| M2M | $\sum_i \text{netQty}_i \times (\text{mark}_i - \text{avg}_i)$; mark = bid when long, ask when short; empty side skipped |
+| NLP | RLP + M2M |
+| Cost | $\sum_i \text{Ratio}_i \times (\text{bid}_i \times \text{buyRate}_i + \text{ask}_i \times \text{sellRate}_i)$ at the current touch |
+
+Cost rates are in `Utils.hpp` (`OptionBuyCost`, `OptionSellCost`, `FutureBuyCost`, `FutureSellCost`), as fractions of traded value.
+
+---
+
+## 10. Stop and delete
+
+* `Stop()` sets INACTIVE and cancels bidding orders. An unhedged pack keeps its hedge orders working (ticks and responses) until flat, so stopping never leaves a naked leg. A cancel refused because the bid was still unacknowledged is retried by `ProcessPack` on the next event.
+* Delete calls `Stop()` and destroys the strategy at once. Products stay subscribed. Deleting while unhedged is the user's responsibility.
+
+---
+
+## 11. Logging
+
+Each strategy writes `log/<YYYYMMDD>/<N>Ratio_<id>_<HHMMSS>.log`, line-buffered. Logged: init, params, status changes, orders sent, trades, slippage and tracer lines. Never logged on the tick path: idle checks, refused requests, unchanged prices.
+
+---
+
+## 12. Dry run
+
+`tests/ratio_dry_run.cpp` links the real `MinixStrategy`, `RatioLegStrategy` and vendor `order_instance` against a fake `AlgoBase` and a mini exchange (acks, modifies, cancels, crossing fills, rejected late cancels/modifies). The build command is in the file header. Scenarios: full bid/fill/hedge cycle, STOP racing an unacknowledged bid, STOP while unhedged, unknown token, per-pack retry reset, and idle-tick log volume.

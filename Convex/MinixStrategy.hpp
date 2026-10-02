@@ -1,24 +1,23 @@
 /**
  * @file MinixStrategy.hpp
- * @brief Strategy hub: receives GUI strategy config, owns the live box instances,
+ * @brief Strategy hub: receives GUI strategy config, owns the live ratio strategies,
  *        and fans market-data / order callbacks to them.
  */
 #pragma once
 
-#include "PortfolioOrderManager.hpp"  // execution_strat::PortfolioOrderManager
 #include "Utils.hpp"
 #include "oms_api.hpp"
-#include "order_instance.hpp"  // execution_strat::order_instance, client_uid, OrderMap types
+#include "order_instance.hpp"  // execution_strat::order_instance, client_uid
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdint>
-#include <iostream>
+#include <cstring>
 #include <map>
+#include <memory>
 #include <string>
-#include <unordered_map>
-#include <utility>
-#include <vector>
+#include <type_traits>
 
 class RatioLegStrategy;
 
@@ -29,43 +28,57 @@ class MinixStrategy final : public AlgoBase {
     explicit MinixStrategy(AlgoBase::ContextHandle context_);
     ~MinixStrategy() override;
 
-    void OnTick(const Quote& event_) override;
+    void OnTick(const Quote& quote_) override;
     void onBcastData(const aef::infra::product::product_data& product_details_) override;
-    void OnOrderResponse(const oms_transaction& order_resp_) override;
+    void OnOrderResponse(const oms_transaction& response_) override;
     auto doWork() -> int override;
-    void onUIRequest(const aef::infra::ui_cmd::UIStruct& ui_req_) override;
+    void onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) override;
 
-    auto UpdateOrder(OrderObjectPtrT& order_, int32_t token_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t;
+    // Places or modifies order_ so it rests quantity_ open at price_.
+    // Returns the order uid when a request was sent, 0 when nothing was sent.
+    auto UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t;
 
     auto subscribeProduct(int32_t product_id_, uint16_t flags_) -> bool;
-    auto unSubscribeProduct(int32_t product_id_, uint16_t flags_) -> bool;
 
   private:
-    void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
     void ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
-    void HandleRatioLegStrategy(const nlohmann::json& root_, size_t numLegs_, int32_t interface_, bool gapDiff_);
+    void HandleRatioLegStrategy(const nlohmann::json& root_, size_t legCount_, int32_t interface_, bool hasStrikeGap_);
 
-    // Once per ~1s, echo strategy updates back to the GUI.
+    // Once per ~1s, echo spread and PnL of every strategy back to the GUI.
     void SendStrategySpreadsToUi();
-    // ponytail: direct binary POD sending to UI matching trade tracer pattern
-    void SendStrategySpreadToUi(const StrategySpreadUpdate& update_, int32_t interface_);
-    void SendStrategyStatusToUi(uint32_t strategyId_, StrategyStatus status_, int32_t interface_);
-    void SendTradeTracerToUi(const TradeTracer& tracer_, int32_t interface_);
+    void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
+
+    // Copies a packed POD straight into one UI packet (UI_BINARY_PROTOCOL_SPEC.md).
+    template <typename Payload>
+    void SendToUi(UiMessageCode messageCode_, int32_t interface_, const Payload& payload_) {
+        static_assert(std::is_trivially_copyable_v<Payload>);
+        static_assert(sizeof(Payload) <= sizeof(aef::infra::ui_cmd::UIStruct::message));
+
+        aef::infra::ui_cmd::UIStruct packet{};
+        packet.header.message_code   = messageCode_;
+        packet.header.interface_id   = interface_;
+        packet.header.message_length = sizeof(packet);
+        packet.header.component_id   = 1;
+        packet.header.timestamp      = 0;
+        std::memcpy(packet.message, &payload_, sizeof(payload_));
+        sentoUI(packet);
+    }
 
     struct JsonReassembly {
         int         _expected = 0;
         int         _received = 0;
         bool        _active   = false;
-        std::string _buf;
+        std::string _buffer;
     };
-    std::map<int32_t, JsonReassembly> _jsonReassembly;
+    JsonReassembly _jsonReassembly;
 
-    std::map<uint32_t, RatioLegStrategy*> _ratioStrats;
-    long long                             _lastSpreadSendMs = 0;  // last time BCmp/SCmp were pushed to the GUI
+    std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
+    std::chrono::steady_clock::time_point                 _lastSpreadSend{};
 
-    execution_strat::PortfolioOrderManager _portfolio_mgr;
-    uint64_t                               _event_timestamp = 0, _trigger_timestamp = 0;
+    // Timestamps of the last tick, stamped on orders for latency tracing.
+    uint64_t _eventTimestamp   = 0;
+    uint64_t _triggerTimestamp = 0;
 
-    uint16_t _flags  = 0;                           // market-data event flags requested per token
-    int32_t  _client = 0, _algoid = 0, _omsid = 0;  // ids from config (order routing)
+    uint16_t _feedFlags = 0;                          // market-data event flags requested per token
+    int32_t  _clientId  = 0, _algoId = 0, _omsId = 0;  // ids from config (order routing)
 };

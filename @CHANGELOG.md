@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-10-02
+
+### Fixed
+- `_clientUid` (was `_uid`) is zero-initialised. `request_id` used to start from indeterminate memory, so a strategy could hit `MAX_REQUEST_ID` early or reuse ids.
+- STOP while a new bid waited for its ack left that bid resting forever (the vendor refuses to cancel an unconfirmed order). An inactive pack now pulls its bid on every event, and acks/cancels re-run the pack decision at once.
+- Hedge retry counts reset when a pack becomes hedged. The leg that completed a hedge kept its count, so with `MarketOrderRetries > 0` the next pack's hedge started ticks away from the snapshot price, or went aggressive at once.
+- A leg without product details (or with lot/tick size 0) no longer creates a strategy that divides by a zero lot size. Creation throws before any subscription, and the UI is told INACTIVE.
+- The UI status echo (100001) reports the status the strategy actually has after the request (failed create or delete -> INACTIVE), not the requested one.
+- `LongBuyPrice` / `ShortSellPrice` are rounded to whole paise (195.05 -> 19505, was 19504.999).
+- M2M skips a leg whose mark side of the book is empty instead of marking it at 0.
+- Trade-tracer carry-over value rounds once instead of truncating per lot.
+- Orders carry the last tick's event/trigger timestamps (were always 0).
+- Cancels and modifies the vendor would refuse are skipped up front. An idle strategy used to emit about 6 vendor log lines per tick.
+- The strategy log file is line-buffered, so the last trades before a crash reach disk.
+- `doWork` paces the UI echo with `steady_clock`, so a wall-clock step cannot stall or burst it.
+
+### Changed
+- Naming: `_long`/`_short` -> `_longPack`/`_shortPack`, `ParamLots` -> `PackParams` (`_totalPacks`, `_slicePacks`, `_targetSpread`), `_tradedLot` -> `_tradedLots`, `_cycleTradedLot`/`_cycleTradeValue` -> `_unreportedLots`/`_unreportedValue`, `WindRate` -> `SpreadQuote`, `_windRate` -> `_bidSnapshot`, `_oppQuoteSide` -> `_takeSide`, `_biddingLeg` -> `BIDDING_LEG`, `_ms` -> `_hub`, `_qoute` -> `_quote`, `_minTickChange` -> `_repriceTicks`, `_thresholdQuantity` -> `_hedgeDepthPercent`, `_ratioStrats` -> `_strategies`, `Rehedge` -> `HedgePack`, `ComputeRate` -> `QuoteSpread`, `CalculateTradedLots` -> `CompletedPacks`.
+- `MinixStrategy` owns strategies through `std::unique_ptr`. One `SendToUi` template replaces four copy-paste UI senders; UI codes are named in `UiMessageCode`; wire struct sizes are `static_assert`ed (`TradeTracer` is 55 bytes; the spec said 47).
+- `UpdateOrder` takes the order by reference and is the single place that checks pending/confirmed state before a place or modify.
+- Status is handled only by `SetStatus` (INACTIVE -> `Stop()`); `ParamUpdate` handles only `Params`.
+- Fixed-size leg arrays replace per-pack vectors. `OrderBiddingLogic` merged into `EvaluateBidding`; trade handling split into `OnTrade`.
+- Removed: write-only `PortfolioOrderManager` bookkeeping, unused `unSubscribeProduct` override, `Print()` and its counters, per-code JSON reassembly map, `FMT_HEADER_ONLY` redefinition.
+
+### Documentation
+- `project_flow_documentation.md` rewritten for the current ratio-strategy architecture (the BoxSpread, EOD square-off and `booksReady` sections described code that no longer exists).
+- `AGENTS.md` / `GEMINI.md`: lifecycle table matches real status handling; transaction cost rates match `Utils.hpp` (were 60p/70p per ₹10,000); slippage/STOP semantics; dry-run rule.
+- `strategy_parameters.md`: units and exact gating of `TickSize`, `OrderDepth`, `PriceDepth`, `AllowedBidDepth`, `ThresholdQty`, `AllowedSlippage` (rupees, not paise), `MarketOrderRetries`.
+- `UI_BINARY_PROTOCOL_SPEC.md`: `TradeTracer` is 55 bytes.
+
+### Added
+- `tests/ratio_dry_run.cpp`: links the real strategy and vendor order code against a fake platform and a mini exchange, and asserts on a full bid/fill/hedge cycle, the STOP race, STOP while unhedged, an unknown token, per-pack retry reset, and idle-tick log volume.
+
 ## [1.9.3] - 2026-10-01
 
 ### Fixed

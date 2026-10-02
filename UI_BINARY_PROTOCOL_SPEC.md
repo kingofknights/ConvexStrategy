@@ -19,7 +19,7 @@ Strategy updates sent from **ConvexStrategy** to the GUI are migrated from the l
 | **`100001`** | `StrategyStatusUpdate` | **8 bytes** | Strategy lifecycle state transitions (Applied, Active, Inactive) |
 | **`100002`** | `StrategySpreadUpdate` | **64 bytes** | Periodic (~1s) spread, PnL, lot, and status snapshot |
 | **`100003`** | `ExternalOrderResponse` | Existing | OMS order response (unchanged) |
-| **`100004`** | `TradeTracer` | 47 bytes | Trade execution / slippage tracer (unchanged) |
+| **`100004`** | `TradeTracer` | 55 bytes | Trade execution / slippage tracer (unchanged) |
 
 ---
 

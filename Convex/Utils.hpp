@@ -2,7 +2,11 @@
 
 #include "order_instance.hpp"  // execution_strat::order_instance, ORDER_SIDE, ORDER_TYPE
 
+#include <cctype>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
 using OrderObjectT    = execution_strat::order_instance;
 using OrderObjectPtrT = std::unique_ptr<OrderObjectT>;
 using PortfolioT      = uint32_t;
@@ -50,13 +54,16 @@ inline auto StrategyStatusToString(StrategyStatus status_) -> std::string_view {
     }
 }
 
-inline auto StringToStrategyStatus(std::string_view status_) -> StrategyStatus {
-    std::string s;
-    s.reserve(status_.size());
-    for (char c : status_) {
-        s.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+inline auto ToUpper(std::string_view text_) -> std::string {
+    std::string upper(text_);
+    for (char& c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
+    return upper;
+}
 
+inline auto StringToStrategyStatus(std::string_view status_) -> StrategyStatus {
+    const std::string s = ToUpper(status_);
     if (s == "ACTIVE" || s == "SUBSCRIBE" || s == "SUBSCRIBED" || s == "START") {
         return StrategyStatus_ACTIVE;
     }
@@ -92,6 +99,15 @@ struct StrategyStatusUpdate {
     StrategyStatus _status;     // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
 };
 
+// UI wire codes. Inbound strategy config shares 100001 with the outbound status update.
+enum UiMessageCode : int32_t {
+    UiMessageCode_STRATEGY_CONFIG = 100001,
+    UiMessageCode_STRATEGY_STATUS = 100001,
+    UiMessageCode_STRATEGY_SPREAD = 100002,
+    UiMessageCode_ORDER_RESPONSE  = 100003,
+    UiMessageCode_TRADE_TRACER    = 100004,
+};
+
 struct UserPortfolio {
     UserIdT    _user;
     PortfolioT _portfolio;
@@ -121,7 +137,7 @@ enum LegExecution : uint8_t {
     LegExecution_MANUAL,
     LegExecution_STRATEGY_ENTRY,
     LegExecution_STRATEGY_EXIT,
-};  // namespace Lancelot
+};
 
 enum OrderResponse : uint8_t {
     OrderResponse_NONE,
@@ -137,7 +153,7 @@ enum OrderResponse : uint8_t {
     OrderResponse_CANCEL_REJECT,
 };
 
-static OrderResponse GetOrderResponsee(int code) {
+inline auto GetOrderResponse(int code) -> OrderResponse {
     switch (code) {
         case 2223:
             return OrderResponse_PLACED;
@@ -216,3 +232,8 @@ struct ExternalOrderResponse {
 };
 
 #pragma pack(pop)
+
+// The UI decodes these byte-for-byte (UI_BINARY_PROTOCOL_SPEC.md); a size change breaks it.
+static_assert(sizeof(TradeTracer) == 55);
+static_assert(sizeof(StrategySpreadUpdate) == 64);
+static_assert(sizeof(StrategyStatusUpdate) == 8);
