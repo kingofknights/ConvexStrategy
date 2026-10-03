@@ -167,10 +167,10 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
             return;
         } else if (status == "UNSUBSCRIBED" || status == "UNSUBSCRIBE" || status == "STOP") {
             std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyId << std::endl;
-            iterator->second->Stop();
+            iterator->second->Stop("GUI STOP");
         } else if (status == "DELETED" || status == "DELETE") {
             std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << std::endl;
-            iterator->second->Stop();
+            iterator->second->Stop("GUI DELETE");
             _strategies.erase(iterator);
         }
     } catch (const std::exception& e) {
@@ -193,6 +193,9 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
     if (const auto iterator = _strategies.find(strategyId); iterator != _strategies.end()) {
         iterator->second->OnOrderResponse(response_);
         SendOrderResponse(response_, iterator->second->GetInterface());
+    } else {
+        std::cout << "[OnOrderResponse] no strategy " << strategyId << " for uid " << uint32_t{response_.hdr_.uid_.id_}
+                  << " code " << int{response_.hdr_.transaction_code} << " token " << int{response_.packet_.product_id_} << " -- ignored" << std::endl;
     }
 }
 

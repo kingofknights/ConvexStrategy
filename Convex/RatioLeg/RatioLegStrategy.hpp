@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 
 class MinixStrategy;
 
@@ -34,16 +35,18 @@ class RatioLegStrategy {
     RatioLegStrategy(const RatioLegStrategy&)            = delete;
     RatioLegStrategy& operator=(const RatioLegStrategy&) = delete;
 
+    // Every line starts with local wall time "HH:MM:SS.uuuuuu".
     template <typename... Args>
     void WriteLog(fmt::format_string<Args...> format_, Args&&... args_) const {
         if (_logFile) {
+            WriteTimestamp();
             fmt::print(_logFile.get(), format_, std::forward<Args>(args_)...);
         }
     }
 
     void ParamUpdate(const nlohmann::json& json_);
     void SetStatus(StrategyStatus status_);
-    void Stop();
+    void Stop(std::string_view reason_);
 
     void OnTick(const Quote& quote_);
     void OnOrderResponse(const oms_transaction& response_);
@@ -69,6 +72,9 @@ class RatioLegStrategy {
   private:
     template <typename T>
     using LegArray = std::array<T, MAX_LEGS>;
+
+    // Why the bidding leg is (not) quoting. Logged only when it changes, so a silent strategy explains itself.
+    enum class BidGate : uint8_t { UNKNOWN, OPEN, DONE, HEDGE_DEPTH, BID_DEPTH, NO_PRICE, BELOW_TARGET };
 
     struct PackParams {
         int   _totalPacks   = 0;  // packs to trade in total
@@ -97,6 +103,8 @@ class RatioLegStrategy {
         LegArray<uint64_t>        _unreportedValue{};
         LegArray<size_t>          _hedgeRetryCount{};
         bool                      _isUnhedged   = false;
+        BidGate                   _bidGate      = BidGate::UNKNOWN;
+        LegArray<bool>            _hedgeWaiting{};  // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
         SpreadQuote               _bidSnapshot;         // leg prices when the bidding order was last sent
     };
@@ -135,6 +143,16 @@ class RatioLegStrategy {
         return NO_LEG;
     }
 
+    void WriteTimestamp() const;
+    [[nodiscard]] auto PackName(const Pack& pack_) const noexcept -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
+    [[nodiscard]] auto BookText() const -> std::string;              // touch of every leg: "bid/ask bid/ask ..."
+    [[nodiscard]] auto LotsText(const Pack& pack_) const -> std::string;  // per leg "traded/needed" lots
+
+    // ── Diagnostics: every request sent, every response, every state change ───
+    void PullOrder(Pack& pack_, size_t leg_, std::string_view reason_);
+    void LogResponse(const Pack& pack_, size_t leg_, const oms_transaction& response_);
+    void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_);
+
     void ParseLegs(const nlohmann::json& json_);
     void LoadProductDetails();
     void RebuildCache();
@@ -145,13 +163,13 @@ class RatioLegStrategy {
 
     // ── Entry (bidding leg) ───────────────────────────────────────────────────
     void               EvaluateBidding(Pack& pack_);
-    [[nodiscard]] auto CheckHedgeLegsDepth(const Pack& pack_) const -> bool;
+    [[nodiscard]] auto FindThinHedgeLeg(const Pack& pack_) const -> size_t;  // NO_LEG when every hedge leg has depth
     [[nodiscard]] auto CheckBiddingLegDepth(const Pack& pack_) const -> bool;
 
     // ── Hedge legs ────────────────────────────────────────────────────────────
     void HedgePack(Pack& pack_);
     void ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedgeLots_);
-    void UpdateUnhedgedStatus(Pack& pack_) noexcept;
+    void UpdateUnhedgedStatus(Pack& pack_);
     void CheckSlippageThreshold(Pack& pack_, const oms_transaction& response_);
 
     // ── Pricing / PnL ─────────────────────────────────────────────────────────
@@ -170,6 +188,7 @@ class RatioLegStrategy {
     const bool     _hasStrikeGap;
 
     StrategyStatus _status = StrategyStatus_INACTIVE;
+    long           _utcOffsetSeconds = 0;  // ponytail: taken once at creation; fine for IST (no DST)
 
     int _strikeGap = 0;
     int _lotSize   = 0;

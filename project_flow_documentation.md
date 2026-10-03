@@ -159,7 +159,7 @@ While unhedged, `HedgePack` cancels the bid and, per hedge leg (`ExecuteHedgeLeg
 
 * $\text{missing} = \text{biddingPacks} \times \text{Ratio}_i - \text{tradedLots}_i$; nothing to do when $\le 0$.
 * $\text{quantity} = \min(\text{missing} \times \text{lotSize}, \text{sliceQuantity}_i)$.
-* Aggressive when `MarketOrderRetries == 0` or retries ≥ `MarketOrderRetries`.
+* Aggressive when `MarketRetries == 0` or retries ≥ `MarketRetries`.
 * Base price: the opposite touch when aggressive (or no snapshot), else `_bidSnapshot._price[i]`. An empty opposite side waits for a real price.
 * $\text{price} = \max(\text{base} + \text{sign} \times (\text{\_tradeGearOffset} + \text{retryOffset}),\ \text{tickSize})$, sign $+1$ BUY / $-1$ SELL, retryOffset = retries × tick when not aggressive.
 * A retry is one request actually sent. Retry counts reset when the pack becomes hedged.
@@ -208,9 +208,23 @@ Cost rates are in `Utils.hpp` (`OptionBuyCost`, `OptionSellCost`, `FutureBuyCost
 
 ## 11. Logging
 
-Each strategy writes `log/<YYYYMMDD>/<N>Ratio_<id>_<HHMMSS>.log`, line-buffered. Logged: init, params, status changes, orders sent, trades, slippage and tracer lines. Never logged on the tick path: idle checks, refused requests, unchanged prices.
+Each strategy writes `log/<YYYYMMDD>/<N>Ratio_<id>_<HHMMSS>.log`, line-buffered, every line prefixed with local time `HH:MM:SS.uuuuuu`. Lines are written on events and state changes only; an idle tick writes nothing (the dry run asserts this).
 
----
+| Tag | When | Key fields |
+| :--- | :--- | :--- |
+| `[INIT]`, `[nLegRatios]`, `Params parsed`, `updateSideCache` | Creation and each param update | Tokens, sides, ratios, lot/tick, every param, slice sizes |
+| `[RatioLeg:SetStatus]`, `[RatioLeg:Stop]` | Status change | New status; Stop reason (`GUI STOP`, `GUI DELETE`, `status INACTIVE requested`, `slippage above AllowedSlippage`) and per-leg lots |
+| `[BID-GATE]` | The reason the bid is (not) quoting changes | `OLD -> NEW` (`OPEN`, `DONE`, `HEDGE_DEPTH`, `BID_DEPTH`, `NO_PRICE`, `BELOW_TARGET`), target vs market spread, lots, touch of every leg; for `HEDGE_DEPTH` the thin leg and which check failed |
+| `[ORDER-OUT]` | Every place, modify and cancel actually sent | Pack, leg, token, side, `PLACE`/`MODIFY`/`CANCEL`, uid, `old->new` price and qty, then `BID` (target, market) or `HEDGE` (mode, retry, base price, missing lots) or the cancel reason |
+| `[ORDER-IN]` | Every OMS response | Transaction name and code, uid, price, qty, `err=header/reason/exchange`, and the order state it left (`state` bitmask, open qty@price, filled, live uid) |
+| `[TRADE EVENT]` | Every fill | Leg, side, price, qty, pack, lots per leg as `traded/needed` |
+| `[PACK]` | Pack turns `UNHEDGED` or `HEDGED` | Lots per leg, completed packs |
+| `[HEDGE]` | A hedge leg starts waiting for an opposite price | Leg, missing lots, book |
+| `[SLIPPAGE]`, `Tracer` | Whole packs complete | Average leg prices, traded spread, slippage |
+
+`state` is the vendor `STRAT_ORDER_STATE` bitmask: `0x1` placed, `0x2` OMS ack, `0x4` exchange confirmed, `0x8` modify sent, `0x10` modify ack, `0x20` cancel sent; `0x0` means no live order.
+
+Hub-level events (config JSON received, strategy created/updated/stopped/deleted, responses for unknown strategies, `request_id` limit) go to stdout.
 
 ## 12. Dry run
 

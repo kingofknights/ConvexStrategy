@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-10-03
+
+### Added
+- Diagnostic strategy log, written on events and state changes only (an idle tick writes nothing; asserted by the dry run):
+  - Local-time `HH:MM:SS.uuuuuu` prefix on every line.
+  - `[ORDER-OUT]` for every place, modify and cancel sent: old -> new price/qty, bid target vs market, hedge mode/retry/base, cancel reason, touch of every leg.
+  - `[ORDER-IN]` for every OMS response: transaction name, error codes (header/reason/exchange) and the order state it left.
+  - `[BID-GATE]` when the reason the bid is (not) quoting changes, with the thin hedge leg and failed check for `HEDGE_DEPTH`.
+  - `[PACK]` on hedged/unhedged transitions; `[HEDGE]` when a hedge waits for an opposite price.
+  - `[TRADE EVENT]` now ends with the pack and per-leg `traded/needed` lots, and warns on a fill that is not a whole number of lots.
+  - `Stop()` takes and logs its reason; the init line logs each leg's side.
+- Hub logs order responses for unknown strategies to stdout.
+
+### Fixed
+- `MarketRetries` is read under the key the GUI sends. The engine read `MarketOrderRetries`, found nothing and used 0, so every hedge crossed at once regardless of the GUI value. With `MarketRetries` > 0 hedges now start at the bid-time snapshot price and step one tick per sent order before crossing; set 0 for the old behaviour.
+
+### Changed
+- The dry run builds every config from a real GUI payload and runs that payload verbatim (short pack, `ShortSellPrice` -0.05).
+- `[RatioLeg] ... order placed` and `SecondOrderBidding` lines are replaced by `[ORDER-OUT]`; update any log parser that matched them.
+- `CheckHedgeLegsDepth` -> `FindThinHedgeLeg` (returns the failing leg).
+
 ## [1.10.0] - 2026-10-02
 
 ### Fixed

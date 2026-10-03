@@ -130,8 +130,8 @@ $$\text{isUnhedged} = \exists \text{ leg} \neq \text{BIDDING\_LEG} \text{ such t
    * Price Floor Guard: Clamped to $\ge \text{\_tickSize}$ (never $\le 0$).
 5. **Aggressive Escalation Condition**:
    $$\text{isAggressive} = (\text{\_marketOrderRetries} == 0 \mathbin{\Vert} \text{retryCount} \ge \text{\_marketOrderRetries})$$
-   * If `MarketOrderRetries == 0`: immediately placed aggressively at the opposite touch (BUY at Ask, SELL at Bid) without progressive tick decay.
-   * If `MarketOrderRetries > 0`: steps aggressively closer to the market by 1 tick per retry until reaching `_marketOrderRetries`, then crosses the spread to opposite touch.
+   * If `MarketRetries == 0`: immediately placed aggressively at the opposite touch (BUY at Ask, SELL at Bid) without progressive tick decay.
+   * If `MarketRetries > 0`: steps aggressively closer to the market by 1 tick per retry until reaching `_marketOrderRetries`, then crosses the spread to opposite touch.
 
 ---
 
@@ -176,12 +176,14 @@ $$\text{slippage} = \frac{\text{\_params.\_targetSpread} - \text{AdjustGap}(\tex
    * NEVER log `diff <= 0` inside `ExecuteHedgeLeg` (causes multi-gigabyte log explosions).
    * NEVER log when `targetOrderPrice == currentPlacePrice` (order already placed).
    * NEVER log when `is_response_pending()` is true.
-2. **Allowed Logging Points**:
-   * Strategy initialization and termination (`INIT`, `DESTROY`, `STOP`).
-   * Parameter reconfiguration (`ParamUpdate`).
-   * Order placed / modified successfully (when UID > 0).
+2. **Allowed Logging Points** (tags and fields in `project_flow_documentation.md` §11):
+   * Strategy initialization and termination (`INIT`, `DESTROY`, `Stop` with its reason).
+   * Parameter reconfiguration (`ParamUpdate`) and status changes.
+   * Every order request actually sent (`[ORDER-OUT]`) and every OMS response (`[ORDER-IN]`).
+   * State changes only: `[BID-GATE]` when the bidding reason changes, `[PACK]` on hedged/unhedged, `[HEDGE]` when a hedge starts waiting.
    * Trade executions (`[TRADE EVENT]`).
    * Cycle completion and slippage evaluation (`[SLIPPAGE]`, `Tracer`).
+   * An idle tick writes nothing; `tests/ratio_dry_run.cpp` asserts it.
 3. **Format Integrity**:
    * Every log call MUST terminate with a newline `\n`. Missing newlines concatenate entries and corrupt downstream ingestion.
 

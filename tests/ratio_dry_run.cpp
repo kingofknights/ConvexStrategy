@@ -14,7 +14,9 @@
 
 #include <cassert>
 #include <cstdio>
+#include <algorithm>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -211,8 +213,12 @@ void AlgoBase::onOIdata(const aef::infra::product::product_data&) {}
 
 // ═══ Scenario helpers ════════════════════════════════════════════════════════
 
-constexpr int LEG0 = 49677, LEG1 = 49629, LEG2 = 49713, MISSING_TOKEN = 99999;
-constexpr int LOT  = 30;
+constexpr int LEG0 = 40745, LEG1 = 40741, LEG2 = 40751, MISSING_TOKEN = 99999;
+constexpr int LOT  = 65;
+
+// A real "Subscribed" payload captured from the GUI (2026-10-03), used verbatim as the base of every config.
+// Long pack: SELL 3 x 23200, BUY 1 x 23100, BUY 2 x 23300. Short pack: the opposite sides.
+constexpr std::string_view GUI_PAYLOAD = R"({"B-Buy":0.0,"B-Sell":0.0,"Legs":[{"EnableBid":true,"LegID":1,"Lots":65,"OrderType":"BID","Side":"SELL","StrikePrice":23200.0,"Token":40745},{"EnableBid":false,"LegID":2,"Lots":65,"OrderType":"IOC","Side":"BUY","StrikePrice":23100.0,"Token":40741},{"EnableBid":false,"LegID":3,"Lots":65,"OrderType":"IOC","Side":"BUY","StrikePrice":23300.0,"Token":40751}],"Params":{"AllowDifferentLotsScripts":false,"AllowDuplicates":false,"AllowedBidDepth":10,"AllowedSlippage":10,"BestBid":false,"ExecutionMode":"Normal","LongBuyPrice":100.0,"LongBuyQty":0,"LongBuySoQ":1,"MarketRetries":5,"NormalBid":true,"OrderDepth":4,"OrdersType":"Limit","PN_Add":0,"PN_Add_Enabled":false,"PN_Mult":1,"PN_Mult_Enabled":false,"PriceDepth":4,"PriceExecutionRange":"LeaveAsIs","ShortFlag":0,"ShortSellPrice":-0.05000000074505806,"ShortSellQty":5,"ShortSellSoQ":1,"ThresholdQty":0,"TickSize":1,"TimeToRevertBidMs":0,"TradeGear":0,"UnhedgedAction":"Ratio"},"Ratio":{"LegRatios":[3,1,2]},"S-Buy":0.0,"S-Sell":0.0,"Strategy":{"AllowDeliveryScripts":false,"IsBidding":true,"Name":"3LegRatio","Status":"Subscribed","StrategyId":3,"SubType":"3LegRatio","UserId":139}})";
 
 // Sends the JSON the way the GUI does: a metadata packet, then 1500 B slices.
 void SendConfig(const nlohmann::json& json_, bool pump_ = true) {
@@ -235,14 +241,34 @@ void SendConfig(const nlohmann::json& json_, bool pump_ = true) {
     if (pump_) exchange::Pump();
 }
 
-// 3:1:2 ratio, long pack: SELL 3 x leg0 (bids), BUY 1 x leg1, BUY 2 x leg2.
-auto RatioConfig(int strategyId_, const std::string& status_, int legToken0_ = LEG0, int marketOrderRetries_ = 0) -> nlohmann::json {
-    return {
-        {"Strategy", {{"SubType", "3LegRatio"}, {"Status", status_}, {"StrategyId", strategyId_}}},
-        {"Legs", {{{"Token", legToken0_}, {"Side", "SELL"}}, {{"Token", LEG1}, {"Side", "BUY"}}, {{"Token", LEG2}, {"Side", "BUY"}}}},
-        {"Ratio", {{"LegRatios", {3, 1, 2}}}},
-        {"Params", {{"LongBuySoQ", 1}, {"LongBuyQty", 2}, {"LongBuyPrice", 1.40}, {"ShortSellSoQ", 0}, {"ShortSellQty", 0}, {"ShortSellPrice", 0.0}, {"TickSize", 1}, {"OrderDepth", 1}, {"PriceDepth", 1}, {"AllowedBidDepth", 1}, {"ThresholdQty", 100}, {"AllowedSlippage", 10}, {"TradeGear", 0}, {"MarketOrderRetries", marketOrderRetries_}}},
-    };
+// The GUI payload as sent, with only id and status replaced.
+auto GuiConfig(int strategyId_, const std::string& status_) -> nlohmann::json {
+    nlohmann::json config               = nlohmann::json::parse(GUI_PAYLOAD);
+    config["Strategy"]["StrategyId"]    = strategyId_;
+    config["Strategy"]["Status"]        = status_;
+    return config;
+}
+
+// The GUI payload trading the long pack instead: 2 packs at a credit of at least 1.40, short side off.
+auto RatioConfig(int strategyId_, const std::string& status_, int legToken0_ = LEG0) -> nlohmann::json {
+    nlohmann::json config               = GuiConfig(strategyId_, status_);
+    config["Legs"][0]["Token"]          = legToken0_;
+    config["Params"]["LongBuyQty"]      = 2;
+    config["Params"]["LongBuyPrice"]    = 1.40;
+    config["Params"]["ShortSellQty"]    = 0;
+    return config;
+}
+
+// Price of the nth (1-based) new order a strategy sent on a token.
+auto NthPlacePrice(int strategy_, int token_, int nth_) -> int {
+    int count = 0;
+    for (const auto& request : exchange::sent) {
+        if (request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
+            request.hdr_.transaction_code == OMS_PLACE_REQ && ++count == nth_) {
+            return request.packet_.price_;
+        }
+    }
+    return 0;
 }
 
 auto LastStatusEcho() -> StrategyStatusUpdate {
@@ -317,7 +343,8 @@ void FullCycle() {
         }
     }
     CHECK(spread._strategyId == ID && spread._bTrQ == 2 && spread._sTrQ == 0);
-    std::printf("  full cycle: 2 packs, legs -180/+60/+120, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n", spread._bTrQ, spread._bATP, spread._rlp);
+    std::printf("  full cycle: 2 packs, legs %ld/%+ld/%+ld, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n",
+                Position(ID, LEG0), Position(ID, LEG1), Position(ID, LEG2), spread._bTrQ, spread._bATP, spread._rlp);
 }
 
 // STOP while the new bid awaits its ack: the vendor refuses that cancel, so the ack must pull it.
@@ -355,6 +382,7 @@ void StopKeepsHedging() {
     CHECK(LastStatusEcho()._status == StrategyStatus_INACTIVE);
     exchange::Tick(LEG2, 315, 330);  // asks return
     CHECK(Position(ID, LEG2) == 2 * LOT);
+    CHECK(NthPlacePrice(ID, LEG2, 1) == 325);  // MarketRetries 5: starts at the 325 snapshot, steps to 330
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
@@ -373,46 +401,67 @@ void RejectsUnknownToken() {
     std::printf("  unknown token: creation refused, nothing subscribed\n");
 }
 
-// With MarketOrderRetries > 0 each pack's hedge starts at the snapshot price, not where the last pack's retries left off.
+// With MarketRetries > 0 each pack's hedge starts at the snapshot price, not where the last pack's retries left off.
 void HedgeRetriesResetPerPack() {
     constexpr int ID = 14;
-    SendConfig(RatioConfig(ID, "Applied", LEG0, 3));
+    SendConfig(RatioConfig(ID, "Applied"));
     TickAllLegs();
     for (int pack = 1; pack <= 2; ++pack) {
         exchange::FillPassive(ID, LEG0, 3 * LOT);
         CHECK(Position(ID, LEG2) == pack * 2 * LOT);
-        int firstHedgePrice = 0;  // first LEG2 placement of this pack
-        int placements      = 0;
-        for (const auto& request : exchange::sent) {
-            if (request.hdr_.uid_.composite_id_.strategy_id == ID && request.packet_.product_id_ == LEG2 &&
-                request.hdr_.transaction_code == OMS_PLACE_REQ && ++placements == pack) {
-                firstHedgePrice = request.packet_.price_;
-            }
-        }
-        CHECK(firstHedgePrice == 325);  // snapshot ask, zero retry ticks
+        CHECK(NthPlacePrice(ID, LEG2, pack) == 325);  // snapshot ask, zero retry ticks
     }
     std::printf("  hedge retries reset per pack: both packs hedged leg2 at the 325 snapshot\n");
 }
 
-// An idle pack must not hit the vendor's refusal logs on every tick.
+// The GUI payload verbatim: short pack, 5 packs at a credit of at least -0.05.
+// Short credit = bid(23100) + 2 x bid(23300) - 3 x ask(23200).
+void ShortPackFromGuiPayload() {
+    constexpr int ID = 15;
+    SendConfig(GuiConfig(ID, "Applied"));
+    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: no bid
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+
+    exchange::Tick(LEG0, 460, 465);  // credit 770 + 630 - 3*465 = +5 >= -5: bid
+    CHECK(exchange::LiveOrdersOf(ID) == 1);
+    const auto& bid = std::find_if(exchange::live.begin(), exchange::live.end(), [](const auto& entry) { return entry.second.strategy == ID; })->second;
+    CHECK(bid.request.packet_.flags_.order_side == BUY_SIDE && bid.price == 460 && bid.openQty == 3 * LOT);
+
+    exchange::FillPassive(ID, LEG0, 3 * LOT);  // hedges sell 23100 and 2 x 23300 at their bids
+    CHECK(Position(ID, LEG0) == 3 * LOT && Position(ID, LEG1) == -LOT && Position(ID, LEG2) == -2 * LOT);
+    std::printf("  GUI payload verbatim: short pack bid BUY 3x@460, hedged SELL 1x23100 + 2x23300\n");
+}
+
+auto StrategyLogBytes() -> uintmax_t {
+    uintmax_t bytes = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
+        if (entry.is_regular_file()) bytes += entry.file_size();
+    }
+    return bytes;
+}
+
+// Idle ticks must not log: neither the vendor's refusal lines nor our own diagnostics.
 void QuietTicks() {
-    const int before = exchange::vendorRefusalLogs;
+    TickAllLegs();  // settle: earlier scenarios may leave a book change to react to
+    const int       vendorBefore = exchange::vendorRefusalLogs;
+    const uintmax_t bytesBefore  = StrategyLogBytes();
     for (int i = 0; i < 1000; ++i) TickAllLegs();
-    std::printf("  3000 idle ticks: %d vendor log lines\n", exchange::vendorRefusalLogs - before);
-    CHECK(exchange::vendorRefusalLogs - before == 0);
+    std::printf("  3000 idle ticks: %d vendor log lines, %ju strategy log bytes\n", exchange::vendorRefusalLogs - vendorBefore, StrategyLogBytes() - bytesBefore);
+    CHECK(exchange::vendorRefusalLogs - vendorBefore == 0);
+    CHECK(StrategyLogBytes() == bytesBefore);
 }
 
 int main() {
     std::ofstream("dry_run_config.json") << R"({"client":1,"algoid":1,"omsid":1})";
 
-    for (const auto& [token, strike] : std::map<int, int>{{LEG0, 6400000}, {LEG1, 6250000}, {LEG2, 6550000}}) {
+    for (const auto& [token, strike] : std::map<int, int>{{LEG0, 2320000}, {LEG1, 2310000}, {LEG2, 2330000}}) {
         ProductDetails details{};
         details.product_id_   = token;
         details.strike_price_ = strike;
         details.lot_size_     = LOT;
         details.tick_size_    = exchange::TICK;
         details.opt_type_     = aef::infra::product::OPTION_TYPE::CE;
-        std::strncpy(details.symbol, "BANKNIFTY", sizeof(details.symbol) - 1);
+        std::strncpy(details.symbol, "NIFTY", sizeof(details.symbol) - 1);
         exchange::products[token] = details;
     }
 
@@ -425,6 +474,7 @@ int main() {
     StopKeepsHedging();
     RejectsUnknownToken();
     HedgeRetriesResetPerPack();
+    ShortPackFromGuiPayload();
     QuietTicks();
     std::printf("all scenarios passed\n");
 }

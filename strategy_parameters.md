@@ -1,5 +1,7 @@
 # ConvexStrategy — Parameter Configuration Details
 
+Keys are exactly as the GUI sends them (checked against a real payload, 2026-10-03; `tests/ratio_dry_run.cpp` uses it verbatim). Read: `Legs[].Token`, `Legs[].Side`, `Ratio.LegRatios`, `Strategy.StrategyId/Status/SubType`, and the `Params` below plus `LongBuy*` / `ShortSell*` (`Qty` packs, `SoQ` packs per slice, `Price` rupees, net-credit convention). Sent but ignored by the engine: leg `OrderType` (all orders are LIMIT), `EnableBid`, `LegID`, `Lots`, `StrikePrice` (lot size and strike come from product details), `UnhedgedAction`, `TimeToRevertBidMs`, `ExecutionMode`, `BestBid`, `NormalBid`, `OrdersType`, `PriceExecutionRange`, `PN_*`, `AllowDuplicates`, `AllowDifferentLotsScripts`, `ShortFlag`, `B-*`/`S-*`.
+
 This document outlines the usage and logic behind the key execution parameters defined under the `Params` section of strategy configurations (configured via the GUI frontend or test configuration JSON files).
 
 ---
@@ -34,9 +36,9 @@ This document outlines the usage and logic behind the key execution parameters d
 * **Details:** Integer rupees per pack: slippage = (target spread − traded spread) / 100, evaluated each time a whole pack completes. `0` disables the guard.
 * **Engine Behavior:** If the slippage of a completed pack exceeds `AllowedSlippage`, the strategy calls `Stop()`: no new entries. An unhedged pack still hedges until flat.
 
-### 7. Market Order Retries (`MarketOrderRetries` / `_marketOrderRetries`)
+### 7. Market Retries (`MarketRetries` / `_marketOrderRetries`)
 * **Description:** The maximum number of progressive tick-stepped limit modifications permitted for hedge legs before escalating to aggressive market touch execution.
-* **Engine Behavior:** For each retry attempt $k < \text{MarketOrderRetries}$, the hedge limit price is adjusted by 1 tick closer to the market, starting from the leg price captured when the bid was sent (`_bidSnapshot`). A retry is one sent modify, so steps advance at order round-trip speed. Counts reset when the pack becomes hedged. When retries reach `MarketOrderRetries`, the order is aggressively placed at the opposite side market touch (BUY at Ask, SELL at Bid) to guarantee execution. The strategy is **never** stopped on max retries — stoppage is governed exclusively by `AllowedSlippage`.
+* **Engine Behavior:** For each retry attempt $k < \text{MarketRetries}$, the hedge limit price is adjusted by 1 tick closer to the market, starting from the leg price captured when the bid was sent (`_bidSnapshot`). A retry is one sent modify, so steps advance at order round-trip speed. Counts reset when the pack becomes hedged. When retries reach `MarketRetries`, the order is aggressively placed at the opposite side market touch (BUY at Ask, SELL at Bid) to guarantee execution. The strategy is **never** stopped on max retries — stoppage is governed exclusively by `AllowedSlippage`.
 
 ### 8. Trade Gear (`TradeGear` / `_tradeGear`)
 * **Description:** The number of aggressive ticks applied when placing orders on hedge legs.
