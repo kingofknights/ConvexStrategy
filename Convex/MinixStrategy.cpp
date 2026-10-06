@@ -33,14 +33,16 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
 
     const nlohmann::json root = nlohmann::json::parse(OpenStream(configFile));
     root.at("client").get_to(_clientId);
-    root.at("algoid").get_to(_algoId);
     root.at("omsid").get_to(_omsId);
+    // Deployments write algoid as a number or as a quoted string; accept both.
+    const auto& algoId = root.at("algoid");
+    _algoId            = algoId.is_string() ? std::stoi(algoId.get<std::string>()) : algoId.get<int32_t>();
 
     // Market-data event flags requested per token: TER + MBP depth + OI + TBT.
     _feedFlags = static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::TER_UPDATE_EVENT) |
-             static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::MBP_UPDATE_EVENT) |
-             static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::OI_UPDATE_EVENT) |
-             static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::TBT_UPDATE_EVENT);
+                 static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::MBP_UPDATE_EVENT) |
+                 static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::OI_UPDATE_EVENT) |
+                 static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::TBT_UPDATE_EVENT);
 
     std::cout << "Convex ratio strategies ready for client ID : " << _clientId << std::endl;
 }
@@ -135,7 +137,7 @@ void MinixStrategy::ApplyLegStrategyJson(int32_t interface_, const std::string& 
             HandleRatioLegStrategy(root, type._legCount, interface_, type._hasStrikeGap);
 
             // Echo the status the strategy actually has, so a failed create or a delete reads INACTIVE.
-            const auto iterator = _strategies.find(strategyId);
+            const auto                 iterator = _strategies.find(strategyId);
             const StrategyStatusUpdate update{strategyId, iterator != _strategies.end() ? iterator->second->GetStatus() : StrategyStatus_INACTIVE};
             SendToUi(UiMessageCode_STRATEGY_STATUS, interface_, update);
             break;

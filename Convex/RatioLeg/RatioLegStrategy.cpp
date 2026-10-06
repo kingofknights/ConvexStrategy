@@ -6,6 +6,7 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -73,6 +74,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     if (_logFile) {
         // Line-buffered: the last trades before a crash must reach disk. Logging is off the tick path.
         std::setvbuf(_logFile.get(), nullptr, _IOLBF, 0);
+    } else {
+        // Without this the strategy runs with every WriteLog silently dropped.
+        std::cerr << "[RatioLeg] strat=" << _strategyId << " cannot open log '" << _logFileName << "': " << std::strerror(errno) << std::endl;
     }
     WriteLog(">>> [INIT] Opened log file: {}\n", _logFileName);
 
@@ -95,7 +99,8 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
 
     // Subscribe last: a throw above must not leave feeds pointing at a strategy that never existed.
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        _hub->subscribeProduct(_tokens[leg], _hub->_feedFlags);
+        const bool subscribed = _hub->subscribeProduct(_tokens[leg], _hub->_feedFlags);
+        WriteLog("[FEED] leg={} token={} subscribe={}\n", leg, _tokens[leg], subscribed ? "ok" : "FAILED");
     }
 }
 
@@ -210,7 +215,7 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
     _longPack._bidGate  = BidGate::UNKNOWN;  // log the first gate under the new status
     _shortPack._bidGate = BidGate::UNKNOWN;
     std::cout << "[RatioLeg:SetStatus] strat=" << _strategyId << " _status=" << static_cast<int>(_status)
-              << " (" << StrategyStatusToString(_status) << ")" << '\n';
+              << " (" << StrategyStatusToString(_status) << ")" << std::endl;
     WriteLog("[RatioLeg:SetStatus] strat={} _status={} ({})\n", _strategyId, static_cast<int>(_status), StrategyStatusToString(_status));
 }
 
@@ -237,6 +242,11 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     const size_t leg = FindLegIndex(quote_.header.product_id);
     if (leg == NO_LEG) return;
 
+    // Until every leg has ticked the bid gate stays silent, so say when each feed goes live.
+    if (_quote[leg].header.product_id == 0) {
+        WriteLog("[FEED] leg={} token={} first tick bid={} ask={}\n", leg, _tokens[leg],
+                 int{quote_.message.bid_levels[0].price}, int{quote_.message.ask_levels[0].price});
+    }
     _quote[leg] = quote_;
     ProcessPack(_longPack);
     ProcessPack(_shortPack);
