@@ -248,6 +248,7 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
                  int{quote_.message.bid_levels[0].price}, int{quote_.message.ask_levels[0].price});
     }
     _quote[leg] = quote_;
+    _eventCount += 1;
     ProcessPack(_longPack);
     ProcessPack(_shortPack);
 }
@@ -744,4 +745,10 @@ auto RatioLegStrategy::CheckPriceDepth(const Quote& quote_, size_t depth_, ORDER
         }
     }
     return true;
+}
+
+auto RatioLegStrategy::GetEventCount() -> int {
+    int count   = _eventCount;
+    _eventCount = 0;
+    return count;
 }

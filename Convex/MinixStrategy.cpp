@@ -185,6 +185,7 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
 void MinixStrategy::OnTick(const Quote& quote_) {
     _eventTimestamp   = quote_.header.event_timestamp;
     _triggerTimestamp = quote_.header.trigger_timestamp;
+    _eventCount       = 0;
     for (const auto& [strategyId, strategy] : _strategies) {
         strategy->OnTick(quote_);
     }
@@ -209,6 +210,8 @@ auto MinixStrategy::doWork() -> int {
     if (now - _lastSpreadSend >= std::chrono::seconds(1)) {
         _lastSpreadSend = now;
         SendStrategySpreadsToUi();
+        std::cout << "[doWork] event_timestamp=" << _eventTimestamp << " _eventCount=" << _eventCount << std::endl;
+        _eventCount = 0;
     }
     return 0;
 }
@@ -264,6 +267,7 @@ void MinixStrategy::SendStrategySpreadsToUi() {
         update._cutPL      = static_cast<float>(strategy->GetCutPL()) / 100.0F;
         update._bATP       = static_cast<float>(strategy->GetBATP()) / 100.0F;
         update._sATP       = static_cast<float>(strategy->GetSATP()) / 100.0F;
+        update._reserved   = static_cast<float>(strategy->GetEventCount());
         SendToUi(UiMessageCode_STRATEGY_SPREAD, strategy->GetInterface(), update);
     }
 }

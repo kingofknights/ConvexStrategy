@@ -68,6 +68,7 @@ class RatioLegStrategy {
     [[nodiscard]] auto GetM2M() const -> double;
     [[nodiscard]] auto GetStatus() const -> StrategyStatus;
     [[nodiscard]] auto IsActive() const -> bool;
+    [[nodiscard]] auto GetEventCount() -> int;
 
   private:
     template <typename T>
@@ -190,9 +191,10 @@ class RatioLegStrategy {
     StrategyStatus _status = StrategyStatus_INACTIVE;
     long           _utcOffsetSeconds = 0;  // ponytail: taken once at creation; fine for IST (no DST)
 
-    int _strikeGap = 0;
-    int _lotSize   = 0;
-    int _tickSize  = 0;
+    int _strikeGap  = 0;
+    int _lotSize    = 0;
+    int _tickSize   = 0;
+    int _eventCount = 0;
 
     // Leg definition, fixed at creation.
     LegArray<Quote> _quote{};
