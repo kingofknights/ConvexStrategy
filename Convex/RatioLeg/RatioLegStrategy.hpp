@@ -15,7 +15,8 @@
 
 class MinixStrategy;
 
-// One N-leg ratio spread (2..6 legs). Leg 0 rests a passive bid; when a whole pack of it fills,
+// One N-leg ratio spread (2..6 legs). Leg 0 enters by IOC at the touch when the market spread meets the
+// target, else rests at the AllowedBidDepth level while that price meets it; when a whole pack fills,
 // the other legs are hedged at once. The long and short directions run as independent packs.
 class RatioLegStrategy {
   public:
@@ -75,7 +76,15 @@ class RatioLegStrategy {
     using LegArray = std::array<T, MAX_LEGS>;
 
     // Why the bidding leg is (not) quoting. Logged only when it changes, so a silent strategy explains itself.
-    enum class BidGate : uint8_t { UNKNOWN, OPEN, DONE, HEDGE_DEPTH, BID_DEPTH, NO_PRICE, BELOW_TARGET };
+    // TAKE: market spread meets target, IOC at the touch. REST: passive at the AllowedBidDepth level meets it.
+    enum class BidGate : uint8_t { UNKNOWN,
+                                   TAKE,
+                                   REST,
+                                   DONE,
+                                   HEDGE_DEPTH,
+                                   BID_DEPTH,
+                                   NO_PRICE,
+                                   BELOW_TARGET };
 
     struct PackParams {
         int   _totalPacks   = 0;  // packs to trade in total
@@ -98,14 +107,15 @@ class RatioLegStrategy {
         PackParams                _params;
         LegCache                  _cache;
         LegArray<OrderObjectPtrT> _orders;
+        OrderObjectPtrT           _iocOrder;  // bidding leg IOC, sent when the market spread meets the target
         LegArray<int32_t>         _tradedLots{};
         LegArray<uint64_t>        _tradedValue{};
         LegArray<int32_t>         _unreportedLots{};  // fills not yet reported as whole packs to the tracer
         LegArray<uint64_t>        _unreportedValue{};
         LegArray<size_t>          _hedgeRetryCount{};
-        bool                      _isUnhedged   = false;
-        BidGate                   _bidGate      = BidGate::UNKNOWN;
-        LegArray<bool>            _hedgeWaiting{};  // hedge leg has no opposite price; logged once per wait
+        bool                      _isUnhedged = false;
+        BidGate                   _bidGate    = BidGate::UNKNOWN;
+        LegArray<bool>            _hedgeWaiting{};      // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
         SpreadQuote               _bidSnapshot;         // leg prices when the bidding order was last sent
     };
@@ -134,6 +144,7 @@ class RatioLegStrategy {
     [[nodiscard]] static auto GetAvailableQuantity(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> int;
     [[nodiscard]] static auto CheckOrderDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
     [[nodiscard]] static auto CheckPriceDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
+    [[nodiscard]] static auto DescribeDepth(const Quote& quote_, size_t orderDepth_, size_t priceDepth_, ORDER_SIDE side_, double requiredQuantity_) -> std::string;
 
     [[nodiscard]] auto FindLegIndex(int token_) const noexcept -> size_t {
         for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -144,15 +155,15 @@ class RatioLegStrategy {
         return NO_LEG;
     }
 
-    void WriteTimestamp() const;
+    void               WriteTimestamp() const;
     [[nodiscard]] auto PackName(const Pack& pack_) const noexcept -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
-    [[nodiscard]] auto BookText() const -> std::string;              // touch of every leg: "bid/ask bid/ask ..."
+    [[nodiscard]] auto BookText() const -> std::string;                   // touch of every leg: "bid/ask bid/ask ..."
     [[nodiscard]] auto LotsText(const Pack& pack_) const -> std::string;  // per leg "traded/needed" lots
 
     // ── Diagnostics: every request sent, every response, every state change ───
     void PullOrder(Pack& pack_, size_t leg_, std::string_view reason_);
-    void LogResponse(const Pack& pack_, size_t leg_, const oms_transaction& response_);
-    void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_);
+    void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_);
+    void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int restPrice_);
 
     void ParseLegs(const nlohmann::json& json_);
     void LoadProductDetails();
@@ -175,6 +186,7 @@ class RatioLegStrategy {
 
     // ── Pricing / PnL ─────────────────────────────────────────────────────────
     [[nodiscard]] auto QuoteSpread(const LegCache& cache_) const -> SpreadQuote;
+    [[nodiscard]] auto PriceSpread(const LegCache& cache_, const std::array<int, MAX_LEGS>& prices_) const -> float;
     [[nodiscard]] auto AdjustGap(double spread_) const noexcept -> double;
     [[nodiscard]] auto CompletedPacks(const Pack& pack_) const noexcept -> int;
     [[nodiscard]] auto TradedSpread(const Pack& pack_) const -> double;
@@ -188,7 +200,7 @@ class RatioLegStrategy {
     const size_t   _legCount;
     const bool     _hasStrikeGap;
 
-    StrategyStatus _status = StrategyStatus_INACTIVE;
+    StrategyStatus _status           = StrategyStatus_INACTIVE;
     long           _utcOffsetSeconds = 0;  // ponytail: taken once at creation; fine for IST (no DST)
 
     int _strikeGap  = 0;
