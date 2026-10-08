@@ -367,6 +367,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         if (thinLeg != NO_LEG) return BidGate::HEDGE_DEPTH;
         if (!CheckBiddingLegDepth(pack_)) return BidGate::BID_DEPTH;
         if (spreadMatched) return BidGate::TAKE;
+        if (!REST_WHEN_SPREAD_SHORT) return BidGate::BELOW_TARGET;
         std::array<int, MAX_LEGS> restPrices = spreadQuote._price;
         restPrices[BIDDING_LEG]              = restPrice;
         return PriceSpread(pack_._cache, restPrices) >= targetSpread ? BidGate::REST : BidGate::BELOW_TARGET;
@@ -772,6 +773,10 @@ void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, c
             break;
         }
         case BidGate::BELOW_TARGET:
+            if (!REST_WHEN_SPREAD_SHORT) {
+                WriteLog("[BID-GATE] {} market {} < target {}: no order (resting disabled)\n", PackName(pack_), spreadQuote_._spread, pack_._params._targetSpread);
+                break;
+            }
             WriteLog("[BID-GATE] {} market {} < target {} and rest price {} at level {} also misses target\n",
                      PackName(pack_), spreadQuote_._spread, pack_._params._targetSpread, restPrice_, _allowedBidDepth - 1);
             break;

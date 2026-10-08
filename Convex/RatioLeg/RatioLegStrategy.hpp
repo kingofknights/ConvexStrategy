@@ -137,6 +137,9 @@ class RatioLegStrategy {
 
     static constexpr size_t NO_LEG      = std::numeric_limits<size_t>::max();
     static constexpr size_t BIDDING_LEG = 0;  // leg 0 always rests the bid; other legs hedge
+    // ponytail: resting at AllowedBidDepth when the market spread misses the target is off for now; only the IOC
+    // enters. Set true to re-enable; the rest-path dry-run scenarios are in commit 58841ab.
+    static constexpr bool REST_WHEN_SPREAD_SHORT = false;
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
