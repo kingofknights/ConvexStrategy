@@ -469,6 +469,30 @@ void ShortPackFromGuiPayload() {
     std::printf("  GUI payload verbatim: short pack IOC BUY 5 packs @465, hedged SELL 23100 + 2 x 23300\n");
 }
 
+// AllowedSlippage is in paise. Leg2 hedges at 330 instead of 325: traded 1575 - 780 - 660 = 135, 5 paise under target 140.
+// AllowedSlippage 4 stops before the second pack; 10 lets it trade.
+auto SlippedPacks(int strategyId_, int allowedSlippagePaise_) -> long {
+    nlohmann::json config               = RatioConfig(strategyId_, "Applied");
+    config["Params"]["AllowedSlippage"] = allowedSlippagePaise_;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);  // IOC sent at the 325 leg2 snapshot
+    exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
+    exchange::Pump();                       // IOC fills, leg2 hedge rests at 325
+    exchange::Tick(LEG2, 315, 330);         // hedge retries up to 330: pack done, 5 paise slipped
+    CHECK(Position(strategyId_, LEG2) == 2 * LOT);
+    exchange::Tick(LEG2, 315, 325);         // market 145 >= 140 again: second pack unless stopped
+    SendConfig(RatioConfig(strategyId_, "Stop"));
+    return -Position(strategyId_, LEG0) / (3 * LOT);
+}
+
+void SlippageInPaise() {
+    CHECK(SlippedPacks(18, 4) == 1);
+    CHECK(SlippedPacks(19, 10) == 2);
+    std::printf("  slippage in paise: 5 paise slip stops at AllowedSlippage 4, trades on at 10\n");
+}
+
 auto StrategyLogBytes() -> uintmax_t {
     uintmax_t bytes = 0;
     for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
@@ -513,6 +537,7 @@ int main() {
     HedgeRetriesResetPerPack();
     ShortPackFromGuiPayload();
     MissedEntryLogsEveryTick();
+    SlippageInPaise();
     QuietTicks();
     std::printf("all scenarios passed\n");
 }

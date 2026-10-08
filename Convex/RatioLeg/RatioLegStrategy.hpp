@@ -226,7 +226,7 @@ class RatioLegStrategy {
     size_t _priceDepth         = 0;
     size_t _allowedBidDepth    = 0;
     int    _hedgeDepthPercent  = 0;
-    int    _allowedSlippage    = 0;
+    int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;
 

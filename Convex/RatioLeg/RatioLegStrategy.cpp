@@ -516,7 +516,7 @@ void RatioLegStrategy::CheckSlippageThreshold(Pack& pack_, const oms_transaction
     }
 
     const auto  adjustedTradedSpread = static_cast<float>(AdjustGap(tradedSpread));
-    const float slippage             = (pack_._params._targetSpread - adjustedTradedSpread) / 100.0F;
+    const float slippagePaise        = pack_._params._targetSpread - adjustedTradedSpread;  // AllowedSlippage is in paise
 
     _tradeTracer._orderId      = response_.packet_.exchange_order_id;
     _tradeTracer._time         = response_.hdr_.exchange_timestamp;
@@ -526,7 +526,7 @@ void RatioLegStrategy::CheckSlippageThreshold(Pack& pack_, const oms_transaction
     _tradeTracer._price        = pack_._params._targetSpread / 100.0F;
     _tradeTracer._ltp          = adjustedTradedSpread / 100.0F;
     _tradeTracer._ltq          = newPacks;
-    _tradeTracer._slippage     = slippage >= static_cast<float>(_allowedSlippage) ? slippage : 0;
+    _tradeTracer._slippage     = slippagePaise >= static_cast<float>(_allowedSlippage) ? slippagePaise / 100.0F : 0;
 
     WriteLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
              _legCount, _tradeTracer._symbol, _strategyId, _tradeTracer._orderId, _tradeTracer._time, _tradeTracer._side, _tradeTracer._price, _tradeTracer._ltp, _tradeTracer._ltq, _tradeTracer._slippage);
@@ -542,8 +542,8 @@ void RatioLegStrategy::CheckSlippageThreshold(Pack& pack_, const oms_transaction
         pack_._unreportedLots[leg]  = leftLots;
     }
 
-    if (_allowedSlippage > 0 && slippage > static_cast<float>(_allowedSlippage)) {
-        WriteLog("[SLIPPAGE {}Leg] Slippage {} > AllowedSlippage {}. Stopping strategy.\n", _legCount, slippage, _allowedSlippage);
+    if (_allowedSlippage > 0 && slippagePaise > static_cast<float>(_allowedSlippage)) {
+        WriteLog("[SLIPPAGE {}Leg] Slippage {} paise > AllowedSlippage {} paise. Stopping strategy.\n", _legCount, slippagePaise, _allowedSlippage);
         Stop("slippage above AllowedSlippage");
     }
 }
