@@ -1,13 +1,14 @@
 // Dry run of the ratio strategy against a simulated platform and exchange.
 //
 // Links the real MinixStrategy, RatioLegStrategy and vendor order_instance against a fake
-// AlgoBase (no libAlgoBase.so), feeds GUI config through the chunked UI protocol, ticks the
-// book, and fills orders the way the exchange would. Every scenario asserts on what the
+// AlgoBase (no libAlgoBase.so) and a fake trade DB (no Postgres), feeds GUI config through the chunked
+// UI protocol, ticks the book, and fills orders the way the exchange would. Every scenario asserts on what the
 // exchange saw, not on strategy internals.
 //
 // Build and run from the repo root (one line):
-//   g++ -std=c++20 -O1 -g -Wall -Wextra -DFMT_HEADER_ONLY -I Convex -I Convex/RatioLeg -I vendor/minix/include -I vendor/minix -I vendor
-//       tests/ratio_dry_run.cpp Convex/MinixStrategy.cpp Convex/RatioLeg/RatioLegStrategy.cpp vendor/minix/src/order_instance.cpp
+//   g++ -std=c++20 -O1 -g -Wall -Wextra -DFMT_HEADER_ONLY -I Convex -I Convex/RatioLeg -I Convex/ManualOrder -I Convex/SquareOff
+//       -I vendor/minix/include -I vendor/minix -I vendor tests/ratio_dry_run.cpp Convex/MinixStrategy.cpp Convex/RatioLeg/RatioLegStrategy.cpp
+//       Convex/ManualOrder/ManualOrder.cpp Convex/SquareOff/SquareOff.cpp vendor/minix/src/order_instance.cpp
 //       -o build/ratio_dry_run && (cd build && ./ratio_dry_run)
 
 #include "MinixStrategy.hpp"
@@ -59,6 +60,7 @@ namespace exchange {
     std::vector<aef::infra::ui_cmd::UIStruct> uiPackets;
     std::set<int>                  subscribed;
     int                            vendorRefusalLogs = 0;
+    std::map<int32_t, int32_t>     dbPositions;  // what the fake trade DB returns to square-off
     MinixStrategy*                 hub               = nullptr;
 
     auto Respond(const oms_transaction& request_, int code_, int price_, int quantity_) -> void {
@@ -227,6 +229,9 @@ void AlgoBase::handleTimerCalculations(const aef::infra::ui_cmd::UIStruct&) {}
 int  AlgoBase::doWork() { return 0; }
 uint32_t AlgoBase::get_next_order_id() { return 0; }  // only the auto-uid overload uses it; the strategy passes its own uid
 void AlgoBase::onOIdata(const aef::infra::product::product_data&) {}
+
+// Stands in for SquareOff/TradeDb.cpp (Postgres).
+auto LoadTodayPositions(const SquareOff::DbConfig&) -> std::map<int32_t, int32_t> { return exchange::dbPositions; }
 
 // ═══ Scenario helpers ════════════════════════════════════════════════════════
 
@@ -700,6 +705,52 @@ void ManualOrders() {
     std::printf("  manual orders: place / modify / cancel echoed on 5001, bad requests rejected, 2 legs on their own tokens\n");
 }
 
+// ═══ Square-off (GUI 1331) ═══════════════════════════════════════════════════
+
+// Broadcast with only the third level set: square-off prices there.
+void Bcast(int token_, int thirdBid_, int thirdAsk_) {
+    aef::infra::product::product_data product{};
+    product.product_id_       = token_;
+    product.bid_mbp[2].price  = thirdBid_;
+    product.ask_mbp[2].price  = thirdAsk_;
+    exchange::hub->onBcastData(product);
+    exchange::Pump();
+}
+
+void SquareOffFlattens() {
+    exchange::dbPositions = {{LEG1, 2 * LOT}, {LEG2, -LOT}};  // long 2 lots of LEG1, short 1 lot of LEG2
+    const size_t sent     = exchange::sent.size();
+    const size_t ui       = exchange::uiPackets.size();
+
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF;
+    packet.header.interface_id = 7;  // ManualEchoes expects responses on this interface
+    exchange::hub->onUIRequest(packet);
+    CHECK(exchange::sent.size() == sent);  // nothing goes out before a broadcast prices it
+    CHECK(exchange::subscribed.count(LEG1) && exchange::subscribed.count(LEG2));
+
+    exchange::hub->onUIRequest(packet);  // pressed again while running: ignored
+    Bcast(LEG1, 760, 790);               // book 770 / 780: SELL @760 crosses the 770 bid
+    Bcast(LEG2, 305, 335);               // book 315 / 325: BUY @335 crosses the 325 ask
+    CHECK(exchange::sent.size() == sent + 2);
+
+    const oms_transaction& sell = exchange::sent[sent];
+    const oms_transaction& buy  = exchange::sent[sent + 1];
+    CHECK(sell.packet_.product_id_ == LEG1 && sell.packet_.flags_.order_side == SELL_SIDE && sell.packet_.price_ == 760 && sell.packet_.quantity_ == 2 * LOT);
+    CHECK(buy.packet_.product_id_ == LEG2 && buy.packet_.flags_.order_side == BUY_SIDE && buy.packet_.price_ == 335 && buy.packet_.quantity_ == LOT);
+    CHECK(sell.hdr_.uid_.composite_id_.strategy_id == 0 && sell.hdr_.uid_.composite_id_.client_id == 3);  // client 1 + 2: apart from ratio and manual
+    CHECK(!exchange::live.count(sell.hdr_.uid_.id_) && !exchange::live.count(buy.hdr_.uid_.id_));          // both traded
+
+    // Every response echoes to the GUI on 5001 as strategy 0, ending in a trade per token.
+    const auto echoes = ManualEchoes(ui);
+    CHECK(!echoes.empty() && echoes.back().hdr_.transaction_code == OMS_TRADE && echoes.back().hdr_.uid_.strategy_id == 0);
+    CHECK(std::count_if(echoes.begin(), echoes.end(), [](const oms_transaction3l& echo_) { return echo_.hdr_.transaction_code == OMS_TRADE; }) == 2);
+
+    Bcast(LEG1, 760, 790);  // flat now: nothing more
+    CHECK(exchange::sent.size() == sent + 2);
+    std::printf("  square-off: long 130 sold @760, short 65 bought @335, echoed on 5001, flat, repeat press and later broadcasts ignored\n");
+}
+
 int main() {
     std::ofstream("dry_run_config.json") << R"({"client":1,"algoid":1,"omsid":1})";
 
@@ -733,5 +784,6 @@ int main() {
     PartialPackUnwinds();
     QuietTicks();
     ManualOrders();
+    SquareOffFlattens();
     std::printf("all scenarios passed\n");
 }

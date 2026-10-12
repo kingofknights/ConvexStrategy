@@ -109,6 +109,7 @@ enum UiMessageCode : int32_t {
     // Manual orders: the GUI sends oms_transaction3l on 9911, responses echo back on 5001.
     UiMessageCode_MANUAL_ORDER          = 9911,
     UiMessageCode_MANUAL_ORDER_RESPONSE = 5001,
+    UiMessageCode_SQUARE_OFF            = 1331,  // square off every position the trader holds today
 };
 
 struct UserPortfolio {

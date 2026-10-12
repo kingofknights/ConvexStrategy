@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include "ManualOrder.hpp"
+#include "SquareOff.hpp"
 #include "Utils.hpp"
 #include "oms_api.hpp"
 #include "order_instance.hpp"  // execution_strat::order_instance, client_uid
@@ -23,6 +25,8 @@ class RatioLegStrategy;
 
 class MinixStrategy final : public AlgoBase {
     friend class RatioLegStrategy;
+    friend class ManualOrder;
+    friend class SquareOff;
 
   public:
     explicit MinixStrategy(AlgoBase::ContextHandle context_);
@@ -47,10 +51,6 @@ class MinixStrategy final : public AlgoBase {
     // Once per ~1s, echo spread and PnL of every strategy back to the GUI.
     void SendStrategySpreadsToUi();
     void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
-
-    // GUI manual order (9911): place up to 3 legs, or modify / cancel one placed earlier.
-    void HandleManualOrder(const aef::infra::ui_cmd::UIStruct& request_);
-    void SendManualOrderResponse(const oms_transaction& response_, int32_t interface_);
 
     // Copies a packed POD straight into one UI packet (UI_BINARY_PROTOCOL_SPEC.md).
     template <typename Payload>
@@ -78,10 +78,8 @@ class MinixStrategy final : public AlgoBase {
 
     std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
     std::chrono::steady_clock::time_point                 _lastSpreadSend{};
-
-    // uid -> GUI interface of every manual order placed; routes its responses and later modify / cancel.
-    // ponytail: never pruned, a session's manual orders are few.
-    std::map<uint32_t, int32_t> _manualOrders;
+    ManualOrder                                           _manualOrder{this};
+    std::unique_ptr<SquareOff>                            _squareOff;  // built once the config is read
 
     // Timestamps of the last tick, stamped on orders for latency tracing.
     uint64_t _eventTimestamp   = 0;
