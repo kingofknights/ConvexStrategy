@@ -112,13 +112,6 @@ namespace exchange {
                     live[uid] = LiveOrder{request, request.packet_.price_, request.packet_.quantity_, 0, static_cast<int>(request.hdr_.uid_.composite_id_.strategy_id)};
                     Respond(request, OMS_ORDER_PLACED, request.packet_.price_, request.packet_.quantity_);
                     Respond(request, OMS_ORDER_CONFIRMED, request.packet_.price_, request.packet_.quantity_);
-                    if (request.packet_.flags_.order_type == IOC_ORDER_TYPE) {  // trade what crosses, cancel the rest
-                        MatchCrossing();
-                        if (live.count(uid)) {
-                            live.erase(uid);
-                            Respond(request, OMS_ORDER_CANCELLED, request.packet_.price_, request.packet_.quantity_);
-                        }
-                    }
                     break;
                 case OMS_REPLACE_REQ: {
                     if (!live.count(uid)) {  // filled while the modify was in flight
@@ -318,9 +311,17 @@ void TickAllLegs() {
 
 auto Position(int strategy_, int token_) -> long { return exchange::position[{strategy_, token_}]; }
 
+// Price of a strategy's working order on a token, 0 when none.
+auto LivePrice(int strategy_, int token_) -> int {
+    for (const auto& [uid, order] : exchange::live) {
+        if (order.strategy == strategy_ && order.request.packet_.product_id_ == token_) return order.price;
+    }
+    return 0;
+}
+
 // ═══ Scenarios ═══════════════════════════════════════════════════════════════
 
-// Full life: subscribe, apply, no order while the spread misses target, IOC once it meets target, done.
+// Full life: subscribe, apply, bid rests at the target price while the market misses, fills once the bid reaches it, done.
 void FullCycle() {
     constexpr int ID = 10;
     SendConfig(RatioConfig(ID, "Subscribed"));
@@ -330,13 +331,13 @@ void FullCycle() {
 
     SendConfig(RatioConfig(ID, "Applied"));
     CHECK(LastStatusEcho()._status == StrategyStatus_APPLIED);
-    exchange::Tick(LEG0, 500, 510);  // market 3*500 - 780 - 2*325 = 70 < 140: resting is disabled, no order
-    CHECK(exchange::LiveOrdersOf(ID) == 0 && NthPlacePrice(ID, LEG0, 1) == 0);
+    exchange::Tick(LEG0, 500, 510);  // market 3*500 - 780 - 2*325 = 70 < 140: SELL rests at (140 + 1430) / 3 = 523.33 -> 525
+    const oms_transaction bid = NthPlace(ID, LEG0, 1);
+    CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.price_ == 525 && bid.packet_.quantity_ == 3 * LOT);
+    CHECK(bid.hdr_.uid_.composite_id_.request_id == 1);  // _clientUid starts at 0, first order is 1
+    CHECK(exchange::LiveOrdersOf(ID) == 1 && Position(ID, LEG0) == 0);
 
-    exchange::Tick(LEG0, 525, 535);  // market 3*525 - 1430 = 145 >= 140: IOC sells at the 525 bid, pack after pack
-    const oms_transaction ioc = NthPlace(ID, LEG0, 1);
-    CHECK(ioc.packet_.flags_.order_type == IOC_ORDER_TYPE && ioc.packet_.price_ == 525 && ioc.packet_.quantity_ == 3 * LOT);
-    CHECK(ioc.hdr_.uid_.composite_id_.request_id == 1);  // _clientUid starts at 0, first order is 1
+    exchange::Tick(LEG0, 525, 535);  // bid reaches 525: the resting SELL fills, the next pack crosses at once
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
     CHECK(CountUi(UiMessageCode_TRADE_TRACER) == 2);
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // total quantity reached: no more orders
@@ -353,7 +354,7 @@ void FullCycle() {
         }
     }
     CHECK(spread._strategyId == ID && spread._bTrQ == 2 && spread._sTrQ == 0);
-    std::printf("  full cycle: no order at market 70, IOC 2 packs @525, legs %ld/%+ld/%+ld, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n",
+    std::printf("  full cycle: rests @525 at market 70, 2 packs filled @525, legs %ld/%+ld/%+ld, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n",
                 Position(ID, LEG0), Position(ID, LEG1), Position(ID, LEG2), spread._bTrQ, spread._bATP, spread._rlp);
 }
 
@@ -387,35 +388,35 @@ void MissedEntryLogsEveryTick() {
     std::printf("  missed entry: thin hedge logged on each tick while market meets target\n");
 }
 
-// STOP while the IOC awaits the exchange: the IOC still fills, and its hedges complete after STOP.
-void StopRacesPendingIoc() {
+// STOP while a crossing bid awaits the exchange: the bid still fills, and its hedges complete after STOP.
+void StopRacesPendingBid() {
     constexpr int ID = 11;
     SendConfig(RatioConfig(ID, "Applied"));
-    exchange::Tick(LEG1, 770, 780);         // hedge legs first: no leg0 price yet, so no IOC
+    exchange::Tick(LEG1, 770, 780);         // hedge legs first: no leg0 price yet, so no bid
     exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 525, 535, false);  // IOC sent, not yet answered
+    exchange::Tick(LEG0, 525, 535, false);  // SELL 525 sent at the 525 bid, not yet answered
     CHECK(exchange::outbox.size() == 1);
 
     SendConfig(RatioConfig(ID, "Stop"), false);  // STOP arrives before the exchange answers
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);  // Stop() keeps the strategy ACTIVE: feed and UI on, no entries
 
-    exchange::Pump();  // IOC fills -> hedges cross
+    exchange::Pump();  // bid fills -> hedges cross
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
-    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new IOC
-    std::printf("  stop race: in-flight IOC filled, hedged after STOP, flat\n");
+    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
+    std::printf("  stop race: in-flight bid filled, hedged after STOP, flat\n");
 }
 
-// The IOC fills while leg2 has no asks; then STOP. Hedging must continue after STOP until flat.
+// The bid fills while leg2 has no asks; then STOP. Hedging must continue after STOP until flat.
 void StopKeepsHedging() {
     constexpr int ID = 13;
     SendConfig(RatioConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 525, 535, false);  // IOC sent at the 325 leg2 snapshot
+    exchange::Tick(LEG0, 525, 535, false);  // bid sent at the 325 leg2 snapshot
     exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // IOC fills: leg1 hedges, leg2 rests at 325 with no ask to take
+    exchange::Pump();                       // bid fills: leg1 hedges, leg2 rests at 325 with no ask to take
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
 
     SendConfig(RatioConfig(ID, "Stop"));
@@ -425,7 +426,7 @@ void StopKeepsHedging() {
     CHECK(NthPlacePrice(ID, LEG2, 1) == 325);  // MarketRetries 5: starts at the 325 snapshot, steps to 330
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
-    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new IOC
+    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
     std::printf("  stop keeps hedging: leg2 hedged after STOP once asks returned, flat\n");
 }
 
@@ -445,7 +446,7 @@ void RejectsUnknownToken() {
 void HedgeRetriesResetPerPack() {
     constexpr int ID = 14;
     SendConfig(RatioConfig(ID, "Applied"));
-    TickAllLegs();  // market 145 >= 140: two IOC packs back to back
+    TickAllLegs();  // market 145 >= 140: two packs cross back to back
     CHECK(Position(ID, LEG2) == 2 * 2 * LOT);
     CHECK(NthPlacePrice(ID, LEG2, 1) == 325 && NthPlacePrice(ID, LEG2, 2) == 325);  // snapshot ask, zero retry ticks
     std::printf("  hedge retries reset per pack: both packs hedged leg2 at the 325 snapshot\n");
@@ -456,17 +457,16 @@ void HedgeRetriesResetPerPack() {
 void ShortPackFromGuiPayload() {
     constexpr int ID = 15;
     SendConfig(GuiConfig(ID, "Applied"));
-    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: no order
-    CHECK(exchange::LiveOrdersOf(ID) == 0);
-    exchange::Tick(LEG0, 470, 475);  // credit -25 < -5: still no order
-    CHECK(exchange::LiveOrdersOf(ID) == 0 && NthPlacePrice(ID, LEG0, 1) == 0);
+    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: BUY rests at (1400 + 5) / 3 = 468.33 -> 465 (rounded down)
+    const oms_transaction bid = NthPlace(ID, LEG0, 1);
+    CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.flags_.order_side == BUY_SIDE && bid.packet_.price_ == 465);
+    exchange::Tick(LEG0, 470, 475);  // credit -25 < -5: still resting
+    CHECK(exchange::LiveOrdersOf(ID) == 1 && LivePrice(ID, LEG0) == 465 && Position(ID, LEG0) == 0);
 
-    exchange::Tick(LEG0, 460, 465);  // credit 1400 - 3*465 = +5 >= -5: IOC buys at the 465 ask until done
-    const oms_transaction ioc = NthPlace(ID, LEG0, 1);
-    CHECK(ioc.packet_.flags_.order_type == IOC_ORDER_TYPE && ioc.packet_.flags_.order_side == BUY_SIDE && ioc.packet_.price_ == 465);
+    exchange::Tick(LEG0, 460, 465);  // ask reaches 465: fills, then each pack crosses until done
     CHECK(Position(ID, LEG0) == 15 * LOT && Position(ID, LEG1) == -5 * LOT && Position(ID, LEG2) == -10 * LOT);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
-    std::printf("  GUI payload verbatim: short pack IOC BUY 5 packs @465, hedged SELL 23100 + 2 x 23300\n");
+    std::printf("  GUI payload verbatim: short pack BUY rests @465, 5 packs filled, hedged SELL 23100 + 2 x 23300\n");
 }
 
 // AllowedSlippage is in paise. Leg2 hedges at 330 instead of 325: traded 1575 - 780 - 660 = 135, 5 paise under target 140.
@@ -477,9 +477,9 @@ auto SlippedPacks(int strategyId_, int allowedSlippagePaise_) -> long {
     SendConfig(config);
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 525, 535, false);  // IOC sent at the 325 leg2 snapshot
+    exchange::Tick(LEG0, 525, 535, false);  // bid sent at the 325 leg2 snapshot
     exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // IOC fills, leg2 hedge rests at 325
+    exchange::Pump();                       // bid fills, leg2 hedge rests at 325
     exchange::Tick(LEG2, 315, 330);         // hedge retries up to 330: pack done, 5 paise slipped
     CHECK(Position(strategyId_, LEG2) == 2 * LOT);
     exchange::Tick(LEG2, 315, 325);         // market 145 >= 140 again: second pack unless stopped
@@ -491,6 +491,65 @@ void SlippageInPaise() {
     CHECK(SlippedPacks(18, 4) == 1);
     CHECK(SlippedPacks(19, 10) == 2);
     std::printf("  slippage in paise: 5 paise slip stops at AllowedSlippage 4, trades on at 10\n");
+}
+
+// The resting bid follows the hedge legs, modified only when its price moves by TickSize ticks (2 x 5 paise).
+void BidTracksHedgeLegs() {
+    constexpr int  ID              = 20;
+    nlohmann::json config          = RatioConfig(ID, "Applied");
+    config["Params"]["TickSize"]   = 2;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 500, 510);  // (140 + 780 + 2*325) / 3 = 523.33 -> SELL rests at 525
+    CHECK(LivePrice(ID, LEG0) == 525);
+    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: moved 5 < 10, not modified
+    CHECK(LivePrice(ID, LEG0) == 525);
+    exchange::Tick(LEG2, 330, 340);  // (140 + 780 + 2*340) / 3 = 533.33 -> 535: moved 10, modified
+    CHECK(LivePrice(ID, LEG0) == 535);
+    exchange::Tick(LEG0, 535, 545);  // bid reaches 535: both packs fill, traded 1605 - 780 - 680 = 145 >= 140
+    CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
+    std::printf("  bid tracks hedges: 525 kept on a 5 paise move, 535 after a 10 paise move, filled\n");
+}
+
+// Market beats the target: the bid is still priced at the target, so it crosses past the touch.
+void BidCrossesWhenMarketBeatsTarget() {
+    constexpr int ID = 21;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 540, 550);  // market 3*540 - 1430 = 190 > 140: SELL priced at 525, under the 540 bid
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 525 && NthPlacePrice(ID, LEG0, 2) == 525);
+    CHECK(Position(ID, LEG0) == -6 * LOT && exchange::LiveOrdersOf(ID) == 0);
+    std::printf("  market 190 > target 140: SELL @525 crosses the 540 bid, 2 packs filled\n");
+}
+
+// A target no positive leg 0 price can reach sends nothing.
+void UnreachableTargetSendsNothing() {
+    constexpr int  ID                  = 22;
+    nlohmann::json config              = GuiConfig(ID, "Applied");
+    config["Params"]["ShortSellPrice"] = 14.00;  // BUY price (770 + 2*315 - 1400) / 3 = 0
+    SendConfig(config);
+    TickAllLegs();
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && NthPlacePrice(ID, LEG0, 1) == 0);
+    SendConfig(GuiConfig(ID, "Stop"));
+    std::printf("  unreachable target: BUY price 0, no order\n");
+}
+
+// ConRev subtracts the 100 rupee strike gap from a raw spread >= 0, so target -98.60 needs raw 1.40: same bid as no gap.
+void StrikeGapBackSolve() {
+    constexpr int  ID                  = 23;
+    nlohmann::json config              = RatioConfig(ID, "Applied");
+    config["Strategy"]["SubType"]      = "ConRev";
+    config["Params"]["LongBuyPrice"]   = -98.60;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 500, 510);  // raw market 70 >= 0: raw target -9860 + 10000 = 140 -> SELL rests at 525
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 525 && Position(ID, LEG0) == 0);
+    config["Strategy"]["Status"] = "Stop";
+    SendConfig(config);
+    std::printf("  strike gap: ConRev target -98.60 rests at 525\n");
 }
 
 auto StrategyLogBytes() -> uintmax_t {
@@ -531,13 +590,17 @@ int main() {
 
     std::printf("ratio dry run\n");
     FullCycle();
-    StopRacesPendingIoc();
+    StopRacesPendingBid();
     StopKeepsHedging();
     RejectsUnknownToken();
     HedgeRetriesResetPerPack();
     ShortPackFromGuiPayload();
     MissedEntryLogsEveryTick();
     SlippageInPaise();
+    BidTracksHedgeLegs();
+    BidCrossesWhenMarketBeatsTarget();
+    UnreachableTargetSendsNothing();
+    StrikeGapBackSolve();
     QuietTicks();
     std::printf("all scenarios passed\n");
 }

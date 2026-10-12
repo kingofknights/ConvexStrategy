@@ -9,8 +9,7 @@ This document outlines the usage and logic behind the key execution parameters d
 ### 1. Tick Size (`TickSize` / `_repriceTicks`)
 * **Description:** The minimum price change step required to trigger a bidding order modification.
 * **Details:** The exchange's minimum tick size is small (e.g., 5 paise in NSE-FNO). Setting our bidding adjustments to react to every 5 paise change would result in an excessive volume of order modifications, leading to communication line exhaustion. To prevent this, the user provides a larger minimum tick change threshold.
-* **Engine Behavior:** Counted in exchange ticks. A resting bid is only repriced when its rest price moves by at least `TickSize × tick size` paise (`_repriceThreshold`). `0` reprices on every move.
-* **Currently inert:** leg 0 enters only by IOC (`REST_WHEN_SPREAD_SHORT = false`), and an IOC is never repriced, so `TickSize` has no effect until resting is re-enabled.
+* **Engine Behavior:** Counted in exchange ticks. The leg 0 bid is only modified when its target price moves by at least `TickSize × tick size` paise (`_repriceThreshold`). `0` reprices on every move.
 
 ### 2. Order Depth (`OrderDepth` / `_orderDepth`)
 * **Description:** The minimum count of active orders (bids/asks) that must be present in the book for the market leg (hedge leg) from the top level downwards.
@@ -22,16 +21,15 @@ This document outlines the usage and logic behind the key execution parameters d
 * **Details:** For example, `PriceDepth = 2` means there must be active orders populated across at least 2 distinct price levels in the market leg's order book.
 * **Engine Behavior:** Gated by `CheckPriceDepth` on the side each hedge will take. If the hedge leg depth is insufficient, bidding on the main leg will not start (or will be immediately cancelled). Capped at 5.
 
-### 4. Allowed Bid Depth (`AllowedBidDepth` / `_allowedBidDepth`)
+### 4. Allowed Bid Depth (`AllowedBidDepth`)
 * **Description:** The minimum number of valid price levels that must be present in the order book of the primary **bidding leg** itself.
-* **Engine Behavior:** Similar to `PriceDepth`, but checked on the bidding leg's own side of the book. It ensures the bidding leg has sufficient market depth before the IOC is sent; otherwise the gate is `BID_DEPTH`. Clamped to 1..5.
-* **Rest level (disabled):** with `REST_WHEN_SPREAD_SHORT = true`, leg 0 would rest at level `AllowedBidDepth - 1` on its own side (BUY: lowest bid in depth, SELL: highest ask) while the market spread is below target but the spread at that price still meets it.
+* **Engine Behavior:** Ignored. Leg 0 bids at the target price with no depth gate and no price bound (see `project_flow_documentation.md` §6).
 
 ### 5. Threshold Qty (`ThresholdQty` / `_hedgeDepthPercent`)
 * **Description:** An extra safety buffer quantity (expressed as a percentage) that must be available in the hedge leg's order book.
-* **Details:** After meeting the `OrderDepth`, `PriceDepth`, and `AllowedBidDepth` checks, the order book must also have this percentage-based volume buffer to absorb the hedge order.
+* **Details:** After meeting the `OrderDepth` and `PriceDepth` checks, the order book must also have this percentage-based volume buffer to absorb the hedge order.
 * **Engine Behavior:** Stored as `_hedgeDepthPercent`; `0` or less means 100%. Required quantity per hedge leg = slice quantity of that leg × percent / 100 (`_requiredHedgeDepth`).
-* **Example:** For a Butterfly Strategy (2-1-1, `SoQ = 1`), one slice is 2 lots on the bid leg and 1 lot on each hedge leg. With `ThresholdQty = 200` (200%), each hedge leg needs at least $1 \times 200\% = 2$ lots in its first `OrderDepth` levels before the IOC is sent.
+* **Example:** For a Butterfly Strategy (2-1-1, `SoQ = 1`), one slice is 2 lots on the bid leg and 1 lot on each hedge leg. With `ThresholdQty = 200` (200%), each hedge leg needs at least $1 \times 200\% = 2$ lots in its first `OrderDepth` levels before the bid is sent.
 
 ### 6. Allowed Slippage (`AllowedSlippage` / `_allowedSlippage`)
 * **Description:** The maximum execution slippage tolerated after a trade executes.

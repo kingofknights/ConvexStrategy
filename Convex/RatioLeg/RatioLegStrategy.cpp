@@ -105,7 +105,6 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
         for (size_t leg = 0; leg < _legCount; ++leg) {
             pack->_orders[leg] = std::make_unique<OrderObjectT>(_tokens[leg], pack->_sides[leg], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
         }
-        pack->_iocOrder = std::make_unique<OrderObjectT>(_tokens[BIDDING_LEG], pack->_sides[BIDDING_LEG], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::IOC_ORDER_TYPE, _hub);
     }
 
     // Subscribe last: a throw above must not leave feeds pointing at a strategy that never existed.
@@ -171,7 +170,6 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _repriceTicks       = params.value("TickSize", 0U);
         _orderDepth         = std::min<size_t>(params.value("OrderDepth", 1U), aef::infra::quote::QUOTE_LEVELS);
         _priceDepth         = std::min<size_t>(params.value("PriceDepth", 1U), aef::infra::quote::QUOTE_LEVELS);
-        _allowedBidDepth    = std::clamp<size_t>(params.value("AllowedBidDepth", 1U), 1, aef::infra::quote::QUOTE_LEVELS);  // rest level is depth - 1
         _hedgeDepthPercent  = params.value("ThresholdQty", 100);
         _allowedSlippage    = params.value("AllowedSlippage", 0);
         _tradeGear          = params.value("TradeGear", 0);
@@ -181,12 +179,12 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             "[RatioLeg] StrategyId: {} | Params parsed: "
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
-            "\nTickSize: {}, \nOrderDepth: {}, \nPriceDepth: {}, \nAllowedBidDepth: {}, "
+            "\nTickSize: {}, \nOrderDepth: {}, \nPriceDepth: {}, "
             "\nThresholdQty: {}, \nAllowedSlippage: {}, \nTradeGear: {}, \nMarketRetries: {}, \n_biddingLeg: {}\n",
             _strategyId,
             _longPack._params._slicePacks, _longPack._params._totalPacks, _longPack._params._targetSpread,
             _shortPack._params._slicePacks, _shortPack._params._totalPacks, _shortPack._params._targetSpread,
-            _repriceTicks, _orderDepth, _priceDepth, _allowedBidDepth,
+            _repriceTicks, _orderDepth, _priceDepth,
             _hedgeDepthPercent, _allowedSlippage, _tradeGear, _marketOrderRetries, BIDDING_LEG);
     }
     RebuildCache();
@@ -274,10 +272,8 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     }
 
     // Long and short packs trade opposite sides of every leg, so the side names the pack.
-    // The bidding leg has two orders on that side; the uid tells them apart (taken before a fill resets it).
     Pack&         pack  = (side == _longPack._sides[leg]) ? _longPack : _shortPack;
-    const bool    isIoc = leg == BIDDING_LEG && pack._iocOrder->get_uid() != 0 && pack._iocOrder->get_uid() == response_.hdr_.uid_.id_;
-    OrderObjectT& order = isIoc ? *pack._iocOrder : *pack._orders[leg];
+    OrderObjectT& order = *pack._orders[leg];
 
     order.handle_confirmation(response_);
     LogResponse(pack, leg, order, response_);
@@ -288,10 +284,6 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
             break;
         case OMS_REQ_REJ:
             // Wait for the next tick, so a persistent reject (price band, margin) cannot resend at OMS speed.
-            break;
-        case OMS_ORDER_CANCELLED:
-            // An IOC remainder cancelled by the exchange also waits for a tick, so an unfillable IOC is not resent at OMS speed.
-            if (!isIoc) ProcessPack(pack);
             break;
         default:
             // An ack or cancel frees the order: act now instead of waiting for a tick.
@@ -346,18 +338,17 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
 // ═══ Entry: bidding leg ══════════════════════════════════════════════════════
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
-    OrderObjectT& restOrder     = *pack_._orders[BIDDING_LEG];
-    OrderObjectT& iocOrder      = *pack_._iocOrder;
+    OrderObjectT& bidOrder      = *pack_._orders[BIDDING_LEG];
     const int     biddingRatio  = _ratios[BIDDING_LEG];
     const int     tradedLots    = pack_._tradedLots[BIDDING_LEG];
     const int     remainingLots = pack_._params._totalPacks * biddingRatio - tradedLots;
     const float   targetSpread  = pack_._params._targetSpread;
 
-    // Market spread prices every leg at the crossing side. Rest price: own side at the last allowed level,
-    // the least aggressive price within AllowedBidDepth (BUY: lowest bid, SELL: highest ask).
+    // Market spread prices every leg at the crossing side. The bid price is leg 0's price that gives exactly the
+    // target with the hedge legs at those prices: past the touch (crosses) when the market beats the target, else it rests.
     const SpreadQuote spreadQuote   = QuoteSpread(pack_._cache);
     const bool        spreadMatched = spreadQuote._valid && spreadQuote._spread >= targetSpread;
-    const int         restPrice     = GetPrice(_quote[BIDDING_LEG], pack_._sides[BIDDING_LEG], _allowedBidDepth - 1);
+    const int         bidPrice      = spreadQuote._valid ? TargetBidPrice(pack_, spreadQuote) : 0;
 
     size_t        thinLeg = NO_LEG;
     const BidGate gate    = [&] {
@@ -365,21 +356,13 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         if (!spreadQuote._valid) return BidGate::NO_PRICE;
         thinLeg = FindThinHedgeLeg(pack_);
         if (thinLeg != NO_LEG) return BidGate::HEDGE_DEPTH;
-        if (!CheckBiddingLegDepth(pack_)) return BidGate::BID_DEPTH;
-        if (spreadMatched) return BidGate::TAKE;
-        if (!REST_WHEN_SPREAD_SHORT) return BidGate::BELOW_TARGET;
-        std::array<int, MAX_LEGS> restPrices = spreadQuote._price;
-        restPrices[BIDDING_LEG]              = restPrice;
-        return PriceSpread(pack_._cache, restPrices) >= targetSpread ? BidGate::REST : BidGate::BELOW_TARGET;
+        if (bidPrice <= 0) return BidGate::UNREACHABLE;
+        return BidGate::BID;
     }();
-    SetBidGate(pack_, gate, thinLeg, spreadQuote, spreadMatched, restPrice);
-    if (gate != BidGate::TAKE && gate != BidGate::REST) {
-        PullOrder(pack_, BIDDING_LEG, "bid gate closed");  // an IOC in flight ends on its own
+    SetBidGate(pack_, gate, thinLeg, spreadQuote, spreadMatched, bidPrice);
+    if (gate != BidGate::BID) {
+        PullOrder(pack_, BIDDING_LEG, "bid gate closed");
         return;
-    }
-    // One order on the leg at a time, so the resting bid and an IOC can never both fill.
-    if (iocOrder.get_current_state() != static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE)) {
-        return;  // IOC in flight
     }
 
     // Finish a partly filled pack before starting a new slice, so the bidding leg only ever holds whole packs.
@@ -387,33 +370,39 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int orderLots     = (packRemainder > 0) ? (biddingRatio - packRemainder) : (pack_._params._slicePacks * biddingRatio);
     const int quantity      = std::min(orderLots, remainingLots) * _lotSize;
 
-    if (gate == BidGate::TAKE) {
-        if (restOrder.get_current_state() != static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE)) {
-            PullOrder(pack_, BIDDING_LEG, "spread matched: IOC replaces resting bid");  // its CANCELLED sends the IOC
-            return;
-        }
-        const int takePrice = spreadQuote._price[BIDDING_LEG];
-        if (const uint32_t uid = _hub->UpdateOrder(iocOrder, takePrice, quantity, _clientUid); uid != 0) {
-            WriteLog("[ORDER-OUT] {} leg={} token={} {} PLACE IOC uid={} price={} qty={} | TAKE market={} >= target={} lots=[{}] book=[{}]\n",
-                     PackName(pack_), BIDDING_LEG, _tokens[BIDDING_LEG], SideName(pack_._sides[BIDDING_LEG]), uid, takePrice, quantity,
-                     spreadQuote._spread, targetSpread, LotsText(pack_), BookText());
-            pack_._bidSnapshot = spreadQuote;
-        }
+    // A working order moves only when the price moves by at least TickSize ticks (a finished order's open price is 0).
+    if (std::abs(bidOrder.get_open_price() - bidPrice) < _repriceThreshold) {
         return;
     }
+    const std::string_view action   = OrderAction(bidOrder);
+    const int              oldPrice = bidOrder.get_open_price();
+    const int              oldQty   = bidOrder.get_open_qty();
+    if (const uint32_t uid = _hub->UpdateOrder(bidOrder, bidPrice, quantity, _clientUid); uid != 0) {
+        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | BID {} market={} target={} lots=[{}] book=[{}]\n",
+                 PackName(pack_), BIDDING_LEG, _tokens[BIDDING_LEG], SideName(pack_._sides[BIDDING_LEG]), action, uid, oldPrice, bidPrice, oldQty, quantity,
+                 spreadMatched ? "CROSS" : "REST", spreadQuote._spread, targetSpread, LotsText(pack_), BookText());
+        pack_._bidSnapshot = spreadQuote;  // hedges start from the prices this bid was priced on
+    }
+}
 
-    if (std::abs(restOrder.get_open_price() - restPrice) < _repriceThreshold) {
-        return;
+// Solves signedRatio[0] * price + sum(hedge legs) >= target for leg 0, rounded to the tick away from the
+// market (SELL up, BUY down) so the spread never lands under the target. With a strike gap the sign of the raw
+// market spread picks the AdjustGap branch. Returns <= 0 when no positive price reaches the target.
+auto RatioLegStrategy::TargetBidPrice(const Pack& pack_, const SpreadQuote& spreadQuote_) const -> int {
+    const LegCache& cache       = pack_._cache;
+    long long       rawMarket   = 0;
+    long long       hedgeSpread = 0;
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        const long long legSpread = static_cast<long long>(spreadQuote_._price[leg]) * cache._signedRatio[leg];
+        rawMarket += legSpread;
+        if (leg != BIDDING_LEG) hedgeSpread += legSpread;
     }
-    const std::string_view action   = OrderAction(restOrder);
-    const int              oldPrice = restOrder.get_open_price();
-    const int              oldQty   = restOrder.get_open_qty();
-    if (const uint32_t uid = _hub->UpdateOrder(restOrder, restPrice, quantity, _clientUid); uid != 0) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | REST level={} market={} < target={} lots=[{}] book=[{}]\n",
-                 PackName(pack_), BIDDING_LEG, _tokens[BIDDING_LEG], SideName(pack_._sides[BIDDING_LEG]), action, uid, oldPrice, restPrice, oldQty, quantity,
-                 _allowedBidDepth - 1, spreadQuote._spread, targetSpread, LotsText(pack_), BookText());
-        pack_._bidSnapshot = spreadQuote;
+    long long rawTarget = std::llround(pack_._params._targetSpread);
+    if (_hasStrikeGap) {
+        rawTarget += (rawMarket < 0) ? -_strikeGap : _strikeGap;  // inverse of AdjustGap
     }
+    const double ticks = static_cast<double>(rawTarget - hedgeSpread) / (static_cast<double>(cache._signedRatio[BIDDING_LEG]) * _tickSize);
+    return static_cast<int>(cache._signedRatio[BIDDING_LEG] > 0 ? std::ceil(ticks) : std::floor(ticks)) * _tickSize;
 }
 
 auto RatioLegStrategy::FindThinHedgeLeg(const Pack& pack_) const -> size_t {
@@ -428,10 +417,6 @@ auto RatioLegStrategy::FindThinHedgeLeg(const Pack& pack_) const -> size_t {
         }
     }
     return NO_LEG;
-}
-
-auto RatioLegStrategy::CheckBiddingLegDepth(const Pack& pack_) const -> bool {
-    return CheckPriceDepth(_quote[BIDDING_LEG], _allowedBidDepth, pack_._sides[BIDDING_LEG]);
 }
 
 // ═══ Hedge legs ══════════════════════════════════════════════════════════════
@@ -733,23 +718,23 @@ void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderOb
     const int32_t       errorCode     = response_.hdr_.error_code;
     const int32_t       reasonCode    = response_.hdr_.reason_code;
     const int32_t       exchangeError = response_.packet_.exchange_error_code;
-    WriteLog("[ORDER-IN] {} leg={} token={} {}{} {}({}) uid={} price={} qty={} err={}/{}/{} -> state=0x{:x} open={}@{} filled={} liveUid={}\n",
-             PackName(pack_), leg_, _tokens[leg_], SideName(pack_._sides[leg_]), &order == pack_._iocOrder.get() ? " IOC" : "", TransactionName(code), code, uid, price, quantity,
+    WriteLog("[ORDER-IN] {} leg={} token={} {} {}({}) uid={} price={} qty={} err={}/{}/{} -> state=0x{:x} open={}@{} filled={} liveUid={}\n",
+             PackName(pack_), leg_, _tokens[leg_], SideName(pack_._sides[leg_]), TransactionName(code), code, uid, price, quantity,
              errorCode, reasonCode, exchangeError, order.get_current_state(), order.get_open_qty(), order.get_open_price(), order.get_filled_qty(), order.get_uid());
 }
 
 // Logs when the reason changes, so a quiet strategy still says why it is quiet. While the market spread
 // meets the target but a depth check blocks the order, logs on every evaluation: each one is a missed entry.
-void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int restPrice_) {
-    const bool missedEntry = spreadMatched_ && (gate_ == BidGate::HEDGE_DEPTH || gate_ == BidGate::BID_DEPTH);
+void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int bidPrice_) {
+    const bool missedEntry = spreadMatched_ && gate_ == BidGate::HEDGE_DEPTH;
     if (pack_._bidGate == gate_ && !missedEntry) {
         return;
     }
-    static constexpr std::array<std::string_view, 8> GateNames{"UNKNOWN", "TAKE", "REST", "DONE", "HEDGE_DEPTH", "BID_DEPTH", "NO_PRICE", "BELOW_TARGET"};
+    static constexpr std::array<std::string_view, 6> GateNames{"UNKNOWN", "BID", "DONE", "HEDGE_DEPTH", "NO_PRICE", "UNREACHABLE"};
 
-    WriteLog("[BID-GATE] {} {} -> {} | target={} market={} valid={} matched={} rest=L{}@{} lots=[{}] book=[{}]\n",
+    WriteLog("[BID-GATE] {} {} -> {} | target={} market={} valid={} matched={} bid={} lots=[{}] book=[{}]\n",
              PackName(pack_), GateNames[static_cast<size_t>(pack_._bidGate)], GateNames[static_cast<size_t>(gate_)],
-             pack_._params._targetSpread, spreadQuote_._spread, spreadQuote_._valid, spreadMatched_, _allowedBidDepth - 1, restPrice_, LotsText(pack_), BookText());
+             pack_._params._targetSpread, spreadQuote_._spread, spreadQuote_._valid, spreadMatched_, bidPrice_, LotsText(pack_), BookText());
     switch (gate_) {
         case BidGate::NO_PRICE:
             for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -766,19 +751,8 @@ void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, c
                      DescribeDepth(_quote[thinLeg_], _orderDepth, _priceDepth, takeSide, pack_._cache._requiredHedgeDepth[thinLeg_]), _orderDepth, _priceDepth);
             break;
         }
-        case BidGate::BID_DEPTH: {
-            const ORDER_SIDE ownSide = pack_._sides[BIDDING_LEG];
-            WriteLog("[BID-GATE] {} bidding leg token={} side={}: {} (AllowedBidDepth={})\n",
-                     PackName(pack_), _tokens[BIDDING_LEG], BookSideName(ownSide), DescribeDepth(_quote[BIDDING_LEG], 0, _allowedBidDepth, ownSide, 0), _allowedBidDepth);
-            break;
-        }
-        case BidGate::BELOW_TARGET:
-            if (!REST_WHEN_SPREAD_SHORT) {
-                WriteLog("[BID-GATE] {} market {} < target {}: no order (resting disabled)\n", PackName(pack_), spreadQuote_._spread, pack_._params._targetSpread);
-                break;
-            }
-            WriteLog("[BID-GATE] {} market {} < target {} and rest price {} at level {} also misses target\n",
-                     PackName(pack_), spreadQuote_._spread, pack_._params._targetSpread, restPrice_, _allowedBidDepth - 1);
+        case BidGate::UNREACHABLE:
+            WriteLog("[BID-GATE] {} target {} needs leg 0 price {} <= 0: no order\n", PackName(pack_), pack_._params._targetSpread, bidPrice_);
             break;
         default:
             break;

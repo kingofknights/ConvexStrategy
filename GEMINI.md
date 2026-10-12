@@ -92,10 +92,11 @@ In Ratio Spread strategies (e.g., Ratio 3 : 1 : 2):
 ## 5. Entry Pricing, Partial Fills & Pack Remainder Clamping
 
 ### Entry Pricing (`EvaluateBidding`)
-Gates in order, each named by a `BidGate` and logged as `[BID-GATE]`: `DONE` (no lots left), `NO_PRICE` (a leg has no crossing price), `HEDGE_DEPTH` (`FindThinHedgeLeg`), `BID_DEPTH` (`AllowedBidDepth` priced levels on leg 0's own side), `BELOW_TARGET` (market spread < target). All pass → `TAKE`: **IOC on leg 0 at the crossing touch** (BUY at ask, SELL at bid) via `pack._iocOrder`, a second order object per pack (vendor fixes order type at construction).
-* Resting at level `AllowedBidDepth - 1` when the market misses the target (`REST`) is behind `REST_WHEN_SPREAD_SHORT`, currently `false`. Rest-path dry-run scenarios are in commit `58841ab`.
-* One order on leg 0 at a time: no IOC while one is in flight; a resting bid is cancelled first and its `CANCELLED` sends the IOC.
-* An IOC remainder cancelled by the exchange, like a reject, waits for the next tick.
+Gates in order, each named by a `BidGate` and logged as `[BID-GATE]`: `DONE` (no lots left), `NO_PRICE` (a leg has no crossing price), `HEDGE_DEPTH` (`FindThinHedgeLeg`), `UNREACHABLE` (the target needs a leg 0 price <= 0). All pass → `BID`: **one LIMIT order on leg 0 at the target price** (`TargetBidPrice`): the leg 0 price that makes the spread exactly the target with the hedge legs at their crossing touch, rounded to the tick away from the market (SELL up, BUY down). No price bound.
+* Market spread >= target: the price is at or past the touch, so the order crosses; any remainder rests at that price. Market < target: it rests.
+* Repriced when the target price moves by at least `_repriceThreshold` (`TickSize` × tick size); `_bidSnapshot` is refreshed on every send so hedges start from the prices the bid was priced on.
+* Strike gap (Box, ConRev): the sign of the raw market spread picks the `AdjustGap` branch (raw target = target + gap if raw >= 0, else target − gap).
+* No hedge-slippage cushion: any hedge slip shows as slippage against `AllowedSlippage`. Long/short self-cross on leg 0 is not guarded.
 
 
 ### The Overfill Prevention Decision

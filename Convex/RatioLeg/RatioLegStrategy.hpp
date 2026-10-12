@@ -15,9 +15,10 @@
 
 class MinixStrategy;
 
-// One N-leg ratio spread (2..6 legs). Leg 0 enters by IOC at the touch when the market spread meets the
-// target, else rests at the AllowedBidDepth level while that price meets it; when a whole pack fills,
-// the other legs are hedged at once. The long and short directions run as independent packs.
+// One N-leg ratio spread (2..6 legs). Leg 0 bids with one LIMIT order at the price that makes the spread
+// exactly the target with the other legs at their crossing touch: it crosses when the market beats the
+// target and rests when it misses. When a whole pack fills, the other legs are hedged at once.
+// The long and short directions run as independent packs.
 class RatioLegStrategy {
   public:
     static constexpr size_t MAX_LEGS = 6;
@@ -76,15 +77,13 @@ class RatioLegStrategy {
     using LegArray = std::array<T, MAX_LEGS>;
 
     // Why the bidding leg is (not) quoting. Logged only when it changes, so a silent strategy explains itself.
-    // TAKE: market spread meets target, IOC at the touch. REST: passive at the AllowedBidDepth level meets it.
+    // BID: leg 0 order works at the target price. UNREACHABLE: the target needs a leg 0 price <= 0.
     enum class BidGate : uint8_t { UNKNOWN,
-                                   TAKE,
-                                   REST,
+                                   BID,
                                    DONE,
                                    HEDGE_DEPTH,
-                                   BID_DEPTH,
                                    NO_PRICE,
-                                   BELOW_TARGET };
+                                   UNREACHABLE };
 
     struct PackParams {
         int   _totalPacks   = 0;  // packs to trade in total
@@ -107,7 +106,6 @@ class RatioLegStrategy {
         PackParams                _params;
         LegCache                  _cache;
         LegArray<OrderObjectPtrT> _orders;
-        OrderObjectPtrT           _iocOrder;  // bidding leg IOC, sent when the market spread meets the target
         LegArray<int32_t>         _tradedLots{};
         LegArray<uint64_t>        _tradedValue{};
         LegArray<int32_t>         _unreportedLots{};  // fills not yet reported as whole packs to the tracer
@@ -136,10 +134,7 @@ class RatioLegStrategy {
     };
 
     static constexpr size_t NO_LEG      = std::numeric_limits<size_t>::max();
-    static constexpr size_t BIDDING_LEG = 0;  // leg 0 always rests the bid; other legs hedge
-    // ponytail: resting at AllowedBidDepth when the market spread misses the target is off for now; only the IOC
-    // enters. Set true to re-enable; the rest-path dry-run scenarios are in commit 58841ab.
-    static constexpr bool REST_WHEN_SPREAD_SHORT = false;
+    static constexpr size_t BIDDING_LEG = 0;  // leg 0 always bids; other legs hedge
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
@@ -166,7 +161,7 @@ class RatioLegStrategy {
     // ── Diagnostics: every request sent, every response, every state change ───
     void PullOrder(Pack& pack_, size_t leg_, std::string_view reason_);
     void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_);
-    void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int restPrice_);
+    void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int bidPrice_);
 
     void ParseLegs(const nlohmann::json& json_);
     void LoadProductDetails();
@@ -179,7 +174,7 @@ class RatioLegStrategy {
     // ── Entry (bidding leg) ───────────────────────────────────────────────────
     void               EvaluateBidding(Pack& pack_);
     [[nodiscard]] auto FindThinHedgeLeg(const Pack& pack_) const -> size_t;  // NO_LEG when every hedge leg has depth
-    [[nodiscard]] auto CheckBiddingLegDepth(const Pack& pack_) const -> bool;
+    [[nodiscard]] auto TargetBidPrice(const Pack& pack_, const SpreadQuote& spreadQuote_) const -> int;
 
     // ── Hedge legs ────────────────────────────────────────────────────────────
     void HedgePack(Pack& pack_);
@@ -224,7 +219,6 @@ class RatioLegStrategy {
     size_t _repriceTicks       = 0;
     size_t _orderDepth         = 0;
     size_t _priceDepth         = 0;
-    size_t _allowedBidDepth    = 0;
     int    _hedgeDepthPercent  = 0;
     int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;

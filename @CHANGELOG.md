@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Leg 0 enters by IOC at the crossing touch when the market spread meets the target (`_iocOrder`, one per pack). Resting at the `AllowedBidDepth` level when the spread misses the target is behind `REST_WHEN_SPREAD_SHORT`, currently `false`.
+- Reverse bid: leg 0 bids with one LIMIT order at the price that makes the spread exactly the target, with the hedge legs at their crossing touch (`TargetBidPrice`), rounded away from the market. It crosses when the market beats the target and rests when it misses, and is repriced by `TickSize` ticks. The IOC order, `REST_WHEN_SPREAD_SHORT` and the `AllowedBidDepth` gate are removed; `AllowedBidDepth` is ignored. Gates: `BID`, `DONE`, `HEDGE_DEPTH`, `NO_PRICE`, `UNREACHABLE`.
 - `Stop()` sets status ACTIVE instead of INACTIVE: a stopped strategy keeps market data and UI reports, sends no new entries until re-APPLIED, and still hedges until flat. INACTIVE on code `100001` now means the strategy does not exist. The dry run's STOP scenarios assert ACTIVE.
 - `ExternalOrderResponse._errorCode` (code `100003`) takes the OMS reason code for header error -9994, the exchange error code for -9995, and the header error code for other negative errors.
 - `StrategySpreadUpdate._reserved` carries the ticks processed by each strategy since the last send.
