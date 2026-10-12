@@ -18,8 +18,10 @@ class MinixStrategy;
 
 // One N-leg ratio spread (2..6 legs). Leg 0 bids with one LIMIT order at the price that makes the spread
 // exactly the target with the other legs at their crossing touch: it crosses when the market beats the
-// target and rests when it misses. When a whole pack fills, the other legs are hedged at once. Leg 0 lots that
-// stay short of a whole pack for TimeToRevertBidMs are bought (or sold) back.
+// target and rests when it misses. When a whole pack fills, the other legs are hedged at once.
+// A pack is never left naked: while any leg holds lots beyond the completed packs, the strategy alternates every
+// TimeToRevertBidMs between completing the pack (hedge, or bid the rest of leg 0) and reverse-cutting the extra
+// lots of every leg with IOCs, until the pack is whole again. This runs in any status.
 // The long and short directions run as independent packs.
 class RatioLegStrategy {
   public:
@@ -51,6 +53,11 @@ class RatioLegStrategy {
     void ParamUpdate(const nlohmann::json& json_);
     void SetStatus(StrategyStatus status_);
     void Stop(std::string_view reason_);
+    void Forget(std::string_view reason_);  // after a square-off flattened the account: stop and drop every position
+    void MarkDeleted() { _deleted = true; }  // erased by the hub once IsIdle(); a later SetStatus revives it
+
+    [[nodiscard]] auto IsDeleted() const -> bool { return _deleted; }
+    [[nodiscard]] auto IsIdle() const -> bool;  // every pack whole and no order working or in flight
 
     void OnTick(const Quote& quote_);
     void OnOrderResponse(const oms_transaction& response_);
@@ -118,8 +125,8 @@ class RatioLegStrategy {
         LegArray<bool>            _hedgeWaiting{};      // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
         SpreadQuote               _bidSnapshot;         // leg prices when the bidding order was last sent
-        OrderObjectPtrT           _unwindOrder;         // IOC on the opposite side of leg 0: closes a part pack
-        std::chrono::steady_clock::time_point _partialSince{};  // when leg 0 first held a part pack; zero when whole
+        LegArray<OrderObjectPtrT> _cutOrders;           // IOC on the opposite side of each leg: reverse-cuts extra lots
+        std::chrono::steady_clock::time_point _incompleteSince{};  // when the pack stopped being whole; zero when whole
     };
 
     // Net buy/sell position of one leg across both packs.
@@ -139,6 +146,7 @@ class RatioLegStrategy {
 
     static constexpr size_t NO_LEG      = std::numeric_limits<size_t>::max();
     static constexpr size_t BIDDING_LEG = 0;  // leg 0 always bids; other legs hedge
+    static constexpr int    DEFAULT_REVERT_BID_MS = 1000;  // TimeToRevertBidMs 0 would leave a pack naked forever
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
@@ -164,7 +172,7 @@ class RatioLegStrategy {
 
     // ── Diagnostics: every request sent, every response, every state change ───
     void PullOrder(Pack& pack_, size_t leg_, std::string_view reason_);
-    void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_);
+    void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_);
     void SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, const SpreadQuote& spreadQuote_, bool spreadMatched_, int bidPrice_);
 
     void ParseLegs(const nlohmann::json& json_);
@@ -186,10 +194,12 @@ class RatioLegStrategy {
     void UpdateUnhedgedStatus(Pack& pack_);
     void CheckSlippageThreshold(Pack& pack_, const oms_transaction& response_);
 
-    // ── Part-pack unwind ──────────────────────────────────────────────────────
-    [[nodiscard]] auto PartialPackExpired(Pack& pack_) -> bool;
-    void               UnwindPartialPack(Pack& pack_);
-    void               OnUnwindTrade(Pack& pack_, const oms_transaction& response_);
+    // ── Reverse cut: lots beyond the completed packs ──────────────────────────
+    [[nodiscard]] auto ExtraLots(const Pack& pack_, size_t leg_) const noexcept -> int;
+    [[nodiscard]] auto IsWhole(const Pack& pack_) const noexcept -> bool;
+    [[nodiscard]] auto InCutWindow(Pack& pack_) -> bool;
+    void               CutPack(Pack& pack_);
+    void               OnCutTrade(Pack& pack_, size_t leg_, const oms_transaction& response_);
 
     // ── Pricing / PnL ─────────────────────────────────────────────────────────
     [[nodiscard]] auto QuoteSpread(const LegCache& cache_) const -> SpreadQuote;
@@ -232,7 +242,7 @@ class RatioLegStrategy {
     int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;
-    int    _revertBidMs        = 0;  // 0: never unwind a part pack
+    int    _revertBidMs        = DEFAULT_REVERT_BID_MS;  // length of each complete / reverse-cut window
 
     // ── Cached fast-path lookup ───────────────────────────────────────────────
     int              _tradeGearOffset  = 0;  // paise
@@ -240,7 +250,8 @@ class RatioLegStrategy {
     LegArray<double> _buyCostRate{};
     LegArray<double> _sellCostRate{};
 
-    double _unwindPnL = 0.0;  // realized on unwound part packs, after cost (paise x quantity, like GetRLP)
+    double _unwindPnL = 0.0;  // realized on reverse-cut lots, after cost (paise x quantity, like GetRLP)
+    bool   _deleted   = false;
 
     TradeTracer                            _tradeTracer{};
     std::string                            _logFileName;

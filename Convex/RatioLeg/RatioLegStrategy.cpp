@@ -51,10 +51,10 @@ namespace {
         }
     }
 
+    constexpr auto IDLE = static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE);
+
     // What UpdateOrder will send for this order: a new order or a modify.
-    auto OrderAction(const OrderObjectT& order_) noexcept -> std::string_view {
-        return order_.get_current_state() == static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE) ? "PLACE" : "MODIFY";
-    }
+    auto OrderAction(const OrderObjectT& order_) noexcept -> std::string_view { return order_.get_current_state() == IDLE ? "PLACE" : "MODIFY"; }
 
 }  // namespace
 
@@ -103,9 +103,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
 
     for (Pack* pack : {&_longPack, &_shortPack}) {
         for (size_t leg = 0; leg < _legCount; ++leg) {
-            pack->_orders[leg] = std::make_unique<OrderObjectT>(_tokens[leg], pack->_sides[leg], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
+            pack->_orders[leg]    = std::make_unique<OrderObjectT>(_tokens[leg], pack->_sides[leg], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
+            pack->_cutOrders[leg] = std::make_unique<OrderObjectT>(_tokens[leg], Opposite(pack->_sides[leg]), _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::IOC_ORDER_TYPE, _hub);
         }
-        pack->_unwindOrder = std::make_unique<OrderObjectT>(_tokens[BIDDING_LEG], Opposite(pack->_sides[BIDDING_LEG]), _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::IOC_ORDER_TYPE, _hub);
     }
 
     // Subscribe last: a throw above must not leave feeds pointing at a strategy that never existed.
@@ -175,7 +175,8 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _allowedSlippage    = params.value("AllowedSlippage", 0);
         _tradeGear          = params.value("TradeGear", 0);
         _marketOrderRetries = params.value("MarketRetries", 0U);
-        _revertBidMs        = std::max(params.value("TimeToRevertBidMs", 0), 0);
+        const int revertBidMs = params.value("TimeToRevertBidMs", 0);
+        _revertBidMs          = revertBidMs > 0 ? revertBidMs : DEFAULT_REVERT_BID_MS;
 
         WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
@@ -223,6 +224,7 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
         return;
     }
     _status             = status_;
+    _deleted            = false;
     _longPack._bidGate  = BidGate::UNKNOWN;  // log the first gate under the new status
     _shortPack._bidGate = BidGate::UNKNOWN;
     std::cout << "[RatioLeg:SetStatus] strat=" << _strategyId << " _status=" << static_cast<int>(_status)
@@ -235,16 +237,45 @@ void RatioLegStrategy::Stop(std::string_view reason_) {
     WriteLog("[RatioLeg:Stop] strat={} _status=ACTIVE reason='{}' long_unhedged={} short_unhedged={} long_lots=[{}] short_lots=[{}]\n",
              _strategyId, reason_, _longPack._isUnhedged, _shortPack._isUnhedged, LotsText(_longPack), LotsText(_shortPack));
 
-    // Stop new entries only. An unhedged pack keeps its hedge orders working until flat,
+    // Stop new entries only. A pack that is not whole keeps completing or cutting until it is,
     // so stopping never leaves a naked leg. A cancel refused here is retried by ProcessPack.
     for (Pack* pack : {&_longPack, &_shortPack}) {
         for (size_t leg = 0; leg < _legCount; ++leg) {
-            if (leg != BIDDING_LEG && pack->_isUnhedged) continue;
+            if (leg != BIDDING_LEG && !IsWhole(*pack)) continue;
             PullOrder(*pack, leg, reason_);
             pack->_hedgeRetryCount[leg] = 0;
         }
         pack->_bidGate = BidGate::UNKNOWN;
     }
+}
+
+// The square-off flattened every position from the trade DB, this strategy's too: drop them, so no hedge or
+// cut acts on lots that are gone. The packs then read whole, so Stop() pulls every working order.
+// ponytail: fills the DB had not seen at square-off time are dropped too; flatten from strategy counts if that bites.
+void RatioLegStrategy::Forget(std::string_view reason_) {
+    WriteLog("[RatioLeg:Forget] strat={} reason='{}' dropping long_lots=[{}] short_lots=[{}]\n", _strategyId, reason_, LotsText(_longPack), LotsText(_shortPack));
+    for (Pack* pack : {&_longPack, &_shortPack}) {
+        pack->_tradedLots.fill(0);
+        pack->_tradedValue.fill(0);
+        pack->_unreportedLots.fill(0);
+        pack->_unreportedValue.fill(0);
+        pack->_hedgeRetryCount.fill(0);
+        pack->_hedgeWaiting.fill(false);
+        pack->_isUnhedged      = false;
+        pack->_tradedSpread    = 0.0;
+        pack->_incompleteSince = {};
+    }
+    Stop(reason_);
+}
+
+auto RatioLegStrategy::IsIdle() const -> bool {
+    for (const Pack* pack : {&_longPack, &_shortPack}) {
+        if (!IsWhole(*pack)) return false;
+        for (size_t leg = 0; leg < _legCount; ++leg) {
+            if (pack->_orders[leg]->get_current_state() != IDLE || pack->_cutOrders[leg]->get_current_state() != IDLE) return false;
+        }
+    }
+    return true;
 }
 
 // ═══ Events ══════════════════════════════════════════════════════════════════
@@ -273,28 +304,28 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         return;
     }
 
-    // An unwind IOC trades the other pack's side of leg 0, so its uid names its pack (read before a fill resets it).
+    // A cut IOC trades the other pack's side of its leg, so its uid names its pack (read before a fill resets it).
     const uint32_t uid = response_.hdr_.uid_.id_;
-    for (Pack* unwindPack : {&_longPack, &_shortPack}) {
-        OrderObjectT& unwind = *unwindPack->_unwindOrder;
-        if (leg == BIDDING_LEG && unwind.get_uid() != 0 && unwind.get_uid() == uid) {
-            unwind.handle_confirmation(response_);
-            LogResponse(*unwindPack, leg, unwind, response_);
-            if (response_.hdr_.transaction_code == OMS_TRADE) {
-                OnUnwindTrade(*unwindPack, response_);
-            } else if (response_.hdr_.transaction_code != OMS_REQ_REJ) {
-                ProcessPack(*unwindPack);
-            }
-            return;
+    for (Pack* cutPack : {&_longPack, &_shortPack}) {
+        OrderObjectT& cut = *cutPack->_cutOrders[leg];
+        if (cut.get_uid() == 0 || cut.get_uid() != uid) continue;
+        cut.handle_confirmation(response_);
+        LogResponse(*cutPack, leg, cut, response_, true);
+        if (response_.hdr_.transaction_code == OMS_TRADE) {
+            OnCutTrade(*cutPack, leg, response_);
+        } else if (response_.hdr_.transaction_code != OMS_REQ_REJ) {
+            ProcessPack(*cutPack);
         }
+        return;
     }
 
     // Long and short packs trade opposite sides of every leg, so the side names the pack.
     Pack&         pack  = (side == _longPack._sides[leg]) ? _longPack : _shortPack;
     OrderObjectT& order = *pack._orders[leg];
 
-    order.handle_confirmation(response_);
-    LogResponse(pack, leg, order, response_);
+    // Only the order a response answers updates its state: a late reject of an old uid must not reset a newer order.
+    if (order.get_uid() == uid) order.handle_confirmation(response_);
+    LogResponse(pack, leg, order, response_, false);
 
     switch (response_.hdr_.transaction_code) {
         case OMS_TRADE:
@@ -310,17 +341,34 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     }
 }
 
-// Hedge first; then close a part pack that waited too long, in any status; quote only while APPLIED;
-// otherwise keep the bid pulled (retries a cancel Stop() could not send).
+// A whole pack quotes while APPLIED. A pack that is not whole alternates, in any status, between completing
+// (hedge the legs, or let the bid finish leg 0's part pack) and reverse-cutting the extra lots, each for
+// TimeToRevertBidMs, until it is whole. A cut IOC in flight pauses the pack until it is answered.
 void RatioLegStrategy::ProcessPack(Pack& pack_) {
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (pack_._cutOrders[leg]->get_current_state() != IDLE) return;
+    }
+    const bool isWhole = IsWhole(pack_);
+    if (isWhole) {
+        pack_._incompleteSince = {};
+    } else if (InCutWindow(pack_)) {
+        // A hedge that could not fill in a whole window would fail again on re-entry: stop. A part pack keeps bidding.
+        if (pack_._isUnhedged && IsActive()) Stop("hedge failed, reverse cut");
+        CutPack(pack_);
+        return;
+    }
     if (pack_._isUnhedged) {
         HedgePack(pack_);
-    } else if (PartialPackExpired(pack_)) {
-        UnwindPartialPack(pack_);
-    } else if (IsActive()) {
+        return;
+    }
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BIDDING_LEG) PullOrder(pack_, leg, "no hedge needed");
+    }
+    const bool hasPartLots = pack_._tradedLots[BIDDING_LEG] % _ratios[BIDDING_LEG] != 0;
+    if (IsActive() && (isWhole || hasPartLots)) {
         EvaluateBidding(pack_);
     } else {
-        PullOrder(pack_, BIDDING_LEG, "strategy not APPLIED");
+        PullOrder(pack_, BIDDING_LEG, IsActive() ? "pack not whole, waiting to cut" : "strategy not APPLIED");
     }
 }
 
@@ -490,7 +538,8 @@ void RatioLegStrategy::ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedge
     const int retryOffset    = isAggressive ? 0 : static_cast<int>(retryCount) * _tickSize;
     const int sideMultiplier = (pack_._sides[leg_] == BUY_SIDE) ? 1 : -1;
     const int targetPrice    = std::max(basePrice + sideMultiplier * (_tradeGearOffset + retryOffset), _tickSize);
-    const int quantity       = std::min(missingLots * _lotSize, pack_._cache._sliceQuantity[leg_]);
+    // Sliced like the bid, but never below one pack: SoQ 0 must not leave the hedge unsent.
+    const int quantity       = std::min(missingLots * _lotSize, std::max(pack_._cache._sliceQuantity[leg_], _ratios[leg_] * _lotSize));
 
     OrderObjectT&          order    = *pack_._orders[leg_];
     const std::string_view action   = OrderAction(order);
@@ -554,84 +603,88 @@ void RatioLegStrategy::CheckSlippageThreshold(Pack& pack_, const oms_transaction
     }
 }
 
-// ═══ Part-pack unwind ════════════════════════════════════════════════════════
+// ═══ Reverse cut ═════════════════════════════════════════════════════════════
 
-// Hedges cover whole packs only, so leg 0 lots short of a whole pack are naked. The clock starts at the first such
-// lot and is not reset by more part fills, so the naked time is bounded by TimeToRevertBidMs.
-// ponytail: checked on ticks and responses only; a silent feed delays the unwind until the next tick.
-auto RatioLegStrategy::PartialPackExpired(Pack& pack_) -> bool {
-    using Clock = std::chrono::steady_clock;
-    if (pack_._tradedLots[BIDDING_LEG] % _ratios[BIDDING_LEG] == 0) {
-        pack_._partialSince = {};
-        return false;
+// Lots a leg holds beyond the completed packs: naked until the pack completes or they are cut.
+auto RatioLegStrategy::ExtraLots(const Pack& pack_, size_t leg_) const noexcept -> int {
+    return pack_._tradedLots[leg_] - CompletedPacks(pack_) * _ratios[leg_];
+}
+
+auto RatioLegStrategy::IsWhole(const Pack& pack_) const noexcept -> bool {
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (ExtraLots(pack_, leg) != 0) return false;
     }
+    return true;
+}
+
+// The clock starts when the pack stops being whole and is not reset until it is whole again. Windows of
+// TimeToRevertBidMs alternate: even ones complete the pack, odd ones cut it.
+// ponytail: checked on ticks and responses only; a silent feed delays the switch until the next event.
+auto RatioLegStrategy::InCutWindow(Pack& pack_) -> bool {
+    using Clock                 = std::chrono::steady_clock;
     const Clock::time_point now = Clock::now();
-    if (pack_._partialSince == Clock::time_point{}) {
-        pack_._partialSince = now;
+    if (pack_._incompleteSince == Clock::time_point{}) {
+        pack_._incompleteSince = now;
     }
-    return _revertBidMs > 0 && now - pack_._partialSince >= std::chrono::milliseconds(_revertBidMs);
+    return (now - pack_._incompleteSince) / std::chrono::milliseconds(_revertBidMs) % 2 == 1;
 }
 
-// Pull the rest of the bid first: a fill racing the cancel may still complete the pack. Then cross the touch
-// with an IOC for the part lots, again on every evaluation until none are left.
-void RatioLegStrategy::UnwindPartialPack(Pack& pack_) {
-    static constexpr auto IDLE = static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE);
-    if (pack_._orders[BIDDING_LEG]->get_current_state() != IDLE) {
-        PullOrder(pack_, BIDDING_LEG, "part pack expired");
-        return;
-    }
-    OrderObjectT& unwind = *pack_._unwindOrder;
-    if (unwind.get_current_state() != IDLE) {
-        return;  // IOC in flight
-    }
+// Pull the pack's own order on a leg first (it would trade against the cut), then IOC the leg's extra lots
+// across the touch. Repeats on every evaluation until no leg has extra lots.
+void RatioLegStrategy::CutPack(Pack& pack_) {
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (pack_._orders[leg]->get_current_state() != IDLE) {
+            PullOrder(pack_, leg, "reverse cut");
+            continue;
+        }
+        const int lots = ExtraLots(pack_, leg);
+        if (lots <= 0) continue;
 
-    // The unwind takes the book side the bid rested on (a SELL bid is bought back from the asks).
-    const ORDER_SIDE bidSide = pack_._sides[BIDDING_LEG];
-    const int        touch   = GetPrice(_quote[BIDDING_LEG], bidSide, 0);
-    if (touch <= 0) {
-        return;  // no price to cross
-    }
-    const int lots     = pack_._tradedLots[BIDDING_LEG] % _ratios[BIDDING_LEG];
-    const int price    = std::max(touch + (bidSide == SELL_SIDE ? _tradeGearOffset : -_tradeGearOffset), _tickSize);
-    const int quantity = lots * _lotSize;
-    if (const uint32_t uid = _hub->UpdateOrder(unwind, price, quantity, _clientUid); uid != 0) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} PLACE IOC uid={} price={} qty={} | UNWIND part pack after {} ms lots=[{}] book=[{}]\n",
-                 PackName(pack_), BIDDING_LEG, _tokens[BIDDING_LEG], SideName(Opposite(bidSide)), uid, price, quantity,
-                 _revertBidMs, LotsText(pack_), BookText());
+        // The cut takes the book side the position was opened on (a SELL is bought back from the asks).
+        const ORDER_SIDE heldSide = pack_._sides[leg];
+        const int        touch    = GetPrice(_quote[leg], heldSide, 0);
+        if (touch <= 0) continue;  // no price to cross
+        const int price    = std::max(touch + (heldSide == SELL_SIDE ? _tradeGearOffset : -_tradeGearOffset), _tickSize);
+        const int quantity = lots * _lotSize;
+        if (const uint32_t uid = _hub->UpdateOrder(*pack_._cutOrders[leg], price, quantity, _clientUid); uid != 0) {
+            WriteLog("[ORDER-OUT] {} leg={} token={} {} PLACE IOC uid={} price={} qty={} | REVERSE-CUT {} extra lots, lots=[{}] book=[{}]\n",
+                     PackName(pack_), leg, _tokens[leg], SideName(Opposite(heldSide)), uid, price, quantity, lots, LotsText(pack_), BookText());
+        }
     }
 }
 
-// Removes the unwound lots from leg 0 at its average price, so the pack again holds whole packs and the bid
-// can trade them again; the round trip is booked in _unwindPnL.
-void RatioLegStrategy::OnUnwindTrade(Pack& pack_, const oms_transaction& response_) {
+// Removes the cut lots from the leg at its average price; the round trip is booked in _unwindPnL.
+void RatioLegStrategy::OnCutTrade(Pack& pack_, size_t leg_, const oms_transaction& response_) {
     const int32_t price    = response_.packet_.price_;
     const int32_t quantity = response_.packet_.quantity_;
-    const int32_t lots     = std::min(quantity / _lotSize, pack_._tradedLots[BIDDING_LEG] % _ratios[BIDDING_LEG]);
-    if (lots <= 0) {
-        WriteLog("[UNWIND] {} WARNING trade qty={} covers no part-pack lot; ignored\n", PackName(pack_), quantity);
-        return;
+    const int32_t lots     = std::min(quantity / _lotSize, pack_._tradedLots[leg_]);
+    if (lots * _lotSize != quantity) {
+        WriteLog("[CUT] {} leg={} WARNING trade qty={} but {} lots held: {} units not counted\n", PackName(pack_), leg_, quantity, pack_._tradedLots[leg_], quantity - lots * _lotSize);
     }
-    // The part lots are always unreported: reports take whole packs only.
-    const auto removeLots = [&](int32_t& heldLots_, uint64_t& heldValue_) -> double {
-        const double removed = static_cast<double>(heldValue_) * lots / heldLots_;
-        heldValue_ -= static_cast<uint64_t>(std::llround(removed));
-        heldLots_ -= lots;
-        return removed;
-    };
-    const double entryValue = removeLots(pack_._tradedLots[BIDDING_LEG], pack_._tradedValue[BIDDING_LEG]);
-    removeLots(pack_._unreportedLots[BIDDING_LEG], pack_._unreportedValue[BIDDING_LEG]);
+    if (lots > 0) {
+        const auto removeLots = [](int32_t& heldLots_, uint64_t& heldValue_, int32_t removeLots_) -> double {
+            if (heldLots_ <= 0 || removeLots_ <= 0) return 0.0;
+            const double removed = static_cast<double>(heldValue_) * removeLots_ / heldLots_;
+            heldValue_ -= static_cast<uint64_t>(std::llround(removed));
+            heldLots_ -= removeLots_;
+            return removed;
+        };
+        const double entryValue = removeLots(pack_._tradedLots[leg_], pack_._tradedValue[leg_], lots);
+        removeLots(pack_._unreportedLots[leg_], pack_._unreportedValue[leg_], std::min(lots, pack_._unreportedLots[leg_]));
 
-    const double exitValue = static_cast<double>(price) * lots * _lotSize;
-    const bool   soldFirst = pack_._sides[BIDDING_LEG] == SELL_SIDE;
-    const double sellValue = soldFirst ? entryValue : exitValue;
-    const double buyValue  = soldFirst ? exitValue : entryValue;
-    const double pnl       = sellValue - buyValue -
-                       sellValue * (_isOption[BIDDING_LEG] ? OptionSellCost : FutureSellCost) -
-                       buyValue * (_isOption[BIDDING_LEG] ? OptionBuyCost : FutureBuyCost);
-    _unwindPnL += pnl;
+        const double exitValue = static_cast<double>(price) * lots * _lotSize;
+        const bool   soldFirst = pack_._sides[leg_] == SELL_SIDE;
+        const double sellValue = soldFirst ? entryValue : exitValue;
+        const double buyValue  = soldFirst ? exitValue : entryValue;
+        const double pnl       = sellValue - buyValue -
+                           sellValue * (_isOption[leg_] ? OptionSellCost : FutureSellCost) -
+                           buyValue * (_isOption[leg_] ? OptionBuyCost : FutureBuyCost);
+        _unwindPnL += pnl;
 
-    WriteLog("[UNWIND] {} {} {} lots @{} (entry avg {:.2f}) pnl={:.0f} total={:.0f} | lots=[{}]\n",
-             PackName(pack_), SideName(Opposite(pack_._sides[BIDDING_LEG])), lots, price, entryValue / (lots * _lotSize), pnl, _unwindPnL, LotsText(pack_));
+        UpdateUnhedgedStatus(pack_);  // leg 0 or a hedge leg changed
+        WriteLog("[CUT] {} leg={} {} {} lots @{} (entry avg {:.2f}) pnl={:.0f} total={:.0f} | lots=[{}] unhedged={}\n",
+                 PackName(pack_), leg_, SideName(Opposite(pack_._sides[leg_])), lots, price, entryValue / (lots * _lotSize), pnl, _unwindPnL, LotsText(pack_), pack_._isUnhedged);
+    }
     ProcessPack(pack_);
 }
 
@@ -811,7 +864,7 @@ void RatioLegStrategy::PullOrder(Pack& pack_, size_t leg_, std::string_view reas
 }
 
 // One line per OMS response: what arrived, and the order state it left behind.
-void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_) {
+void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_) {
     const OrderObjectT& order         = order_;
     const int32_t       code          = response_.hdr_.transaction_code;
     const uint32_t      uid           = response_.hdr_.uid_.id_;
@@ -820,9 +873,8 @@ void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderOb
     const int32_t       errorCode     = response_.hdr_.error_code;
     const int32_t       reasonCode    = response_.hdr_.reason_code;
     const int32_t       exchangeError = response_.packet_.exchange_error_code;
-    const bool          isUnwind      = &order == pack_._unwindOrder.get();
     WriteLog("[ORDER-IN] {} leg={} token={} {}{} {}({}) uid={} price={} qty={} err={}/{}/{} -> state=0x{:x} open={}@{} filled={} liveUid={}\n",
-             PackName(pack_), leg_, _tokens[leg_], SideName(isUnwind ? Opposite(pack_._sides[leg_]) : pack_._sides[leg_]), isUnwind ? " UNWIND" : "", TransactionName(code), code, uid, price, quantity,
+             PackName(pack_), leg_, _tokens[leg_], SideName(isCut_ ? Opposite(pack_._sides[leg_]) : pack_._sides[leg_]), isCut_ ? " CUT" : "", TransactionName(code), code, uid, price, quantity,
              errorCode, reasonCode, exchangeError, order.get_current_state(), order.get_open_qty(), order.get_open_price(), order.get_filled_qty(), order.get_uid());
 }
 

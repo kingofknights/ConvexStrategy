@@ -68,7 +68,16 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
         return;
     }
     if (request_.header.message_code == UiMessageCode_SQUARE_OFF) {
-        _squareOff->Start(request_.header.interface_id);
+        // Strategies stop first, so none opens or hedges against the flatten. Once the square-off owns the
+        // positions they drop theirs, else a pending hedge or cut would re-open a leg it just closed.
+        for (const auto& [strategyId, strategy] : _strategies) {
+            strategy->Stop("GUI square-off");
+        }
+        if (_squareOff->Start(request_.header.interface_id)) {
+            for (const auto& [strategyId, strategy] : _strategies) {
+                strategy->Forget("GUI square-off");
+            }
+        }
         return;
     }
     if (request_.header.message_code != UiMessageCode_STRATEGY_CONFIG) {
@@ -180,9 +189,10 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
             std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyId << std::endl;
             iterator->second->Stop("GUI STOP");
         } else if (status == "DELETED" || status == "DELETE") {
-            std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << std::endl;
+            // Erased by doWork once every pack is whole and no order is live: a bid in flight may still fill.
+            std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << " once idle" << std::endl;
             iterator->second->Stop("GUI DELETE");
-            _strategies.erase(iterator);
+            iterator->second->MarkDeleted();
         }
     } catch (const std::exception& e) {
         std::cout << "[handleRatioLegStrategy] failed: " << e.what() << std::endl;
@@ -218,6 +228,17 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
 void MinixStrategy::onBcastData(const aef::infra::product::product_data& product_details_) { _squareOff->OnBcast(product_details_); }
 
 auto MinixStrategy::doWork() -> int {
+    for (auto iterator = _strategies.begin(); iterator != _strategies.end();) {
+        RatioLegStrategy& strategy = *iterator->second;
+        if (!strategy.IsDeleted() || !strategy.IsIdle()) {
+            ++iterator;
+            continue;
+        }
+        std::cout << "[doWork] strat=" << iterator->first << " deleted: flat and idle" << std::endl;
+        SendToUi(UiMessageCode_STRATEGY_STATUS, strategy.GetInterface(), StrategyStatusUpdate{iterator->first, StrategyStatus_INACTIVE});
+        iterator = _strategies.erase(iterator);
+    }
+
     // steady_clock: a wall-clock step (NTP) must not stall or burst the UI echo.
     const auto now = std::chrono::steady_clock::now();
     if (now - _lastSpreadSend >= std::chrono::seconds(1)) {

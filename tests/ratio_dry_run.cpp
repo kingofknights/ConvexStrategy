@@ -63,6 +63,12 @@ namespace exchange {
     std::map<int32_t, int32_t>     dbPositions;  // what the fake trade DB returns to square-off
     MinixStrategy*                 hub               = nullptr;
 
+    // New orders on rejectToken are acked, then rejected with rejectCode: once, or every time while rejectForever.
+    int  rejectToken   = 0;
+    int  rejectCode    = EXCHG_ERROR;
+    bool rejectForever = false;
+    int  rejectCount   = 0;
+
     auto Respond(const oms_transaction& request_, int code_, int price_, int quantity_) -> void {
         oms_transaction response    = request_;
         response.hdr_.transaction_code = code_;
@@ -126,6 +132,15 @@ namespace exchange {
             const uint32_t uid = request.hdr_.uid_.id_;
             switch (request.hdr_.transaction_code) {
                 case OMS_PLACE_REQ:
+                    if (request.packet_.product_id_ == rejectToken) {
+                        Respond(request, OMS_ORDER_PLACED, request.packet_.price_, request.packet_.quantity_);
+                        oms_transaction reject = request;
+                        reject.hdr_.error_code = rejectCode;
+                        ++rejectCount;
+                        if (!rejectForever) rejectToken = 0;
+                        Respond(reject, OMS_REQ_REJ, request.packet_.price_, request.packet_.quantity_);
+                        break;
+                    }
                     live[uid] = LiveOrder{request, request.packet_.price_, request.packet_.quantity_, 0, static_cast<int>(request.hdr_.uid_.composite_id_.strategy_id)};
                     Respond(request, OMS_ORDER_PLACED, request.packet_.price_, request.packet_.quantity_);
                     Respond(request, OMS_ORDER_CONFIRMED, request.packet_.price_, request.packet_.quantity_);
@@ -605,6 +620,147 @@ void PartialPackUnwinds() {
     std::printf("  part pack: 1 of 3 lots sold @525, bought back @510 after 20 ms, 2 whole packs traded after\n");
 }
 
+// Count of new orders a strategy sent on a token, of one side.
+auto PlacesOf(int strategy_, int token_, ORDER_SIDE side_) -> int {
+    int count = 0;
+    for (const auto& request : exchange::sent) {
+        count += request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
+                 request.hdr_.transaction_code == OMS_PLACE_REQ && request.packet_.flags_.order_side == side_;
+    }
+    return count;
+}
+
+// A hedge rejected with a code the vendor had no branch for (INVALID_PRICE) stayed in flight forever. Now it is retried.
+void UnhandledRejectRetries() {
+    constexpr int ID = 25;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::rejectToken = LEG2;
+    exchange::rejectCode  = INVALID_PRICE;
+    exchange::Tick(LEG0, 525, 535, false);  // one pack: the bid crosses, leg2's first hedge is rejected
+    SendConfig(RatioConfig(ID, "Stop"));
+    exchange::Tick(LEG2, 315, 325);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::rejectCode = EXCHG_ERROR;
+    std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried on the next tick, pack whole\n");
+}
+
+// Leg2's hedge is refused every time (price band). After TimeToRevertBidMs the pack is cut back: leg 0 bought back, leg1 sold,
+// and the strategy stops, so it does not re-enter into the same failing hedge.
+void FailedHedgeIsCut() {
+    constexpr int  ID                     = 26;
+    nlohmann::json config                 = RatioConfig(ID, "Applied");
+    config["Params"]["TimeToRevertBidMs"] = 20;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::rejectToken   = LEG2;
+    exchange::rejectForever = true;
+    exchange::rejectCount   = 0;
+    exchange::Tick(LEG0, 525, 535);
+    for (int i = 0; i < 5; ++i) exchange::Tick(LEG2, 315, 325);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);  // complete window: naked, retrying
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    exchange::Tick(LEG2, 315, 325);  // cut window: BUY 3 leg0 @535 ask, SELL 1 leg1 @770 bid
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    CHECK(PlacesOf(ID, LEG0, BUY_SIDE) == 1 && PlacesOf(ID, LEG1, SELL_SIDE) == 1 && exchange::LiveOrdersOf(ID) == 0);
+    const int rejects = exchange::rejectCount;
+    for (int i = 0; i < 5; ++i) TickAllLegs();  // market 145 still meets the target 140
+    CHECK(exchange::rejectCount == rejects && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);  // stopped: no re-entry
+    exchange::rejectToken   = 0;
+    exchange::rejectForever = false;
+    std::printf("  failed hedge: leg2 rejected %d times, cut after 20 ms: leg0 bought back, leg1 sold, flat, stopped\n", rejects);
+}
+
+// The cut cannot fill leg 0 (no asks), only leg1. The next complete window re-hedges leg1 and, once asks return, leg2.
+void AlternatesUntilWhole() {
+    constexpr int  ID                     = 27;
+    nlohmann::json config                 = RatioConfig(ID, "Applied");
+    config["Params"]["TimeToRevertBidMs"] = 20;
+    config["Params"]["MarketRetries"]     = 0;  // hedges take the touch at once: no leg2 ask, no leg2 order
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::Tick(LEG2, 315, 0, false);
+    exchange::Pump();  // bid fills, leg1 hedged, leg2 waits for an ask
+    config["Strategy"]["Status"] = "Stop";
+    SendConfig(config);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
+
+    exchange::Tick(LEG0, 525, 0);  // leg 0 asks gone too
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    exchange::Tick(LEG1, 770, 780);  // cut window: leg1 sold back, leg 0 has no ask to buy from
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    exchange::Tick(LEG1, 770, 780);  // complete window: leg1 bought again
+    exchange::Tick(LEG2, 315, 325);  // leg2 asks return: hedged, pack whole
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    exchange::Tick(LEG0, 525, 535);
+    std::printf("  alternation: cut sold leg1 (leg0 had no ask), next complete window re-hedged leg1 and leg2, pack whole\n");
+}
+
+// TimeToRevertBidMs 0 used to mean never: a part pack stayed naked forever once stopped. Now it means 1000 ms.
+void PartPackDefaultRevert() {
+    constexpr int ID = 28;
+    SendConfig(RatioConfig(ID, "Applied"));  // GUI payload: TimeToRevertBidMs 0
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 500, 510);
+    exchange::FillPassive(ID, LEG0, LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    TickAllLegs();
+    CHECK(Position(ID, LEG0) == -LOT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    TickAllLegs();  // cut window: BUY 1 lot @535
+    CHECK(Position(ID, LEG0) == 0 && exchange::LiveOrdersOf(ID) == 0);
+    std::printf("  TimeToRevertBidMs 0: part lot bought back after the 1000 ms default\n");
+}
+
+// DELETE while the bid is in flight: the strategy lives on until its pack is hedged, then the hub erases it.
+void DeleteWaitsUntilWhole() {
+    constexpr int ID = 29;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    SendConfig(RatioConfig(ID, "Delete"), false);
+    exchange::hub->doWork();  // bid in flight: not idle, kept
+    CHECK(LastStatusEcho()._strategyId == ID && LastStatusEcho()._status == StrategyStatus_ACTIVE);
+
+    exchange::Pump();  // bid fills, hedges cross
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    exchange::hub->doWork();  // whole and idle: erased
+    CHECK(LastStatusEcho()._strategyId == ID && LastStatusEcho()._status == StrategyStatus_INACTIVE);
+    TickAllLegs();
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    std::printf("  delete: bid in flight filled and hedged, erased once idle, INACTIVE echoed\n");
+}
+
+// SoQ 0 used to size the hedge at 0 lots, so it was never sent.
+void HedgeIgnoresZeroSlice() {
+    constexpr int  ID                 = 31;
+    nlohmann::json config             = RatioConfig(ID, "Applied");
+    config["Params"]["MarketRetries"] = 0;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::Tick(LEG2, 315, 0, false);
+    exchange::Pump();  // leg2 waits for an ask, no order
+    config["Params"]["LongBuySoQ"] = 0;  // Applied: STOP does not read params. SoQ 0 also means no new bid
+    SendConfig(config);
+    exchange::Tick(LEG2, 315, 325);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  SoQ 0 while unhedged: leg2 hedge still sent for the whole pack\n");
+}
+
 auto StrategyLogBytes() -> uintmax_t {
     uintmax_t bytes = 0;
     for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
@@ -751,6 +907,36 @@ void SquareOffFlattens() {
     std::printf("  square-off: long 130 sold @760, short 65 bought @335, echoed on 5001, flat, repeat press and later broadcasts ignored\n");
 }
 
+// Square-off while a pack waits for its leg2 hedge: strategies stop and drop their positions, so the hedge
+// never re-opens leg2 once the account is flat.
+void SquareOffStopsStrategies() {
+    constexpr int ID = 32;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::Tick(LEG2, 315, 0, false);
+    exchange::Pump();  // leg2 hedge rests with no ask to take
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
+
+    std::map<int, long> squareOffBefore;  // strategy 0 also holds earlier square-off and manual fills
+    for (const int token : {LEG0, LEG1, LEG2}) squareOffBefore[token] = Position(0, token);
+    exchange::dbPositions = {{LEG0, -3 * LOT}, {LEG1, LOT}};
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF;
+    packet.header.interface_id = 7;
+    exchange::hub->onUIRequest(packet);
+    exchange::Pump();  // the strategy's leg2 hedge is cancelled
+    Bcast(LEG0, 515, 545);
+    Bcast(LEG1, 760, 790);
+    exchange::Tick(LEG2, 315, 325);  // asks return
+    TickAllLegs();
+    const auto net = [&](int token_) { return Position(ID, token_) + Position(0, token_) - squareOffBefore[token_]; };
+    CHECK(net(LEG0) == 0 && net(LEG1) == 0 && net(LEG2) == 0);
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    std::printf("  square-off mid-hedge: strategy stopped and forgot its lots, account flat, leg2 never bought\n");
+}
+
 int main() {
     std::ofstream("dry_run_config.json") << R"({"client":1,"algoid":1,"omsid":1})";
 
@@ -782,8 +968,15 @@ int main() {
     UnreachableTargetSendsNothing();
     StrikeGapBackSolve();
     PartialPackUnwinds();
+    UnhandledRejectRetries();
+    FailedHedgeIsCut();
+    AlternatesUntilWhole();
+    PartPackDefaultRevert();
+    DeleteWaitsUntilWhole();
+    HedgeIgnoresZeroSlice();
     QuietTicks();
     ManualOrders();
     SquareOffFlattens();
+    SquareOffStopsStrategies();
     std::printf("all scenarios passed\n");
 }

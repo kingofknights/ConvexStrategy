@@ -363,157 +363,23 @@ void order_instance::handle_confirmation(const oms_transaction& response)
  static_cast<int32_t>(response.hdr_.error_code),static_cast<int32_t>(response.packet_.exchange_error_code),static_cast<uint32_t>(myOrder_.packet_.flags_.order_side) );
 
 
-            switch(response.hdr_.error_code)
+            // Every error code frees the request it answers. A code left unhandled kept the order
+            // in flight forever: it could never be placed, modified or cancelled again.
+            if (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_ORDER_PLACED) & current_state_)
             {
-                case OMS_API_ERROR_CODES::EXCHG_ERROR:
-                {
-                    if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_PLACED) & current_state_)) {
-
-                    context_->LOG_DEBUG(" reset called here"  );
-
-                    reset();
-
-                }
-                else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_))
-                {
-                    current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
-                    current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
-                    notional_open_qty_ = 0;
-
-                    if(pendingCancel_)
-                    {
-
-                        context_->LOG_DEBUG(" cancel called here");
-                       
-                    }
-                }
-                else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_))
-                    {
-                        pendingCancel_ = false;
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
-                    }
-                }
-                break;
-
-                case OMS_API_ERROR_CODES::THROTTLE_LIMIT:
+                reset();  // new order refused: nothing is live
+            }
+            else if (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_)
             {
-                if ((static_cast<uint32_t> (STRAT_ORDER_STATE::STRAT_ORDER_PLACED) & current_state_)) {
-
-                    context_->LOG_DEBUG(" reset called here");
-
-                    reset();
-                }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_))
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
-                        notional_open_qty_ = 0;
-
-                        if(pendingCancel_)
-                        {
-
-                            context_->LOG_DEBUG(" cancel called here" );
-                        }
-                    }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_))
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
-
-                            context_->LOG_DEBUG(" cancel called here");
-                    }
-                }
-                break;
-
-                case OMS_API_ERROR_CODES::RMS_ERROR:
-                {
-                    // log error
-                    if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_ORDER_PLACED) & current_state_)) 
-                    {
-
-                            context_->LOG_DEBUG(" reset called here");
-                    reset();
-                }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_))
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
-                        notional_open_qty_ = 0;
-                    }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)) // not possible
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
-                    
-                    }
-                }
-                break;
-
-                case OMS_API_ERROR_CODES::INVALID_REQ_STATUS:
-                {
-
-                    context_->LOG_DEBUG("FATAL :: invalid request status");
-                    if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_ORDER_PLACED) & current_state_)) 
-                    {
-
-                            context_->LOG_DEBUG(" reset called here");
-                    reset();
-                }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_))
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
-                        notional_open_qty_ = 0;
-
-                    }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)) // not possible
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
-                       
-                    }
-                }
-                break;
-
-                case OMS_API_ERROR_CODES::INVALID_QTY:
-                {
-
-                    context_->LOG_DEBUG("FATAL :: invalid request qty");
-                    if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_ORDER_PLACED) & current_state_)) 
-                    {
-
-                            context_->LOG_DEBUG("reset called here");
-
-                    reset();
-                    }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED) & current_state_))
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
-                        notional_open_qty_ = 0;
-
-                    }
-                    else if((static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)) // not possible
-                    {
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
-                        current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
-                    
-                    }
-                }
-                break;
-
-                default:
-                {
-                    // log error and throw exception
-                    // stop strategy
-
-                    context_->LOG_DEBUG(" unhandled error_code(%d) and reason_code(%d) in rejection "
-			, static_cast<int32_t>(response.hdr_.error_code), static_cast<int32_t>(response.hdr_.reason_code));
-
-                    //throw std::runtime_error("FATAL Error: Unhandled Error Code");
-                }
-                break;
+                current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_MODIFY_PLACED));
+                current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_MOD_PLACED));
+                notional_open_qty_ = 0;
+            }
+            else if (static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED) & current_state_)
+            {
+                pendingCancel_ = false;
+                current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_CXL_PLACED));
+                current_state_ &= ~(static_cast<uint32_t>(STRAT_ORDER_STATE::STRAT_OMS_CXL_PLACED));
             }
         }
         break;

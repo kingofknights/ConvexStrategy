@@ -33,10 +33,10 @@ SquareOff::SquareOff(MinixStrategy* hub_, const nlohmann::json& config_)
     _clientUid.composite_id_.client_id = static_cast<uint32_t>(_hub->_clientId + 2) & 0b111U;
 }
 
-void SquareOff::Start(int32_t interface_) {
+auto SquareOff::Start(int32_t interface_) -> bool {
     if (!_positions.empty()) {
         std::cout << "[SquareOff] already running for " << _positions.size() << " tokens -- ignored" << std::endl;
-        return;
+        return false;
     }
 
     _interface = interface_;
@@ -46,11 +46,11 @@ void SquareOff::Start(int32_t interface_) {
         netQuantities = LoadTodayPositions(_db);
     } catch (const std::exception& e) {
         std::cout << "[SquareOff] cannot load positions for trader " << _db._traderId << ": " << e.what() << std::endl;
-        return;
+        return false;
     }
     if (netQuantities.empty()) {
         std::cout << "[SquareOff] no open positions for trader " << _db._traderId << std::endl;
-        return;
+        return false;
     }
 
     for (const auto& [token, netQuantity] : netQuantities) {
@@ -60,6 +60,7 @@ void SquareOff::Start(int32_t interface_) {
                                                                                  ORDER_TYPE::LIMIT_ORDER_TYPE, _hub)};
         std::cout << "[SquareOff] token=" << token << " net=" << netQuantity << " -> " << (side == SELL_SIDE ? "SELL" : "BUY") << " " << std::abs(netQuantity) << std::endl;
     }
+    return true;
 }
 
 void SquareOff::OnBcast(const aef::infra::product::product_data& product_) {

@@ -22,8 +22,8 @@ class SquareOff {
     SquareOff(MinixStrategy* hub_, const nlohmann::json& config_);
 
     // Loads today's positions and starts flattening them; order responses echo to interface_ on 5001.
-    // Ignored while a square-off is running.
-    void Start(int32_t interface_);
+    // Ignored while a square-off is running. True when it took positions to flatten.
+    auto Start(int32_t interface_) -> bool;
     void OnBcast(const aef::infra::product::product_data& product_);
     // True when response_ belongs to a square-off order.
     auto OnOrderResponse(const oms_transaction& response_) -> bool;
