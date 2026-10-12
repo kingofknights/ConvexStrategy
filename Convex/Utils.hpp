@@ -106,6 +106,9 @@ enum UiMessageCode : int32_t {
     UiMessageCode_STRATEGY_SPREAD = 100002,
     UiMessageCode_ORDER_RESPONSE  = 100003,
     UiMessageCode_TRADE_TRACER    = 100004,
+    // Manual orders: the GUI sends oms_transaction3l on 9911, responses echo back on 5001.
+    UiMessageCode_MANUAL_ORDER          = 9911,
+    UiMessageCode_MANUAL_ORDER_RESPONSE = 5001,
 };
 
 struct UserPortfolio {

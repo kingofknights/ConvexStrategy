@@ -619,6 +619,87 @@ void QuietTicks() {
     CHECK(StrategyLogBytes() == bytesBefore);
 }
 
+// ═══ Manual orders (GUI 9911 in, 5001 out) ═══════════════════════════════════
+
+struct ManualLeg {
+    int token, side, price, quantity;
+};
+
+// Sends a manual order request the way the GUI does: oms_transaction3l on code 9911 from interface 7.
+void SendManual(int code_, uint32_t requestId_, std::initializer_list<ManualLeg> legs_) {
+    oms_transaction3l request{};
+    request.uihdr.interface_id    = 7;
+    request.hdr_.transaction_code = code_;
+    request.hdr_.uid_.strategy_id = 0;  // the GUI sends manual orders as strategy 0
+    request.hdr_.uid_.request_id  = requestId_;
+    size_t leg = 0;
+    for (const ManualLeg& order : legs_) {
+        request.packet_.product_id_[leg]       = order.token;
+        request.packet_.price_[leg]            = order.price;
+        request.packet_.quantity_[leg]         = order.quantity;
+        request.packet_.flags_[leg].order_side = order.side;
+        request.packet_.flags_[leg].order_type = LIMIT_ORDER_TYPE;
+        ++leg;
+    }
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_MANUAL_ORDER;
+    std::memcpy(packet.message, &request, sizeof(request));
+    exchange::hub->onUIRequest(packet);
+    exchange::Pump();
+}
+
+// Manual order echoes sent to the GUI since uiPackets index from_.
+auto ManualEchoes(size_t from_) -> std::vector<oms_transaction3l> {
+    std::vector<oms_transaction3l> echoes;
+    for (size_t i = from_; i < exchange::uiPackets.size(); ++i) {
+        if (exchange::uiPackets[i].header.message_code != UiMessageCode_MANUAL_ORDER_RESPONSE) continue;
+        CHECK(exchange::uiPackets[i].header.interface_id == 7);
+        echoes.emplace_back();
+        std::memcpy(&echoes.back(), exchange::uiPackets[i].message, sizeof(oms_transaction3l));
+    }
+    return echoes;
+}
+
+void ManualOrders() {
+    // Place, modify, cancel one leg: each request reaches the exchange and every response echoes with the GUI's request id.
+    size_t sent = exchange::sent.size(), ui = exchange::uiPackets.size();
+    SendManual(OMS_PLACE_REQ, 1, {{LEG1, BUY_SIDE, 100, LOT}});
+    CHECK(exchange::sent.size() == sent + 1);
+    const oms_transaction placed = exchange::sent.back();
+    CHECK(placed.packet_.product_id_ == LEG1 && placed.packet_.price_ == 100 && placed.packet_.quantity_ == LOT);
+    CHECK(placed.hdr_.uid_.composite_id_.strategy_id == 0 && placed.hdr_.uid_.composite_id_.request_id == 1);
+    CHECK(placed.hdr_.uid_.composite_id_.client_id != 1);  // ratio orders carry client 1
+    auto echoes = ManualEchoes(ui);
+    CHECK(echoes.size() == 2 && echoes[0].hdr_.transaction_code == OMS_ORDER_PLACED && echoes[1].hdr_.transaction_code == OMS_ORDER_CONFIRMED);
+    CHECK(echoes[1].hdr_.uid_.request_id == 1 && echoes[1].hdr_.uid_.strategy_id == 0);
+    CHECK(echoes[1].packet_.product_id_[0] == LEG1 && echoes[1].hdr_.error_code == 0);
+
+    SendManual(OMS_REPLACE_REQ, 1, {{LEG1, BUY_SIDE, 105, LOT}});
+    CHECK(exchange::live.at(placed.hdr_.uid_.id_).price == 105);
+    SendManual(OMS_CANCEL_REQ, 1, {{LEG1, BUY_SIDE, 105, LOT}});
+    CHECK(!exchange::live.count(placed.hdr_.uid_.id_));
+    CHECK(ManualEchoes(ui).back().hdr_.transaction_code == OMS_ORDER_CANCELLED);
+
+    // Bad input is rejected to the GUI and never reaches the exchange.
+    sent = exchange::sent.size();
+    ui   = exchange::uiPackets.size();
+    SendManual(OMS_CANCEL_REQ, 99, {{LEG1, BUY_SIDE, 105, LOT}});  // never placed
+    SendManual(OMS_PLACE_REQ, 3, {{LEG1, BUY_SIDE, 100, 0}});
+    SendManual(OMS_PLACE_REQ, 4, {{LEG1, BUY_SIDE, 100, LOT}, {LEG2, SELL_SIDE, 0, LOT}});  // one bad leg: nothing sent
+    CHECK(exchange::sent.size() == sent);
+    echoes = ManualEchoes(ui);
+    CHECK(echoes.size() == 3);
+    CHECK(echoes[0].hdr_.transaction_code == OMS_REQ_REJ && echoes[0].hdr_.error_code == INVALID_CLIENT_REQ_ID && echoes[0].hdr_.uid_.request_id == 99);
+    CHECK(echoes[1].hdr_.error_code == INVALID_QTY && echoes[2].hdr_.error_code == INVALID_PRICE);
+
+    // Two legs: each order goes out on its own leg's token.
+    SendManual(OMS_PLACE_REQ, 2, {{LEG1, BUY_SIDE, 100, LOT}, {LEG2, SELL_SIDE, 900, LOT}});
+    CHECK(exchange::sent.size() == sent + 2);
+    CHECK(exchange::sent[sent].packet_.product_id_ == LEG1 && exchange::sent[sent + 1].packet_.product_id_ == LEG2);
+    CHECK(exchange::sent[sent + 1].packet_.flags_.order_side == SELL_SIDE && exchange::sent[sent + 1].packet_.price_ == 900);
+    std::printf("  manual orders: place / modify / cancel echoed on 5001, bad requests rejected, 2 legs on their own tokens\n");
+}
+
 int main() {
     std::ofstream("dry_run_config.json") << R"({"client":1,"algoid":1,"omsid":1})";
 
@@ -651,5 +732,6 @@ int main() {
     StrikeGapBackSolve();
     PartialPackUnwinds();
     QuietTicks();
+    ManualOrders();
     std::printf("all scenarios passed\n");
 }

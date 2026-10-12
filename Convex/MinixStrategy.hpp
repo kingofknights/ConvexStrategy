@@ -48,6 +48,10 @@ class MinixStrategy final : public AlgoBase {
     void SendStrategySpreadsToUi();
     void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
 
+    // GUI manual order (9911): place up to 3 legs, or modify / cancel one placed earlier.
+    void HandleManualOrder(const aef::infra::ui_cmd::UIStruct& request_);
+    void SendManualOrderResponse(const oms_transaction& response_, int32_t interface_);
+
     // Copies a packed POD straight into one UI packet (UI_BINARY_PROTOCOL_SPEC.md).
     template <typename Payload>
     void SendToUi(UiMessageCode messageCode_, int32_t interface_, const Payload& payload_) {
@@ -74,6 +78,10 @@ class MinixStrategy final : public AlgoBase {
 
     std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
     std::chrono::steady_clock::time_point                 _lastSpreadSend{};
+
+    // uid -> GUI interface of every manual order placed; routes its responses and later modify / cancel.
+    // ponytail: never pruned, a session's manual orders are few.
+    std::map<uint32_t, int32_t> _manualOrders;
 
     // Timestamps of the last tick, stamped on orders for latency tracing.
     uint64_t _eventTimestamp   = 0;
