@@ -21,6 +21,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define CHECK(condition)                                                              \
@@ -101,6 +102,20 @@ namespace exchange {
         }
     }
 
+    // An IOC that did not trade in full on arrival is cancelled for the rest.
+    auto CancelUnfilledIoc() -> void {
+        for (auto order = live.begin(); order != live.end();) {
+            if (order->second.request.packet_.flags_.order_type == IOC_ORDER_TYPE) {
+                const oms_transaction request = order->second.request;
+                const int             openQty = order->second.openQty;
+                order                         = live.erase(order);
+                Respond(request, OMS_ORDER_CANCELLED, request.packet_.price_, openQty);
+                return;  // the response may have changed the map
+            }
+            ++order;
+        }
+    }
+
     // Process every request the strategy sent, including the ones its reactions send.
     auto Pump() -> void {
         while (!outbox.empty()) {
@@ -139,6 +154,7 @@ namespace exchange {
                     CHECK(false && "unexpected request");
             }
             MatchCrossing();
+            CancelUnfilledIoc();
         }
     }
 
@@ -552,6 +568,38 @@ void StrikeGapBackSolve() {
     std::printf("  strike gap: ConRev target -98.60 rests at 525\n");
 }
 
+// Leg 0 fills 1 of the 3 lots a pack needs: no hedge covers it. After TimeToRevertBidMs the rest of the bid is
+// cancelled, the lot is bought back at the ask, and the bid rests again for a whole pack.
+void PartialPackUnwinds() {
+    constexpr int  ID                     = 24;
+    nlohmann::json config                 = RatioConfig(ID, "Applied");
+    config["Params"]["TimeToRevertBidMs"] = 20;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 500, 510);  // market 70 < 140: SELL 3 lots rests at 525
+    CHECK(LivePrice(ID, LEG0) == 525);
+
+    exchange::FillPassive(ID, LEG0, LOT);  // 1 of 3 lots: part pack, nothing to hedge
+    exchange::Tick(LEG0, 500, 510);
+    CHECK(Position(ID, LEG0) == -LOT && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    CHECK(LivePrice(ID, LEG0) == 525);  // rest of the pack still bids before the timeout
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    exchange::Tick(LEG0, 500, 510);  // expired: cancel the bid, BUY 1 lot IOC at the 510 ask, then rest again
+    const oms_transaction unwind = NthPlace(ID, LEG0, 2);
+    CHECK(unwind.packet_.flags_.order_type == IOC_ORDER_TYPE && unwind.packet_.flags_.order_side == BUY_SIDE);
+    CHECK(unwind.packet_.price_ == 510 && unwind.packet_.quantity_ == LOT);
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    const oms_transaction rebid = NthPlace(ID, LEG0, 3);
+    CHECK(rebid.packet_.flags_.order_side == SELL_SIDE && rebid.packet_.price_ == 525 && rebid.packet_.quantity_ == 3 * LOT);
+
+    exchange::Tick(LEG0, 525, 535);  // bid reaches 525: both packs fill whole and hedge
+    CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  part pack: 1 of 3 lots sold @525, bought back @510 after 20 ms, 2 whole packs traded after\n");
+}
+
 auto StrategyLogBytes() -> uintmax_t {
     uintmax_t bytes = 0;
     for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
@@ -601,6 +649,7 @@ int main() {
     BidCrossesWhenMarketBeatsTarget();
     UnreachableTargetSendsNothing();
     StrikeGapBackSolve();
+    PartialPackUnwinds();
     QuietTicks();
     std::printf("all scenarios passed\n");
 }

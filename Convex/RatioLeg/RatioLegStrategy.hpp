@@ -5,6 +5,7 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -17,7 +18,8 @@ class MinixStrategy;
 
 // One N-leg ratio spread (2..6 legs). Leg 0 bids with one LIMIT order at the price that makes the spread
 // exactly the target with the other legs at their crossing touch: it crosses when the market beats the
-// target and rests when it misses. When a whole pack fills, the other legs are hedged at once.
+// target and rests when it misses. When a whole pack fills, the other legs are hedged at once. Leg 0 lots that
+// stay short of a whole pack for TimeToRevertBidMs are bought (or sold) back.
 // The long and short directions run as independent packs.
 class RatioLegStrategy {
   public:
@@ -116,6 +118,8 @@ class RatioLegStrategy {
         LegArray<bool>            _hedgeWaiting{};      // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
         SpreadQuote               _bidSnapshot;         // leg prices when the bidding order was last sent
+        OrderObjectPtrT           _unwindOrder;         // IOC on the opposite side of leg 0: closes a part pack
+        std::chrono::steady_clock::time_point _partialSince{};  // when leg 0 first held a part pack; zero when whole
     };
 
     // Net buy/sell position of one leg across both packs.
@@ -182,6 +186,11 @@ class RatioLegStrategy {
     void UpdateUnhedgedStatus(Pack& pack_);
     void CheckSlippageThreshold(Pack& pack_, const oms_transaction& response_);
 
+    // ── Part-pack unwind ──────────────────────────────────────────────────────
+    [[nodiscard]] auto PartialPackExpired(Pack& pack_) -> bool;
+    void               UnwindPartialPack(Pack& pack_);
+    void               OnUnwindTrade(Pack& pack_, const oms_transaction& response_);
+
     // ── Pricing / PnL ─────────────────────────────────────────────────────────
     [[nodiscard]] auto QuoteSpread(const LegCache& cache_) const -> SpreadQuote;
     [[nodiscard]] auto PriceSpread(const LegCache& cache_, const std::array<int, MAX_LEGS>& prices_) const -> float;
@@ -223,12 +232,15 @@ class RatioLegStrategy {
     int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;
     size_t _marketOrderRetries = 0;
+    int    _revertBidMs        = 0;  // 0: never unwind a part pack
 
     // ── Cached fast-path lookup ───────────────────────────────────────────────
     int              _tradeGearOffset  = 0;  // paise
     int              _repriceThreshold = 0;  // paise
     LegArray<double> _buyCostRate{};
     LegArray<double> _sellCostRate{};
+
+    double _unwindPnL = 0.0;  // realized on unwound part packs, after cost (paise x quantity, like GetRLP)
 
     TradeTracer                            _tradeTracer{};
     std::string                            _logFileName;
