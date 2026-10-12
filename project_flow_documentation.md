@@ -53,11 +53,11 @@ No tokens are subscribed at start-up. Each strategy subscribes its own legs when
 | :--- | :--- |
 | `SUBSCRIBE(D)`, `ACTIVE` | Create, or `ParamUpdate` an existing strategy; status `ACTIVE` (market data only). |
 | `APPLY`, `APPLIED` | Create or update; status `APPLIED` (bidding and hedging). |
-| `NEW` | Create or update; status `INACTIVE` via `Stop()`. |
-| `UNSUBSCRIBE(D)`, `STOP` | `Stop()`. |
+| `NEW` | Create or update, then `SetStatus(INACTIVE)`, which calls `Stop()`; status `ACTIVE`. |
+| `UNSUBSCRIBE(D)`, `STOP` | `Stop()`; status `ACTIVE` (market data only, hedges finish). |
 | `DELETE(D)` | `Stop()`, then destroy the strategy. |
 
-5. The UI then receives the strategy's **actual** status on `100001` (`StrategyStatusUpdate`); INACTIVE if creation failed or the strategy was deleted.
+5. The UI then receives the strategy's **actual** status on `100001` (`StrategyStatusUpdate`). `Stop()` leaves a strategy `ACTIVE`, so INACTIVE is reported only when no strategy exists: creation failed or the strategy was deleted.
 
 **Creation** (`RatioLegStrategy` constructor): open the log file, parse `Legs` (token, side) and `Ratio.LegRatios`, load product details for every leg, apply `Params`, create the orders, then subscribe. If a leg has no product details or a zero lot/tick size, the constructor throws before subscribing and no strategy is stored. Tokens, sides and ratios are fixed at creation; later updates change only `Params`.
 
@@ -68,8 +68,8 @@ No tokens are subscribed at start-up. Each strategy subscribes its own legs when
 | Code | Payload | When |
 | :--- | :--- | :--- |
 | `100001` | `StrategyStatusUpdate` (8 B) | After each config request. |
-| `100002` | `StrategySpreadUpdate` (64 B) | Every ~1 s from `doWork` (`steady_clock`): BCmp, SCmp, cost, FLP, gap, traded packs, M2M, NLP, RLP, CLP, B-ATP, S-ATP. |
-| `100003` | `ExternalOrderResponse` | Each placed / modified / cancelled / traded / rejected response. |
+| `100002` | `StrategySpreadUpdate` (64 B) | Every ~1 s from `doWork` (`steady_clock`): BCmp, SCmp, cost, FLP, gap, traded packs, M2M, NLP, RLP, CLP, B-ATP, S-ATP, and ticks processed since the last send (in `_reserved`, reset on read). |
+| `100003` | `ExternalOrderResponse` | Each placed / modified / cancelled / traded / rejected response. `_errorCode`: OMS `reason_code` when the header error is -9994, exchange error code when -9995, else the header error code; the exchange error code when the header error is not negative. |
 | `100004` | `TradeTracer` (55 B) | Each time whole packs complete (slippage report). |
 
 ---
@@ -94,7 +94,7 @@ sequenceDiagram
     Strategy->>Order: handle_confirmation
     alt OMS_TRADE
         Strategy->>Strategy: OnTrade: book fill, unhedged?, slippage, ProcessPack
-    else OMS_REQ_REJ
+    else OMS_REQ_REJ, or IOC remainder cancelled
         Strategy->>Strategy: wait for next tick
     else ack / cancel
         Strategy->>Strategy: ProcessPack (act now)
@@ -102,7 +102,7 @@ sequenceDiagram
     Hub->>Engine: echo to UI (100003)
 ```
 
-The side in a response names the pack: the long and short packs trade opposite sides of every leg.
+The side in a response names the pack: the long and short packs trade opposite sides of every leg. On leg 0 the uid tells the IOC order from the resting order.
 
 ### The pack decision (`ProcessPack`)
 
@@ -113,11 +113,11 @@ stateDiagram-v2
     [*] --> Applied: hedged and status APPLIED
     [*] --> Idle: hedged and not APPLIED
     Unhedged: HedgePack — cancel bid, send hedge steps
-    Applied: EvaluateBidding — place, reprice or cancel bid
+    Applied: EvaluateBidding — send IOC or cancel bid
     Idle: cancel bid (retries a cancel Stop could not send)
 ```
 
-Every tick and every non-reject response runs this decision once per pack. Hedging runs in every status, so a stopped strategy still goes flat.
+Every tick, and every response except a reject or a cancelled IOC remainder, runs this decision once per pack. Hedging runs in every status, so a stopped strategy still goes flat.
 
 ---
 
@@ -133,18 +133,26 @@ $$\text{Spread} = \text{AdjustGap}\Big(\sum_{i=0}^{N-1} \text{SideSign}_i \times
 * With a strike gap (Box, ConRev): $\text{AdjustGap}(s) = s + \text{gap}$ if $s < 0$, else $s - \text{gap}$, where gap = |strike₀ − strike₁|.
 * BCmp is the long pack's spread, SCmp the short pack's.
 
-**Entry** (`EvaluateBidding`), in this order; any failure cancels the bid:
+**Entry gates** (`EvaluateBidding`), in this order. The first failure names the `BidGate` and cancels the resting bid; an IOC in flight ends on its own:
 
-1. Lots left: $\text{remaining} = \text{\_totalPacks} \times \text{Ratio}_0 - \text{tradedLots}_0 > 0$.
-2. Hedge-leg depth on the side each hedge takes: `OrderDepth` levels with orders, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `OrderDepth` levels.
-3. Bidding-leg depth: `AllowedBidDepth` priced levels on its own side.
-4. Valid spread and $\text{Spread} \ge \text{\_targetSpread}$.
+| Gate | Passes when |
+| :--- | :--- |
+| `DONE` | Lots left: $\text{remaining} = \text{\_totalPacks} \times \text{Ratio}_0 - \text{tradedLots}_0 > 0$. |
+| `NO_PRICE` | Every leg has a price on its crossing side (valid spread). |
+| `HEDGE_DEPTH` | Each hedge leg, on the side it takes: `OrderDepth` levels with orders, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `OrderDepth` levels. |
+| `BID_DEPTH` | Leg 0 has `AllowedBidDepth` priced levels on its own side. |
+| `BELOW_TARGET` | Market spread $\ge$ `_targetSpread`. |
 
-**Order** on leg 0, resting at its own side's touch (BUY at bid, SELL at ask):
+All gates pass → `TAKE`: an **IOC on leg 0 at the crossing touch** (BUY at ask, SELL at bid), sent through `_iocOrder`, a second order object per pack (the vendor fixes order type at construction). The exchange cancels any unfilled remainder; that cancel waits for the next tick, so an unfillable IOC is not resent at OMS speed.
+
+**Resting at depth (disabled).** With `REST_WHEN_SPREAD_SHORT = true`, a market spread below target would instead rest leg 0 on its own side at level `AllowedBidDepth - 1` (BUY: lowest bid in depth, SELL: highest ask) while the spread at that price still meets the target (`REST`), repriced only when the price moves by `_repriceThreshold` (`TickSize` × tick size). The flag is `false` since 2026-10-08, so a short spread is `BELOW_TARGET` and nothing rests. The rest-path dry-run scenarios are in commit `58841ab`.
+
+**One order on leg 0 at a time.** No IOC while one is in flight. Before an IOC, a resting bid is cancelled; its `CANCELLED` re-runs the decision and sends the IOC. Both can never fill together.
+
+**Order size** on leg 0:
 
 * A partly filled pack is finished first: $\text{orderLots} = \text{Ratio}_0 - (\text{tradedLots}_0 \bmod \text{Ratio}_0)$ when the remainder is non-zero, else $\text{\_slicePacks} \times \text{Ratio}_0$.
 * $\text{quantity} = \min(\text{orderLots}, \text{remaining}) \times \text{lotSize}$.
-* Repriced only when the touch moved by at least `_repriceThreshold` (`TickSize` param × tick size).
 * Each successful send stores the leg prices in `_bidSnapshot`; hedges start from them.
 
 ---
@@ -176,7 +184,7 @@ While unhedged, `HedgePack` cancels the bid and, per hedge leg (`ExecuteHedgeLeg
 * Initial state: place with the next `request_id`. `request_id` is a 22-bit field that starts at 0 per strategy and stops at `MAX_REQUEST_ID` (logged once) instead of wrapping.
 * Otherwise: modify only a confirmed order whose price or open quantity differs. `quantity` is the open quantity wanted; the vendor adds the filled quantity back.
 
-`CancelOrder` (strategy) cancels only a confirmed order with no pending response. Both guards exist because the vendor logs every request it refuses, and these paths run on every tick.
+`PullOrder` (strategy) cancels only a confirmed order with no pending response, and logs the reason. Both guards exist because the vendor logs every request it refuses, and these paths run on every tick.
 
 ---
 
@@ -185,7 +193,7 @@ While unhedged, `HedgePack` cancels the bid and, per hedge leg (`ExecuteHedgeLeg
 `OnTrade` books lots and value per leg in `_tradedLots` / `_tradedValue` and in `_unreportedLots` / `_unreportedValue`. When the pack is hedged after a fill:
 
 * `_tradedSpread` (B-ATP / S-ATP) is refreshed from average leg prices.
-* `CheckSlippageThreshold` reports every newly completed pack: traded spread of those packs, slippage = (target − traded) / 100 rupees, a `TradeTracer` to the UI, and `Stop()` when `AllowedSlippage > 0` and slippage exceeds it. Lots beyond the reported packs carry to the next report at their average value.
+* `CheckSlippageThreshold` reports every newly completed pack: traded spread of those packs, slippage = target − traded in paise, a `TradeTracer` to the UI (prices and slippage in rupees), and `Stop()` when `AllowedSlippage > 0` and the paise slippage exceeds it. Lots beyond the reported packs carry to the next report at their average value.
 
 | Figure | Formula |
 | :--- | :--- |
@@ -201,7 +209,7 @@ Cost rates are in `Utils.hpp` (`OptionBuyCost`, `OptionSellCost`, `FutureBuyCost
 
 ## 10. Stop and delete
 
-* `Stop()` sets INACTIVE and cancels bidding orders. An unhedged pack keeps its hedge orders working (ticks and responses) until flat, so stopping never leaves a naked leg. A cancel refused because the bid was still unacknowledged is retried by `ProcessPack` on the next event.
+* `Stop()` sets status ACTIVE: the strategy stays subscribed and keeps reporting to the UI, but sends no new entries (`ProcessPack` quotes only while APPLIED). Re-APPLY to resume. It cancels bidding orders. An unhedged pack keeps its hedge orders working (ticks and responses) until flat, so stopping never leaves a naked leg. A cancel refused because the bid was still unacknowledged is retried by `ProcessPack` on the next event.
 * Delete calls `Stop()` and destroys the strategy at once. Products stay subscribed. Deleting while unhedged is the user's responsibility.
 
 ---
@@ -213,10 +221,11 @@ Each strategy writes `log/<YYYYMMDD>/<N>Ratio_<id>_<HHMMSS>.log`, line-buffered,
 | Tag | When | Key fields |
 | :--- | :--- | :--- |
 | `[INIT]`, `[nLegRatios]`, `Params parsed`, `updateSideCache` | Creation and each param update | Tokens, sides, ratios, lot/tick, every param, slice sizes |
-| `[RatioLeg:SetStatus]`, `[RatioLeg:Stop]` | Status change | New status; Stop reason (`GUI STOP`, `GUI DELETE`, `status INACTIVE requested`, `slippage above AllowedSlippage`) and per-leg lots |
-| `[BID-GATE]` | The reason the bid is (not) quoting changes | `OLD -> NEW` (`OPEN`, `DONE`, `HEDGE_DEPTH`, `BID_DEPTH`, `NO_PRICE`, `BELOW_TARGET`), target vs market spread, lots, touch of every leg; for `HEDGE_DEPTH` the thin leg and which check failed |
-| `[ORDER-OUT]` | Every place, modify and cancel actually sent | Pack, leg, token, side, `PLACE`/`MODIFY`/`CANCEL`, uid, `old->new` price and qty, then `BID` (target, market) or `HEDGE` (mode, retry, base price, missing lots) or the cancel reason |
-| `[ORDER-IN]` | Every OMS response | Transaction name and code, uid, price, qty, `err=header/reason/exchange`, and the order state it left (`state` bitmask, open qty@price, filled, live uid) |
+| `[FEED]` | Creation and first tick per leg | Subscribe result per leg; first bid/ask per leg. A leg with no feed never reaches the bid gate, so its missing `[FEED]` line is the clue. |
+| `[RatioLeg:SetStatus]`, `[RatioLeg:Stop]` | Status change | New status; Stop reason (`GUI STOP`, `GUI DELETE`, `status INACTIVE requested`, `slippage above AllowedSlippage`) and per-leg lots. `Stop()` sets ACTIVE (§10). |
+| `[BID-GATE]` | The reason the bid is (not) quoting changes; on every evaluation while the market meets the target but `HEDGE_DEPTH` or `BID_DEPTH` blocks entry | `OLD -> NEW` (`UNKNOWN`, `TAKE`, `REST`, `DONE`, `HEDGE_DEPTH`, `BID_DEPTH`, `NO_PRICE`, `BELOW_TARGET`), target vs market spread, matched, rest level and price, lots, touch of every leg; then the leg with no price, the thin leg and which check failed, or `no order (resting disabled)` |
+| `[ORDER-OUT]` | Every place, modify and cancel actually sent | Pack, leg, token, side, `PLACE`/`PLACE IOC`/`MODIFY`/`CANCEL`, uid, `old->new` price and qty, then `TAKE` (market ≥ target), `REST` (level, market < target), `HEDGE` (mode, retry, base price, missing lots) or the cancel reason |
+| `[ORDER-IN]` | Every OMS response | Transaction name and code, `IOC` for the leg-0 IOC order, uid, price, qty, `err=header/reason/exchange`, and the order state it left (`state` bitmask, open qty@price, filled, live uid) |
 | `[TRADE EVENT]` | Every fill | Leg, side, price, qty, pack, lots per leg as `traded/needed` |
 | `[PACK]` | Pack turns `UNHEDGED` or `HEDGED` | Lots per leg, completed packs |
 | `[HEDGE]` | A hedge leg starts waiting for an opposite price | Leg, missing lots, book |
@@ -224,8 +233,8 @@ Each strategy writes `log/<YYYYMMDD>/<N>Ratio_<id>_<HHMMSS>.log`, line-buffered,
 
 `state` is the vendor `STRAT_ORDER_STATE` bitmask: `0x1` placed, `0x2` OMS ack, `0x4` exchange confirmed, `0x8` modify sent, `0x10` modify ack, `0x20` cancel sent; `0x0` means no live order.
 
-Hub-level events (config JSON received, strategy created/updated/stopped/deleted, responses for unknown strategies, `request_id` limit) go to stdout.
+Hub-level events (config JSON received, strategy created/updated/stopped/deleted, responses for unknown strategies, `request_id` limit, hub tick count each second from `doWork`) go to stdout. A strategy log that cannot be opened is reported on stderr.
 
 ## 12. Dry run
 
-`tests/ratio_dry_run.cpp` links the real `MinixStrategy`, `RatioLegStrategy` and vendor `order_instance` against a fake `AlgoBase` and a mini exchange (acks, modifies, cancels, crossing fills, rejected late cancels/modifies). The build command is in the file header. Scenarios: full bid/fill/hedge cycle, STOP racing an unacknowledged bid, STOP while unhedged, unknown token, per-pack retry reset, and idle-tick log volume.
+`tests/ratio_dry_run.cpp` links the real `MinixStrategy`, `RatioLegStrategy` and vendor `order_instance` against a fake `AlgoBase` and a mini exchange (acks, modifies, cancels, crossing fills, IOC fill-or-cancel, rejected late cancels/modifies). The build command is in the file header. Scenarios: full IOC/fill/hedge cycle (`FullCycle`), per-tick log of a missed entry (`MissedEntryLogsEveryTick`), STOP racing an unacknowledged IOC (`StopRacesPendingIoc`), STOP while unhedged (`StopKeepsHedging`), unknown token (`RejectsUnknownToken`), per-pack retry reset (`HedgeRetriesResetPerPack`), short pack from a real GUI payload (`ShortPackFromGuiPayload`), `AllowedSlippage` in paise (`SlippageInPaise`), and idle-tick log volume (`QuietTicks`).

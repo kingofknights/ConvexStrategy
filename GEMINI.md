@@ -54,18 +54,18 @@ ConvexStrategy/
 * **`OnTick(Quote)`**: High-frequency market quote dispatch to active strategies.
 * **`onBcastData(product_data)`**: Broadcast market snapshot routing.
 * **`OnOrderResponse(oms_transaction)`**: Routes OMS responses (placement, modification, cancellations, fills) to the owning strategy by `client_uid.strategy_id`, then echoes them to the UI (code `100003`).
-* **`doWork()`**: Heartbeat thread (~1 second interval): pushes binary spread updates to UI via `SendStrategySpreadsToUi()`. Hedging is event-driven (ticks + order responses), not polled here.
+* **`doWork()`**: Heartbeat (~1 second interval, same thread as ticks): pushes binary spread updates to UI via `SendStrategySpreadsToUi()`, including ticks processed per strategy in `StrategySpreadUpdate._reserved`. Hedging is event-driven (ticks + order responses), not polled here.
 
 ### Strategy Lifecycle States
 | Action / Status | Behavior |
 |-----------------|----------|
 | `SUBSCRIBED` / `SUBSCRIBE` / `ACTIVE` | Creates the strategy (or applies `Params` to an existing one) and sets `StrategyStatus_ACTIVE`: market data flows, no orders. Creation throws, and nothing is subscribed, when a leg has no product details. |
 | `APPLIED` / `APPLY` | Same create-or-update, then `StrategyStatus_APPLIED`: bidding and hedging run. |
-| `NEW` | Create-or-update, then `SetStatus(INACTIVE)`, which calls `Stop()`. |
-| `UNSUBSCRIBED` / `UNSUBSCRIBE` / `STOP` | `Stop()`: status INACTIVE, bidding orders cancelled. An unhedged pack keeps hedging until flat. |
+| `NEW` | Create-or-update, then `SetStatus(INACTIVE)`, which calls `Stop()`: status ACTIVE. |
+| `UNSUBSCRIBED` / `UNSUBSCRIBE` / `STOP` | `Stop()`: status ACTIVE (market data, UI reports, no new entries until re-APPLIED), bidding orders cancelled. An unhedged pack keeps hedging until flat. |
 | `DELETED` / `DELETE` | `Stop()`, then the strategy is destroyed (`unique_ptr` erase). Products stay subscribed; an unhedged delete is the user's responsibility. |
 
-After every request the UI receives the strategy's actual status on code `100001` (INACTIVE when it does not exist).
+After every request the UI receives the strategy's actual status on code `100001`. `Stop()` leaves a strategy ACTIVE, so INACTIVE means it does not exist (creation failed or deleted).
 
 ---
 
@@ -89,7 +89,14 @@ In Ratio Spread strategies (e.g., Ratio 3 : 1 : 2):
 
 ---
 
-## 5. Partial Fill Management & Pack Remainder Clamping
+## 5. Entry Pricing, Partial Fills & Pack Remainder Clamping
+
+### Entry Pricing (`EvaluateBidding`)
+Gates in order, each named by a `BidGate` and logged as `[BID-GATE]`: `DONE` (no lots left), `NO_PRICE` (a leg has no crossing price), `HEDGE_DEPTH` (`FindThinHedgeLeg`), `BID_DEPTH` (`AllowedBidDepth` priced levels on leg 0's own side), `BELOW_TARGET` (market spread < target). All pass → `TAKE`: **IOC on leg 0 at the crossing touch** (BUY at ask, SELL at bid) via `pack._iocOrder`, a second order object per pack (vendor fixes order type at construction).
+* Resting at level `AllowedBidDepth - 1` when the market misses the target (`REST`) is behind `REST_WHEN_SPREAD_SHORT`, currently `false`. Rest-path dry-run scenarios are in commit `58841ab`.
+* One order on leg 0 at a time: no IOC while one is in flight; a resting bid is cancelled first and its `CANCELLED` sends the IOC.
+* An IOC remainder cancelled by the exchange, like a reject, waits for the next tick.
+
 
 ### The Overfill Prevention Decision
 When a partial fill occurs on the primary quoting leg (e.g., 2 lots fill out of a 3-lot slice in a 3:1:2 ratio spread):
@@ -119,7 +126,7 @@ $$\text{isUnhedged} = \exists \text{ leg} \neq \text{BIDDING\_LEG} \text{ such t
    $$\text{targetHedgeLots} = \text{biddingPacks} \times \text{\_ratios}[\text{leg}]$$
    $$\text{diff} = \text{targetHedgeLots} - \text{pack\_.\_tradedLots}[\text{leg}]$$
    $$\text{quantity} = \min(\text{diff} \times \text{\_lotSize}, \text{pack\_.\_cache.\_sliceQuantity}[\text{leg}])$$
-3. **In-Flight Response Guard**: `MinixStrategy::UpdateOrder` returns 0 (nothing sent) while a response is pending or the order is unconfirmed, and the retry counter only increments on a real send. Cancels go through `CancelOrder`, which applies the same guard. Retry counters reset when the pack becomes hedged.
+3. **In-Flight Response Guard**: `MinixStrategy::UpdateOrder` returns 0 (nothing sent) while a response is pending or the order is unconfirmed, and the retry counter only increments on a real send. Cancels go through `PullOrder`, which applies the same guard and logs the reason. Retry counters reset when the pack becomes hedged.
 4. **Hedge Order Pricing & Escalation**:
    * Base Price: Captured snapshot price $\text{snapshotPrice} = \text{pack\_.\_bidSnapshot.\_price}[\text{leg}]$, falling back to current opposite market touch if uninitialized or aggressive.
    * Directional Side Multiplier: $+1$ for `BUY_SIDE`, $-1$ for `SELL_SIDE`.
@@ -163,9 +170,9 @@ $$\text{M2M} = \sum_{i=0}^{N-1} \text{netQuantity}_i \times (\text{markPrice}_i 
 
 ### Slippage Guard (`CheckSlippageThreshold`)
 $$\text{tradedSpread} = \sum_{i=0}^{N-1} (\text{side}_i == \text{BUY} \mathbin{?} -\text{legAvgPrice}_i : \text{legAvgPrice}_i) \times \text{Ratio}_i$$
-$$\text{slippage} = \frac{\text{\_params.\_targetSpread} - \text{AdjustGap}(\text{tradedSpread})}{100.0}$$
-* Evaluated per completed pack (from `_unreportedLots` / `_unreportedValue`), in rupees per pack. Each evaluation sends a `TradeTracer` (code `100004`).
-* If `_allowedSlippage > 0` and $\text{slippage} > \text{\_allowedSlippage}$, the strategy immediately invokes `Stop()`: no new entries; hedging continues.
+$$\text{slippagePaise} = \text{\_params.\_targetSpread} - \text{AdjustGap}(\text{tradedSpread})$$
+* Evaluated per completed pack (from `_unreportedLots` / `_unreportedValue`), in **paise** per pack; `AllowedSlippage` is paise. Each evaluation sends a `TradeTracer` (code `100004`), which reports slippage in rupees.
+* If `_allowedSlippage > 0` and $\text{slippagePaise} > \text{\_allowedSlippage}$, the strategy immediately invokes `Stop()`: status ACTIVE, no new entries; hedging continues.
 
 ---
 
@@ -177,10 +184,10 @@ $$\text{slippage} = \frac{\text{\_params.\_targetSpread} - \text{AdjustGap}(\tex
    * NEVER log when `targetOrderPrice == currentPlacePrice` (order already placed).
    * NEVER log when `is_response_pending()` is true.
 2. **Allowed Logging Points** (tags and fields in `project_flow_documentation.md` §11):
-   * Strategy initialization and termination (`INIT`, `DESTROY`, `Stop` with its reason).
+   * Strategy initialization and termination (`INIT`, `DESTROY`, `Stop` with its reason) and feed state (`[FEED]`: subscribe result, first tick per leg).
    * Parameter reconfiguration (`ParamUpdate`) and status changes.
    * Every order request actually sent (`[ORDER-OUT]`) and every OMS response (`[ORDER-IN]`).
-   * State changes only: `[BID-GATE]` when the bidding reason changes, `[PACK]` on hedged/unhedged, `[HEDGE]` when a hedge starts waiting.
+   * State changes only: `[BID-GATE]` when the bidding reason changes (and on every evaluation while the market meets the target but depth blocks entry), `[PACK]` on hedged/unhedged, `[HEDGE]` when a hedge starts waiting.
    * Trade executions (`[TRADE EVENT]`).
    * Cycle completion and slippage evaluation (`[SLIPPAGE]`, `Tracer`).
    * An idle tick writes nothing; `tests/ratio_dry_run.cpp` asserts it.
@@ -193,12 +200,12 @@ $$\text{slippage} = \frac{\text{\_params.\_targetSpread} - \text{AdjustGap}(\tex
 
 1. **Always Update `@CHANGELOG.md`** before committing using standard `[MAJOR.MINOR.PATCH] - YYYY-MM-DD` syntax.
 2. **Prices in Paise**: Never mix rupee and paise values.
-3. **Response-Pending Guard**: Never call `update_order()` / `cancel_order()` directly; route through `MinixStrategy::UpdateOrder` and `CancelOrder`, which check `is_response_pending()` and confirmation once for every caller.
+3. **Response-Pending Guard**: Never call `update_order()` / `cancel_order()` directly; route through `MinixStrategy::UpdateOrder` and `RatioLegStrategy::PullOrder`, which check `is_response_pending()` and confirmation once for every caller.
 4. **Vendor Directory Is Read-Only**: Never edit `vendor/minix/` or `vendor/nlohmann/`.
 5. **Explicit Non-Abbreviated Naming**:
    * NEVER use cryptic abbreviations (`idx` → `index`, `qty` → `quantity`, `px` → `price`).
    * Differentiate depth book levels from strategy parameters: use `levelPrice` / `levelQuantity` for book scans, and `orderQuantity` / `quantityAhead` for queue tracking.
 6. **Price Grid Quantization**: All price roundings must use `RoundOFF` formula.
-7. **Clean Memory Ownership**: Strategies allocated with `new` in `MinixStrategy` must be safely paired with `delete` on strategy deletion.
+7. **Clean Memory Ownership**: `MinixStrategy` owns strategies through `std::unique_ptr`; erase from `_strategies` to delete. No raw `new` / `delete`.
 8. **Dry Run Before Commit**: Build and run `tests/ratio_dry_run.cpp` (command in its header); every scenario must pass.
 9. **Documentation Sync**: Keep `.agents/AGENTS.md`, `GEMINI.md`, and `project_flow_documentation.md` in sync whenever architecture, parameters, or execution rules change.

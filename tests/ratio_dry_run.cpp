@@ -397,7 +397,7 @@ void StopRacesPendingIoc() {
     CHECK(exchange::outbox.size() == 1);
 
     SendConfig(RatioConfig(ID, "Stop"), false);  // STOP arrives before the exchange answers
-    CHECK(LastStatusEcho()._status == StrategyStatus_INACTIVE);
+    CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);  // Stop() keeps the strategy ACTIVE: feed and UI on, no entries
 
     exchange::Pump();  // IOC fills -> hedges cross
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
@@ -419,7 +419,7 @@ void StopKeepsHedging() {
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
 
     SendConfig(RatioConfig(ID, "Stop"));
-    CHECK(LastStatusEcho()._status == StrategyStatus_INACTIVE);
+    CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);
     exchange::Tick(LEG2, 315, 330);  // asks return
     CHECK(Position(ID, LEG2) == 2 * LOT);
     CHECK(NthPlacePrice(ID, LEG2, 1) == 325);  // MarketRetries 5: starts at the 325 snapshot, steps to 330

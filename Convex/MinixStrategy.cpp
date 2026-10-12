@@ -285,7 +285,24 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
 
     response._userDetails._compositeID._fields._user      = response_.hdr_.uid_.composite_id_.client_id;
     response._userDetails._compositeID._fields._portfolio = response_.hdr_.uid_.composite_id_.strategy_id;
+    int32_t errorCode                                     = response_.packet_.exchange_error_code;
 
+    if (response_.hdr_.error_code < 0) {
+        switch (response_.hdr_.error_code) {
+            case -9994: {
+                errorCode = response_.hdr_.reason_code;
+                break;
+            }
+            case -9995: {
+                errorCode = response_.packet_.exchange_error_code;
+                break;
+            }
+            default: {
+                errorCode = response_.hdr_.error_code;
+                break;
+            }
+        }
+    }
     OrderResponseInfoT& info = response._response;
     info._response           = responseType;
     info._timestamp          = response_.hdr_.exchange_timestamp;
@@ -295,7 +312,7 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
     info._placed._price      = response_.packet_.price_;
     info._placed._quantity   = response_.packet_.quantity_;
     info._token              = static_cast<TokenT>(response_.packet_.product_id_);
-    info._errorCode          = response_.packet_.exchange_error_code;
+    info._errorCode          = errorCode;
     if (info._fillNumber != 0) {
         info._traded = info._placed;
     }

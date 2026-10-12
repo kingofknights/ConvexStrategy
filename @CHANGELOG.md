@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Leg 0 enters by IOC at the crossing touch when the market spread meets the target (`_iocOrder`, one per pack). Resting at the `AllowedBidDepth` level when the spread misses the target is behind `REST_WHEN_SPREAD_SHORT`, currently `false`.
+- `Stop()` sets status ACTIVE instead of INACTIVE: a stopped strategy keeps market data and UI reports, sends no new entries until re-APPLIED, and still hedges until flat. INACTIVE on code `100001` now means the strategy does not exist. The dry run's STOP scenarios assert ACTIVE.
+- `ExternalOrderResponse._errorCode` (code `100003`) takes the OMS reason code for header error -9994, the exchange error code for -9995, and the header error code for other negative errors.
+- `StrategySpreadUpdate._reserved` carries the ticks processed by each strategy since the last send.
+
+### Fixed
+- `AllowedSlippage` is compared in paise (a GUI value of 10 used to allow a 10 rupee slip). The trade tracer still reports slippage in rupees.
+- A numeric `algoid` in the start-up config no longer aborts the engine.
+
+### Added
+- `[FEED]` log lines (subscribe result and first tick per leg); a strategy log that cannot be opened is reported on stderr.
+- `[BID-GATE]` logs on every evaluation while the market meets the target but depth blocks entry.
+
+### Documentation
+- `project_flow_documentation.md`, `strategy_parameters.md`, `AGENTS.md`, `GEMINI.md`, `UI_BINARY_PROTOCOL_SPEC.md`: IOC entry and disabled resting, `Stop()` -> ACTIVE, `AllowedSlippage` in paise, `PullOrder`, `[FEED]`/`[BID-GATE]` log fields, tick count in `_reserved`, order-response error codes, current dry-run scenarios. Corrected the `ThresholdQty` example (hedge legs need slice x percent of their own ratio).
+
 ## [1.11.0] - 2026-10-03
 
 ### Added

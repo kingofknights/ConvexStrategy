@@ -16,9 +16,9 @@ Strategy updates sent from **ConvexStrategy** to the GUI are migrated from the l
 
 | Message Code | Packet Type | Size | Description |
 |:---|:---|:---|:---|
-| **`100001`** | `StrategyStatusUpdate` | **8 bytes** | Strategy lifecycle state transitions (Applied, Active, Inactive) |
+| **`100001`** | `StrategyStatusUpdate` | **8 bytes** | Strategy lifecycle state transitions (Applied, Active, Inactive). A stopped strategy reports ACTIVE; INACTIVE means the strategy does not exist (creation failed or deleted). |
 | **`100002`** | `StrategySpreadUpdate` | **64 bytes** | Periodic (~1s) spread, PnL, lot, and status snapshot |
-| **`100003`** | `ExternalOrderResponse` | Existing | OMS order response (unchanged) |
+| **`100003`** | `ExternalOrderResponse` | Existing | OMS order response. `_errorCode`: OMS `reason_code` when the header error is -9994, exchange error code when -9995, else the header error code; the exchange error code when the header error is not negative. |
 | **`100004`** | `TradeTracer` | 55 bytes | Trade execution / slippage tracer (unchanged) |
 
 ---
@@ -59,7 +59,7 @@ struct StrategySpreadUpdate {
     float          _netPL;      // Net PnL / NLP (paise / 100)
     float          _rlp;        // Realized PnL (paise / 100)
     float          _cutPL;      // Cut / square-off PnL / CLP (paise / 100)
-    float          _reserved;   // Reserved, always 0 (was _trSpread)
+    float          _reserved;   // Ticks processed by the strategy since the last send (was _trSpread)
     float          _bATP;       // Buy Average Traded Price (paise / 100)
     float          _sATP;       // Sell Average Traded Price (paise / 100)
 };
@@ -83,7 +83,7 @@ struct StrategySpreadUpdate {
 | **`40`** | `_netPL` | `float` | 4 bytes | `"NLP"` / `"Net P/L"` |
 | **`44`** | `_rlp` | `float` | 4 bytes | `"RLP"` / `"Realized P/L"` |
 | **`48`** | `_cutPL` | `float` | 4 bytes | `"CLP"` / `"Cut P/L"` |
-| **`52`** | `_reserved` | `float` | 4 bytes | — (was `"TrSpread"`, always 0) |
+| **`52`** | `_reserved` | `float` | 4 bytes | Ticks processed by the strategy in the last ~1 s; counter resets on each send (was `"TrSpread"`) |
 | **`56`** | `_bATP` | `float` | 4 bytes | `"B-ATP"` |
 | **`60`** | `_sATP` | `float` | 4 bytes | `"S-ATP"` |
 

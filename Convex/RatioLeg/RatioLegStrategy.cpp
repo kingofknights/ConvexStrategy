@@ -231,8 +231,8 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
 }
 
 void RatioLegStrategy::Stop(std::string_view reason_) {
-    _status = StrategyStatus_INACTIVE;
-    WriteLog("[RatioLeg:Stop] strat={} _status=INACTIVE reason='{}' long_unhedged={} short_unhedged={} long_lots=[{}] short_lots=[{}]\n",
+    _status = StrategyStatus_ACTIVE;
+    WriteLog("[RatioLeg:Stop] strat={} _status=ACTIVE reason='{}' long_unhedged={} short_unhedged={} long_lots=[{}] short_lots=[{}]\n",
              _strategyId, reason_, _longPack._isUnhedged, _shortPack._isUnhedged, LotsText(_longPack), LotsText(_shortPack));
 
     // Stop new entries only. An unhedged pack keeps its hedge orders working until flat,
