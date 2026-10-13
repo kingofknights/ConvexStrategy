@@ -64,10 +64,12 @@ namespace exchange {
     MinixStrategy*                 hub               = nullptr;
 
     // New orders on rejectToken are acked, then rejected with rejectCode: once, or every time while rejectForever.
+    // While rejectChanges, modifies and cancels on rejectToken are rejected too (no ack first).
     int  rejectToken   = 0;
     int  rejectCode    = EXCHG_ERROR;
     bool rejectForever = false;
     int  rejectCount   = 0;
+    bool rejectChanges = false;
 
     auto Respond(const oms_transaction& request_, int code_, int price_, int quantity_) -> void {
         oms_transaction response    = request_;
@@ -130,6 +132,13 @@ namespace exchange {
             const oms_transaction request = outbox.front();
             outbox.pop_front();
             const uint32_t uid = request.hdr_.uid_.id_;
+            if (rejectChanges && request.packet_.product_id_ == rejectToken && request.hdr_.transaction_code != OMS_PLACE_REQ) {
+                oms_transaction reject = request;
+                reject.hdr_.error_code = rejectCode;
+                ++rejectCount;
+                Respond(reject, OMS_REQ_REJ, request.packet_.price_, request.packet_.quantity_);
+                continue;
+            }
             switch (request.hdr_.transaction_code) {
                 case OMS_PLACE_REQ:
                     if (request.packet_.product_id_ == rejectToken) {
@@ -229,6 +238,7 @@ bool AlgoBase::send_order(oms_transaction& request_) {
     exchange::outbox.push_back(request_);
     return true;
 }
+bool AlgoBase::getLastQuote(const int32_t, Quote&) { return false; }  // no snapshot: a new strategy waits for ticks
 bool AlgoBase::sentoUI(const aef::infra::ui_cmd::UIStruct& packet_) { return exchange::uiPackets.push_back(packet_), true; }
 void AlgoBase::log_debug(const char*) { ++exchange::vendorRefusalLogs; }
 void AlgoBase::log_info(const char*) { ++exchange::vendorRefusalLogs; }
@@ -361,6 +371,16 @@ auto PlacesOf(int strategy_, int token_, ORDER_SIDE side_) -> int {
     for (const auto& request : exchange::sent) {
         count += request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
                  request.hdr_.transaction_code == OMS_PLACE_REQ && request.packet_.flags_.order_side == side_;
+    }
+    return count;
+}
+
+// Requests of one transaction code a strategy sent on a token.
+auto RequestsOf(int strategy_, int token_, int code_) -> int {
+    int count = 0;
+    for (const auto& request : exchange::sent) {
+        count += request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
+                 request.hdr_.transaction_code == code_;
     }
     return count;
 }
@@ -712,6 +732,61 @@ void ThrottlePausesNewBids() {
     std::printf("  throttle: 1 bid over 5 ticks after a THROTTLE_LIMIT reject, other strategy paused too, both resume after 1 s\n");
 }
 
+// After a THROTTLE_LIMIT reject nothing is resent for THROTTLE_RETRY_MS, and the paused bid leaves the book (14:31:33 log:
+// 22k refused cancels in one second, and a bid stuck past the target filled 50 paise under it).
+void ThrottledBidLeavesBook() {
+    constexpr int ID = 36;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 500, 510);  // SELL rests at 525
+    CHECK(LivePrice(ID, LEG0) == 525);
+    exchange::rejectToken   = LEG0;
+    exchange::rejectCode    = THROTTLE_LIMIT;
+    exchange::rejectForever = true;
+    exchange::rejectChanges = true;
+    exchange::Tick(LEG2, 320, 330);  // 526.67 -> 530: 525 is past the target, the modify is refused by the message limit
+    for (int i = 0; i < 20; ++i) exchange::Tick(LEG0, 500, 510);
+    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);  // not resent per tick
+    std::this_thread::sleep_for(std::chrono::milliseconds(6));
+    exchange::Tick(LEG0, 500, 510);  // retry: paused, so the bid is pulled instead of repriced; refused again
+    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
+    exchange::rejectToken   = 0;
+    exchange::rejectCode    = EXCHG_ERROR;
+    exchange::rejectForever = false;
+    exchange::rejectChanges = false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(6));
+    exchange::Tick(LEG0, 500, 510);  // cancel accepted; no new bid until the pause ends
+    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 2 && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    exchange::Tick(LEG0, 500, 510);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && LivePrice(ID, LEG0) == 530);
+    SendConfig(RatioConfig(ID, "Stop"));
+    exchange::Tick(LEG0, 500, 510);
+    std::printf("  throttled bid: refused modify not resent within 5 ms, bid pulled while paused, back @530 after 1 s\n");
+}
+
+// A TOO_FAR gate reopens BID_GATE_REOPEN_TICKS inside AllowedBidDepth, so a bid at the edge does not place and cancel
+// on every tick (13:13:30 log: 2.5k reopens at 8-10 ticks).
+void BidGateHysteresis() {
+    constexpr int ID = 37;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 465, 470);  // SELL 525 is 11 ticks above the 470 ask > 10: closed
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
+    exchange::Tick(LEG0, 470, 475);  // 10 ticks: inside the limit, not 3 inside it: stays closed
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
+    exchange::Tick(LEG0, 480, 490);  // 7 ticks: reopens
+    CHECK(LivePrice(ID, LEG0) == 525);
+    exchange::Tick(LEG0, 470, 475);  // 10 ticks: an open gate keeps the full depth
+    CHECK(LivePrice(ID, LEG0) == 525 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);
+    exchange::Tick(LEG0, 465, 470);  // 11 ticks: closes, pulled
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  bid gate hysteresis: closed at 11 ticks stays closed at 10, reopens at 7, open bid kept at 10, pulled at 11\n");
+}
+
 // Leg2's hedge is refused every time (price band). After TimeToRevertBidMs the pack is cut back: leg 0 bought back, leg1 sold,
 // and the strategy stops, so it does not re-enter into the same failing hedge.
 void FailedHedgeIsCut() {
@@ -1029,6 +1104,8 @@ int main() {
     SlippageInPaise();
     BidTracksHedgeLegs();
     ThrottlePausesNewBids();
+    ThrottledBidLeavesBook();
+    BidGateHysteresis();
     BidTracksEveryTickWhenSpreadMatched();
     BidCrossesWhenMarketBeatsTarget();
     UnreachableTargetSendsNothing();

@@ -5,7 +5,6 @@
 #include <fmt/format.h>
 
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -132,7 +131,7 @@ class RatioLegStrategy {
         LegArray<bool>            _hedgeWaiting{};      // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
         LegArray<OrderObjectPtrT> _cutOrders;           // IOC on the opposite side of each leg: reverse-cuts extra lots
-        std::chrono::steady_clock::time_point _incompleteSince{};  // when the pack stopped being whole; zero when whole
+        uint64_t                  _incompleteSinceNs = 0;  // monotonic ns when the pack stopped being whole; 0 when whole
     };
 
     // Net buy/sell position of one leg across both packs.
@@ -154,7 +153,9 @@ class RatioLegStrategy {
     static constexpr size_t BIDDING_LEG = 0;  // leg 0 always bids; other legs hedge
     static constexpr int    DEFAULT_REVERT_BID_MS = 1000;  // TimeToRevertBidMs 0 would leave a pack naked forever
     static constexpr size_t LOG_BUFFER_BYTES      = 1 << 16;
-    static constexpr int    THROTTLE_PAUSE_MS     = 1000;  // exchange message limits count per second
+    static constexpr uint64_t THROTTLE_PAUSE_NS   = 1'000'000'000;  // exchange message limits count per second
+    static constexpr uint64_t THROTTLE_RETRY_NS   = 5'000'000;      // after a THROTTLE_LIMIT reject nothing is resent sooner (was every tick)
+    static constexpr int    BID_GATE_REOPEN_TICKS = 3;     // a TOO_FAR gate reopens this many ticks inside AllowedBidDepth
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
@@ -263,7 +264,9 @@ class RatioLegStrategy {
     bool   _deleted   = false;
 
     // Set by a THROTTLE_LIMIT reject. Shared by every strategy: the limit counts the whole OMS session's messages.
-    static inline std::chrono::steady_clock::time_point _bidPausedUntil{};
+    // Monotonic nanoseconds (aef::infra::get_time_in_nanos, CLOCK_MONOTONIC).
+    static inline uint64_t _bidPausedUntilNs  = 0;
+    static inline uint64_t _throttleRetryAtNs = 0;
 
     TradeTracer                            _tradeTracer{};
     std::string                            _logFileName;

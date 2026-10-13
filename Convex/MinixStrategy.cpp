@@ -258,10 +258,10 @@ auto MinixStrategy::doWork() -> int {
     }
     if (erased) RebuildTickRoutes();
 
-    // steady_clock: a wall-clock step (NTP) must not stall or burst the UI echo.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - _lastSpreadSend >= std::chrono::seconds(1)) {
-        _lastSpreadSend = now;
+    // Monotonic clock: a wall-clock step (NTP) must not stall or burst the UI echo.
+    const uint64_t now = aef::infra::get_time_in_nanos();
+    if (now - _lastSpreadSendNs >= 1'000'000'000) {
+        _lastSpreadSendNs = now;
         SendStrategySpreadsToUi();
         std::cout << "[doWork] event_timestamp=" << _eventTimestamp << " _eventCount=" << _eventCount << std::endl;
         _eventCount = 0;

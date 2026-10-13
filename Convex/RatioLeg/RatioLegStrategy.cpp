@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -66,7 +65,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
         throw std::runtime_error(fmt::format("strategy {}: {} legs, supported 2..{}", _strategyId, _legCount, MAX_LEGS));
     }
 
-    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    const std::time_t now = std::time(nullptr);
     std::tm           localTime{};
     localtime_r(&now, &localTime);
     _utcOffsetSeconds = localTime.tm_gmtoff;
@@ -264,7 +263,7 @@ void RatioLegStrategy::Forget(std::string_view reason_) {
         pack->_hedgeWaiting.fill(false);
         pack->_isUnhedged      = false;
         pack->_tradedSpread    = 0.0;
-        pack->_incompleteSince = {};
+        pack->_incompleteSinceNs = 0;
     }
     Stop(reason_);
 }
@@ -306,9 +305,10 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     }
 
     if (response_.hdr_.transaction_code == OMS_REQ_REJ && response_.hdr_.error_code == THROTTLE_LIMIT) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= _bidPausedUntil) WriteLog("[THROTTLE] uid={} rejected by the message limit: new bids paused {} ms\n", uint32_t{response_.hdr_.uid_.id_}, THROTTLE_PAUSE_MS);
-        _bidPausedUntil = now + std::chrono::milliseconds(THROTTLE_PAUSE_MS);
+        const uint64_t now = aef::infra::get_time_in_nanos();
+        if (now >= _bidPausedUntilNs) WriteLog("[THROTTLE] uid={} rejected by the message limit: new bids paused {} ms\n", uint32_t{response_.hdr_.uid_.id_}, THROTTLE_PAUSE_NS / 1'000'000);
+        _bidPausedUntilNs  = now + THROTTLE_PAUSE_NS;
+        _throttleRetryAtNs = now + THROTTLE_RETRY_NS;
     }
 
     // A cut IOC trades the other pack's side of its leg, so its uid names its pack (read before a fill resets it).
@@ -352,12 +352,14 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 // (hedge the legs, or let the bid finish leg 0's part pack) and reverse-cutting the extra lots, each for
 // TimeToRevertBidMs, until it is whole. A cut IOC in flight pauses the pack until it is answered.
 void RatioLegStrategy::ProcessPack(Pack& pack_) {
+    // Resending on every tick after a THROTTLE_LIMIT reject sent 25k rejected hedges in 0.7 s (14:31:36 log).
+    if (aef::infra::get_time_in_nanos() < _throttleRetryAtNs) return;
     for (size_t leg = 0; leg < _legCount; ++leg) {
         if (pack_._cutOrders[leg]->get_current_state() != IDLE) return;
     }
     const bool isWhole = IsWhole(pack_);
     if (isWhole) {
-        pack_._incompleteSince = {};
+        pack_._incompleteSinceNs = 0;
     } else if (InCutWindow(pack_)) {
         // A hedge that could not fill in a whole window would fail again on re-entry: stop. A part pack keeps bidding.
         if (pack_._isUnhedged && IsActive()) Stop("hedge failed, reverse cut");
@@ -432,12 +434,23 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         thinLeg = FindThinHedgeLeg(pack_);
         if (thinLeg != NO_LEG) return BidGate::HEDGE_DEPTH;
         if (bidPrice <= 0) return BidGate::UNREACHABLE;
-        if (_allowedBidDepth > 0 && TicksBehindTouch(pack_, bidPrice) > _allowedBidDepth) return BidGate::TOO_FAR;
+        if (_allowedBidDepth > 0) {
+            // A closed gate reopens a few ticks inside the limit: a bid jittering at the edge flapped TOO_FAR <-> BID
+            // on every tick, a place and a cancel each time, and used up the message limit the hedges need.
+            const int depth = (pack_._bidGate == BidGate::TOO_FAR) ? std::max(_allowedBidDepth - BID_GATE_REOPEN_TICKS, 0) : _allowedBidDepth;
+            if (TicksBehindTouch(pack_, bidPrice) > depth) return BidGate::TOO_FAR;
+        }
         return BidGate::BID;
     }();
     SetBidGate(pack_, gate, thinLeg, spreadQuote, spreadMatched, bidPrice);
     if (gate != BidGate::BID) {
         PullOrder(pack_, BIDDING_LEG, "bid gate closed");
+        return;
+    }
+    // After a throttle reject the bid leaves the book until the pause ends: it cannot be repriced in time, so a resting
+    // bid was filled past the target, and its messages are the hedges' share of the limit.
+    if (aef::infra::get_time_in_nanos() < _bidPausedUntilNs) {
+        PullOrder(pack_, BIDDING_LEG, "throttled");
         return;
     }
 
@@ -453,10 +466,6 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const bool pastTarget = (pack_._sides[BIDDING_LEG] == SELL_SIDE) ? oldPrice < bidPrice : oldPrice > bidPrice;
     if (oldPrice != 0 && !spreadMatched && !pastTarget && std::abs(oldPrice - bidPrice) < _repriceThreshold) {
         return;
-    }
-    // After a throttle reject only a working bid priced past the target moves: new bids wait, so hedges get the message limit.
-    if (oldPrice == 0 || !pastTarget) {
-        if (std::chrono::steady_clock::now() < _bidPausedUntil) return;
     }
     const std::string_view action = OrderAction(bidOrder);
     const int              oldQty = bidOrder.get_open_qty();
@@ -636,12 +645,11 @@ auto RatioLegStrategy::IsWhole(const Pack& pack_) const noexcept -> bool {
 // TimeToRevertBidMs alternate: even ones complete the pack, odd ones cut it.
 // ponytail: checked on ticks and responses only; a silent feed delays the switch until the next event.
 auto RatioLegStrategy::InCutWindow(Pack& pack_) -> bool {
-    using Clock                 = std::chrono::steady_clock;
-    const Clock::time_point now = Clock::now();
-    if (pack_._incompleteSince == Clock::time_point{}) {
-        pack_._incompleteSince = now;
+    const uint64_t now = aef::infra::get_time_in_nanos();
+    if (pack_._incompleteSinceNs == 0) {
+        pack_._incompleteSinceNs = now;
     }
-    return (now - pack_._incompleteSince) / std::chrono::milliseconds(_revertBidMs) % 2 == 1;
+    return (now - pack_._incompleteSinceNs) / (static_cast<uint64_t>(_revertBidMs) * 1'000'000) % 2 == 1;
 }
 
 // Pull the pack's own order on a leg first (it would trade against the cut), then IOC the leg's extra lots

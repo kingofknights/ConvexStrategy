@@ -13,7 +13,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -81,7 +80,7 @@ class MinixStrategy final : public AlgoBase {
 
     std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
     std::unordered_map<int32_t, std::vector<RatioLegStrategy*>> _tickRoutes;  // token -> strategies with a leg on it
-    std::chrono::steady_clock::time_point                 _lastSpreadSend{};
+    uint64_t                                              _lastSpreadSendNs = 0;  // monotonic ns
     ManualOrder                                           _manualOrder{this};
     std::unique_ptr<SquareOff>                            _squareOff;  // built once the config is read
 
