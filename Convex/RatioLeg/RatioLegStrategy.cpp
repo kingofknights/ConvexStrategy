@@ -82,8 +82,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     _logFileName = fmt::format("{}/{}Ratio_{}_{}.log", logDir, _legCount, _strategyId, timeText);
     _logFile.reset(std::fopen(_logFileName.c_str(), "a"));
     if (_logFile) {
-        // Line-buffered: the last trades before a crash must reach disk. Logging is off the tick path.
-        std::setvbuf(_logFile.get(), nullptr, _IOLBF, 0);
+        // Fully buffered: a line-buffered log made one write() syscall per line on the order path.
+        // The hub flushes every doWork(), so a crash loses at most the lines since the last loop pass.
+        std::setvbuf(_logFile.get(), nullptr, _IOFBF, LOG_BUFFER_BYTES);
     } else {
         // Without this the strategy runs with every WriteLog silently dropped.
         std::cerr << "[RatioLeg] strat=" << _strategyId << " cannot open log '" << _logFileName << "': " << std::strerror(errno) << std::endl;
@@ -439,8 +440,9 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int orderLots     = (packRemainder > 0) ? (biddingRatio - packRemainder) : (pack_._params._slicePacks * biddingRatio);
     const int quantity      = std::min(orderLots, remainingLots) * _lotSize;
 
-    // A working order moves only when the price moves by at least TickSize ticks (a finished order's open price is 0).
-    if (std::abs(bidOrder.get_open_price() - bidPrice) < _repriceThreshold) {
+    // A working order moves when the price moves by at least TickSize ticks (a finished order's open price is 0), or on
+    // every tick while the market spread meets the target (UpdateOrder skips a modify to the same price and quantity).
+    if (!spreadMatched && std::abs(bidOrder.get_open_price() - bidPrice) < _repriceThreshold) {
         return;
     }
     const std::string_view action   = OrderAction(bidOrder);
@@ -610,9 +612,11 @@ auto RatioLegStrategy::ExtraLots(const Pack& pack_, size_t leg_) const noexcept 
     return pack_._tradedLots[leg_] - CompletedPacks(pack_) * _ratios[leg_];
 }
 
+// One pass: ExtraLots per leg would recount the completed packs for every leg (legs x legs divisions per tick).
 auto RatioLegStrategy::IsWhole(const Pack& pack_) const noexcept -> bool {
+    const int completedPacks = CompletedPacks(pack_);
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        if (ExtraLots(pack_, leg) != 0) return false;
+        if (pack_._tradedLots[leg] != completedPacks * _ratios[leg]) return false;
     }
     return true;
 }

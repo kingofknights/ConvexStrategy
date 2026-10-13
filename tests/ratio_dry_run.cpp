@@ -410,6 +410,7 @@ void MissedEntryLogsEveryTick() {
         }
     }
     const auto countLines = [&](std::string_view text_) {
+        exchange::hub->doWork();  // flush the buffered strategy log
         std::ifstream file(logName);
         int           count = 0;
         for (std::string line; std::getline(file, line);) count += line.find(text_) != std::string::npos;
@@ -546,6 +547,25 @@ void BidTracksHedgeLegs() {
     exchange::Tick(LEG0, 535, 545);  // bid reaches 535: both packs fill, traded 1605 - 780 - 680 = 145 >= 140
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
     std::printf("  bid tracks hedges: 525 kept on a 5 paise move, 535 after a 10 paise move, filled\n");
+}
+
+// While the market spread meets the target, the bid follows every tick, under the TickSize threshold too.
+void BidTracksEveryTickWhenSpreadMatched() {
+    constexpr int  ID            = 33;
+    nlohmann::json config        = RatioConfig(ID, "Applied");
+    config["Params"]["TickSize"] = 2;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 320, 330);
+    exchange::Tick(LEG0, 500, 510);  // (140 + 780 + 2*330) / 3 = 526.67 -> SELL rests at 530
+    CHECK(LivePrice(ID, LEG0) == 530);
+    exchange::Tick(LEG2, 315, 325, false);  // 523.33 -> 525: moved 5 < 10, market 1500 - 1430 = 70 < 140, not modified
+    CHECK(exchange::sent.back().hdr_.transaction_code == OMS_PLACE_REQ);
+    exchange::Tick(LEG0, 530, 540, false);  // market 1590 - 1430 = 160 >= 140: 525 sent although it moved only 5
+    CHECK(exchange::sent.back().hdr_.transaction_code == OMS_REPLACE_REQ && exchange::sent.back().packet_.price_ == 525);
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
+    std::printf("  spread matched: bid modified 530 -> 525 on a 5 paise move, filled\n");
 }
 
 // Market beats the target: the bid is still priced at the target, so it crosses past the touch.
@@ -762,6 +782,7 @@ void HedgeIgnoresZeroSlice() {
 }
 
 auto StrategyLogBytes() -> uintmax_t {
+    exchange::hub->doWork();  // strategy logs are buffered until the hub flushes them
     uintmax_t bytes = 0;
     for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
         if (entry.is_regular_file()) bytes += entry.file_size();
@@ -964,6 +985,7 @@ int main() {
     MissedEntryLogsEveryTick();
     SlippageInPaise();
     BidTracksHedgeLegs();
+    BidTracksEveryTickWhenSpreadMatched();
     BidCrossesWhenMarketBeatsTarget();
     UnreachableTargetSendsNothing();
     StrikeGapBackSolve();

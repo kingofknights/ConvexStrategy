@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -50,6 +51,10 @@ class RatioLegStrategy {
         }
     }
 
+    void FlushLog() const {
+        if (_logFile) std::fflush(_logFile.get());
+    }
+
     void ParamUpdate(const nlohmann::json& json_);
     void SetStatus(StrategyStatus status_);
     void Stop(std::string_view reason_);
@@ -62,6 +67,7 @@ class RatioLegStrategy {
     void OnTick(const Quote& quote_);
     void OnOrderResponse(const oms_transaction& response_);
 
+    [[nodiscard]] auto GetTokens() const -> std::span<const int> { return {_tokens.data(), _legCount}; }
     [[nodiscard]] auto GetInterface() const -> int32_t;
     [[nodiscard]] auto GetStrategyID() const -> uint32_t;
     [[nodiscard]] auto GetGap() const -> int;
@@ -147,6 +153,7 @@ class RatioLegStrategy {
     static constexpr size_t NO_LEG      = std::numeric_limits<size_t>::max();
     static constexpr size_t BIDDING_LEG = 0;  // leg 0 always bids; other legs hedge
     static constexpr int    DEFAULT_REVERT_BID_MS = 1000;  // TimeToRevertBidMs 0 would leave a pack naked forever
+    static constexpr size_t LOG_BUFFER_BYTES      = 1 << 16;
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;

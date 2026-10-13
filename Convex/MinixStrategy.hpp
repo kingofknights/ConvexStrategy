@@ -20,6 +20,8 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 
 class RatioLegStrategy;
 
@@ -47,6 +49,7 @@ class MinixStrategy final : public AlgoBase {
   private:
     void ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
     void HandleRatioLegStrategy(const nlohmann::json& root_, size_t legCount_, int32_t interface_, bool hasStrikeGap_);
+    void RebuildTickRoutes();
 
     // Once per ~1s, echo spread and PnL of every strategy back to the GUI.
     void SendStrategySpreadsToUi();
@@ -77,6 +80,7 @@ class MinixStrategy final : public AlgoBase {
     JsonReassembly _jsonReassembly;
 
     std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
+    std::unordered_map<int32_t, std::vector<RatioLegStrategy*>> _tickRoutes;  // token -> strategies with a leg on it
     std::chrono::steady_clock::time_point                 _lastSpreadSend{};
     ManualOrder                                           _manualOrder{this};
     std::unique_ptr<SquareOff>                            _squareOff;  // built once the config is read
