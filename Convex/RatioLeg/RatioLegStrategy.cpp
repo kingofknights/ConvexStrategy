@@ -79,7 +79,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     std::error_code   ignored;
     std::filesystem::create_directories(logDir, ignored);
 
-    _logFileName = fmt::format("{}/{}Ratio_{}_{}.log", logDir, _legCount, _strategyId, timeText);
+    // The portfolio is the strategy id, as on the UI order echo.
+    const int userId = json_.contains("Strategy") ? json_["Strategy"].value("UserId", 0) : 0;
+    _logFileName     = fmt::format("{}/user_{}_portfolio_{}_{}.log", logDir, userId, _strategyId, timeText);
     _logFile.reset(std::fopen(_logFileName.c_str(), "a"));
     if (_logFile) {
         // Fully buffered: a line-buffered log made one write() syscall per line on the order path.

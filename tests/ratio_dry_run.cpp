@@ -404,7 +404,7 @@ void MissedEntryLogsEveryTick() {
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     std::filesystem::path logName;  // newest: log/ keeps the files of earlier runs
     for (const auto& entry : std::filesystem::recursive_directory_iterator("log")) {
-        if (entry.path().filename().string().find("Ratio_17_") != std::string::npos &&
+        if (entry.path().filename().string().find("_portfolio_17_") != std::string::npos &&
             (logName.empty() || entry.last_write_time() > std::filesystem::last_write_time(logName))) {
             logName = entry.path();
         }
