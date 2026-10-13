@@ -355,6 +355,16 @@ auto LivePrice(int strategy_, int token_) -> int {
     return 0;
 }
 
+// New orders a strategy sent on one side of a token.
+auto PlacesOf(int strategy_, int token_, ORDER_SIDE side_) -> int {
+    int count = 0;
+    for (const auto& request : exchange::sent) {
+        count += request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
+                 request.hdr_.transaction_code == OMS_PLACE_REQ && request.packet_.flags_.order_side == side_;
+    }
+    return count;
+}
+
 // ═══ Scenarios ═══════════════════════════════════════════════════════════════
 
 // Full life: subscribe, apply, bid rests at the target price while the market misses, fills once the bid reaches it, done.
@@ -453,14 +463,14 @@ void StopKeepsHedging() {
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 525, 535, false);  // bid sent at the 325 leg2 snapshot
     exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // bid fills: leg1 hedges, leg2 rests at 325 with no ask to take
+    exchange::Pump();                       // bid fills: leg1 hedges, leg2 waits with no ask to take
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
 
     SendConfig(RatioConfig(ID, "Stop"));
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);
     exchange::Tick(LEG2, 315, 330);  // asks return
     CHECK(Position(ID, LEG2) == 2 * LOT);
-    CHECK(NthPlacePrice(ID, LEG2, 1) == 325);  // MarketRetries 5: starts at the 325 snapshot, steps to 330
+    CHECK(NthPlacePrice(ID, LEG2, 1) == 330);  // the touch once asks return
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
@@ -479,14 +489,24 @@ void RejectsUnknownToken() {
     std::printf("  unknown token: creation refused, nothing subscribed\n");
 }
 
-// With MarketRetries > 0 each pack's hedge starts at the snapshot price, not where the last pack's retries left off.
-void HedgeRetriesResetPerPack() {
+// A hedge goes straight to the touch: leg2's ask moved 325 -> 335 while the bid was in flight, so one order at 335,
+// no steps up from the 325 the bid was priced on (each step cost a message under the ~30 per second throttle).
+void HedgeTakesTouch() {
     constexpr int ID = 14;
     SendConfig(RatioConfig(ID, "Applied"));
-    TickAllLegs();  // market 145 >= 140: two packs cross back to back
-    CHECK(Position(ID, LEG2) == 2 * 2 * LOT);
-    CHECK(NthPlacePrice(ID, LEG2, 1) == 325 && NthPlacePrice(ID, LEG2, 2) == 325);  // snapshot ask, zero retry ticks
-    std::printf("  hedge retries reset per pack: both packs hedged leg2 at the 325 snapshot\n");
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);  // market 145 >= 140: bid crosses at 525, not answered yet
+    exchange::Tick(LEG2, 325, 335, false);  // leg2 ask moves before the fill
+    exchange::Pump();
+    CHECK(Position(ID, LEG2) == 2 * LOT && NthPlacePrice(ID, LEG2, 1) == 335);
+    int leg2Modifies = 0;
+    for (const auto& request : exchange::sent) {
+        leg2Modifies += request.hdr_.uid_.composite_id_.strategy_id == ID && request.packet_.product_id_ == LEG2 && request.hdr_.transaction_code == OMS_REPLACE_REQ;
+    }
+    CHECK(leg2Modifies == 0);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  hedge takes the touch: leg2 bought @335 in one order, no modifies\n");
 }
 
 // The GUI payload verbatim: short pack, 5 packs at a credit of at least -0.05.
@@ -494,16 +514,17 @@ void HedgeRetriesResetPerPack() {
 void ShortPackFromGuiPayload() {
     constexpr int ID = 15;
     SendConfig(GuiConfig(ID, "Applied"));
-    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: BUY rests at (1400 + 5) / 3 = 468.33 -> 465 (rounded down)
+    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: BUY at (1400 + 5) / 3 = 468.33 -> 465 (rounded down)
+    CHECK(PlacesOf(ID, LEG0, BUY_SIDE) == 0);  // 465 is 12 ticks under the 525 bid > AllowedBidDepth 10: not sent
+    exchange::Tick(LEG0, 470, 475);  // 1 tick behind: rests; credit -25 < -5
     const oms_transaction bid = NthPlace(ID, LEG0, 1);
     CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.flags_.order_side == BUY_SIDE && bid.packet_.price_ == 465);
-    exchange::Tick(LEG0, 470, 475);  // credit -25 < -5: still resting
     CHECK(exchange::LiveOrdersOf(ID) == 1 && LivePrice(ID, LEG0) == 465 && Position(ID, LEG0) == 0);
 
     exchange::Tick(LEG0, 460, 465);  // ask reaches 465: fills, then each pack crosses until done
     CHECK(Position(ID, LEG0) == 15 * LOT && Position(ID, LEG1) == -5 * LOT && Position(ID, LEG2) == -10 * LOT);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
-    std::printf("  GUI payload verbatim: short pack BUY rests @465, 5 packs filled, hedged SELL 23100 + 2 x 23300\n");
+    std::printf("  GUI payload verbatim: BUY 465 held back at 12 ticks deep, rests @465 at 1 tick, 5 packs filled, hedged SELL 23100 + 2 x 23300\n");
 }
 
 // AllowedSlippage is in paise. Leg2 hedges at 330 instead of 325: traded 1575 - 780 - 660 = 135, 5 paise under target 140.
@@ -516,8 +537,8 @@ auto SlippedPacks(int strategyId_, int allowedSlippagePaise_) -> long {
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 525, 535, false);  // bid sent at the 325 leg2 snapshot
     exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // bid fills, leg2 hedge rests at 325
-    exchange::Tick(LEG2, 315, 330);         // hedge retries up to 330: pack done, 5 paise slipped
+    exchange::Pump();                       // bid fills, leg2 hedge waits for an ask
+    exchange::Tick(LEG2, 315, 330);         // hedge takes 330: pack done, 5 paise slipped
     CHECK(Position(strategyId_, LEG2) == 2 * LOT);
     exchange::Tick(LEG2, 315, 325);         // market 145 >= 140 again: second pack unless stopped
     SendConfig(RatioConfig(strategyId_, "Stop"));
@@ -530,7 +551,8 @@ void SlippageInPaise() {
     std::printf("  slippage in paise: 5 paise slip stops at AllowedSlippage 4, trades on at 10\n");
 }
 
-// The resting bid follows the hedge legs, modified only when its price moves by TickSize ticks (2 x 5 paise).
+// The resting bid follows the hedge legs. Away from the market it moves only by TickSize ticks (2 x 5 paise); priced
+// past the target it moves at once, else a fill lands under the target (09:32 log: SELL left at 175 while 190 was needed).
 void BidTracksHedgeLegs() {
     constexpr int  ID              = 20;
     nlohmann::json config          = RatioConfig(ID, "Applied");
@@ -540,13 +562,15 @@ void BidTracksHedgeLegs() {
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 500, 510);  // (140 + 780 + 2*325) / 3 = 523.33 -> SELL rests at 525
     CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: moved 5 < 10, not modified
+    exchange::Tick(LEG2, 310, 320);  // (140 + 780 + 2*320) / 3 = 520: 5 away from the market < 10, not modified
     CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG2, 330, 340);  // (140 + 780 + 2*340) / 3 = 533.33 -> 535: moved 10, modified
-    CHECK(LivePrice(ID, LEG0) == 535);
-    exchange::Tick(LEG0, 535, 545);  // bid reaches 535: both packs fill, traded 1605 - 780 - 680 = 145 >= 140
+    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: 525 is past the target, modified on 5
+    CHECK(LivePrice(ID, LEG0) == 530);
+    exchange::Tick(LEG2, 300, 310);  // (140 + 780 + 2*310) / 3 = 513.33 -> 515: 15 away from the market, modified
+    CHECK(LivePrice(ID, LEG0) == 515);
+    exchange::Tick(LEG0, 515, 525);  // bid reaches 515: both packs fill, traded 1545 - 780 - 620 = 145 >= 140
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
-    std::printf("  bid tracks hedges: 525 kept on a 5 paise move, 535 after a 10 paise move, filled\n");
+    std::printf("  bid tracks hedges: 525 kept on a 5 paise passive move, 530 at once past the target, 515 after 15 paise, filled\n");
 }
 
 // While the market spread meets the target, the bid follows every tick, under the TickSize threshold too.
@@ -641,14 +665,6 @@ void PartialPackUnwinds() {
 }
 
 // Count of new orders a strategy sent on a token, of one side.
-auto PlacesOf(int strategy_, int token_, ORDER_SIDE side_) -> int {
-    int count = 0;
-    for (const auto& request : exchange::sent) {
-        count += request.hdr_.uid_.composite_id_.strategy_id == static_cast<uint32_t>(strategy_) && request.packet_.product_id_ == token_ &&
-                 request.hdr_.transaction_code == OMS_PLACE_REQ && request.packet_.flags_.order_side == side_;
-    }
-    return count;
-}
 
 // A hedge rejected with a code the vendor had no branch for (INVALID_PRICE) stayed in flight forever. Now it is retried.
 void UnhandledRejectRetries() {
@@ -665,6 +681,35 @@ void UnhandledRejectRetries() {
     CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
     exchange::rejectCode = EXCHG_ERROR;
     std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried on the next tick, pack whole\n");
+}
+
+// A THROTTLE_LIMIT reject pauses new bids, so a bid the exchange refuses is not resent on every tick (09:25 log:
+// 100k rejects starved the short pack's hedges).
+void ThrottlePausesNewBids() {
+    constexpr int ID = 34;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::rejectToken   = LEG0;
+    exchange::rejectCode    = THROTTLE_LIMIT;
+    exchange::rejectForever = true;
+    for (int i = 0; i < 5; ++i) exchange::Tick(LEG0, 500, 510);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::rejectToken   = 0;
+    exchange::rejectCode    = EXCHG_ERROR;
+    exchange::rejectForever = false;
+
+    constexpr int OTHER_ID = 35;  // the pause is shared: another strategy waits too
+    SendConfig(RatioConfig(OTHER_ID, "Applied"));
+    TickAllLegs();
+    CHECK(PlacesOf(OTHER_ID, LEG0, SELL_SIDE) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    exchange::Tick(LEG0, 500, 510);  // pause over: both bid again
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && PlacesOf(OTHER_ID, LEG0, SELL_SIDE) == 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    SendConfig(RatioConfig(OTHER_ID, "Stop"));
+    exchange::Tick(LEG0, 500, 510);
+    std::printf("  throttle: 1 bid over 5 ticks after a THROTTLE_LIMIT reject, other strategy paused too, both resume after 1 s\n");
 }
 
 // Leg2's hedge is refused every time (price band). After TimeToRevertBidMs the pack is cut back: leg 0 bought back, leg1 sold,
@@ -700,7 +745,6 @@ void AlternatesUntilWhole() {
     constexpr int  ID                     = 27;
     nlohmann::json config                 = RatioConfig(ID, "Applied");
     config["Params"]["TimeToRevertBidMs"] = 20;
-    config["Params"]["MarketRetries"]     = 0;  // hedges take the touch at once: no leg2 ask, no leg2 order
     SendConfig(config);
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
@@ -766,7 +810,6 @@ void DeleteWaitsUntilWhole() {
 void HedgeIgnoresZeroSlice() {
     constexpr int  ID                 = 31;
     nlohmann::json config             = RatioConfig(ID, "Applied");
-    config["Params"]["MarketRetries"] = 0;
     SendConfig(config);
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
@@ -980,11 +1023,12 @@ int main() {
     StopRacesPendingBid();
     StopKeepsHedging();
     RejectsUnknownToken();
-    HedgeRetriesResetPerPack();
+    HedgeTakesTouch();
     ShortPackFromGuiPayload();
     MissedEntryLogsEveryTick();
     SlippageInPaise();
     BidTracksHedgeLegs();
+    ThrottlePausesNewBids();
     BidTracksEveryTickWhenSpreadMatched();
     BidCrossesWhenMarketBeatsTarget();
     UnreachableTargetSendsNothing();

@@ -93,12 +93,14 @@ class RatioLegStrategy {
 
     // Why the bidding leg is (not) quoting. Logged only when it changes, so a silent strategy explains itself.
     // BID: leg 0 order works at the target price. UNREACHABLE: the target needs a leg 0 price <= 0.
+    // TOO_FAR: the target price sits more than AllowedBidDepth ticks behind leg 0's own touch.
     enum class BidGate : uint8_t { UNKNOWN,
                                    BID,
                                    DONE,
                                    HEDGE_DEPTH,
                                    NO_PRICE,
-                                   UNREACHABLE };
+                                   UNREACHABLE,
+                                   TOO_FAR };
 
     struct PackParams {
         int   _totalPacks   = 0;  // packs to trade in total
@@ -125,12 +127,10 @@ class RatioLegStrategy {
         LegArray<uint64_t>        _tradedValue{};
         LegArray<int32_t>         _unreportedLots{};  // fills not yet reported as whole packs to the tracer
         LegArray<uint64_t>        _unreportedValue{};
-        LegArray<size_t>          _hedgeRetryCount{};
         bool                      _isUnhedged = false;
         BidGate                   _bidGate    = BidGate::UNKNOWN;
         LegArray<bool>            _hedgeWaiting{};      // hedge leg has no opposite price; logged once per wait
         double                    _tradedSpread = 0.0;  // average traded spread (paise), refreshed only while hedged
-        SpreadQuote               _bidSnapshot;         // leg prices when the bidding order was last sent
         LegArray<OrderObjectPtrT> _cutOrders;           // IOC on the opposite side of each leg: reverse-cuts extra lots
         std::chrono::steady_clock::time_point _incompleteSince{};  // when the pack stopped being whole; zero when whole
     };
@@ -154,6 +154,7 @@ class RatioLegStrategy {
     static constexpr size_t BIDDING_LEG = 0;  // leg 0 always bids; other legs hedge
     static constexpr int    DEFAULT_REVERT_BID_MS = 1000;  // TimeToRevertBidMs 0 would leave a pack naked forever
     static constexpr size_t LOG_BUFFER_BYTES      = 1 << 16;
+    static constexpr int    THROTTLE_PAUSE_MS     = 1000;  // exchange message limits count per second
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
@@ -194,6 +195,7 @@ class RatioLegStrategy {
     void               EvaluateBidding(Pack& pack_);
     [[nodiscard]] auto FindThinHedgeLeg(const Pack& pack_) const -> size_t;  // NO_LEG when every hedge leg has depth
     [[nodiscard]] auto TargetBidPrice(const Pack& pack_, const SpreadQuote& spreadQuote_) const -> int;
+    [[nodiscard]] auto TicksBehindTouch(const Pack& pack_, int bidPrice_) const -> int;  // 0 when crossing or no touch
 
     // ── Hedge legs ────────────────────────────────────────────────────────────
     void HedgePack(Pack& pack_);
@@ -248,7 +250,7 @@ class RatioLegStrategy {
     int    _hedgeDepthPercent  = 0;
     int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;
-    size_t _marketOrderRetries = 0;
+    int    _allowedBidDepth    = 0;  // ticks a resting bid may sit behind its own touch; 0 = no limit
     int    _revertBidMs        = DEFAULT_REVERT_BID_MS;  // length of each complete / reverse-cut window
 
     // ── Cached fast-path lookup ───────────────────────────────────────────────
@@ -259,6 +261,9 @@ class RatioLegStrategy {
 
     double _unwindPnL = 0.0;  // realized on reverse-cut lots, after cost (paise x quantity, like GetRLP)
     bool   _deleted   = false;
+
+    // Set by a THROTTLE_LIMIT reject. Shared by every strategy: the limit counts the whole OMS session's messages.
+    static inline std::chrono::steady_clock::time_point _bidPausedUntil{};
 
     TradeTracer                            _tradeTracer{};
     std::string                            _logFileName;
