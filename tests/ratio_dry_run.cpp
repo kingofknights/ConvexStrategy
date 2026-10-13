@@ -1000,7 +1000,7 @@ void ManualOrders() {
     std::printf("  manual orders: place / modify / cancel echoed on 5001, bad requests rejected, 2 legs on their own tokens\n");
 }
 
-// ═══ Square-off (GUI 1331) ═══════════════════════════════════════════════════
+// ═══ Square-off (GUI 1331 all, 1332 one token) ═════════════════════════════════════
 
 // Broadcast with only the third level set: square-off prices there.
 void Bcast(int token_, int thirdBid_, int thirdAsk_) {
@@ -1076,6 +1076,26 @@ void SquareOffStopsStrategies() {
     std::printf("  square-off mid-hedge: strategy stopped and forgot its lots, account flat, leg2 never bought\n");
 }
 
+// Token-wise square-off (1332) flattens only the token the GUI names; other open tokens stay.
+void SquareOffOneToken() {
+    exchange::dbPositions = {{LEG1, LOT}, {LEG2, -LOT}};
+    const size_t sent     = exchange::sent.size();
+
+    oms_transaction3l request{};
+    request.packet_.product_id_[0] = LEG2;
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF_TOKEN;
+    packet.header.interface_id = 7;
+    std::memcpy(packet.message, &request, sizeof(request));
+    exchange::hub->onUIRequest(packet);
+    Bcast(LEG1, 760, 790);
+    Bcast(LEG2, 305, 335);
+    CHECK(exchange::sent.size() == sent + 1);
+    const oms_transaction& buy = exchange::sent[sent];
+    CHECK(buy.packet_.product_id_ == LEG2 && buy.packet_.flags_.order_side == BUY_SIDE && buy.packet_.price_ == 335 && buy.packet_.quantity_ == LOT);
+    std::printf("  token-wise square-off: short 65 of LEG2 bought @335, LEG1 left open\n");
+}
+
 int main() {
     std::ofstream("dry_run_config.json") << R"({"client":1,"algoid":1,"omsid":1})";
 
@@ -1121,5 +1141,6 @@ int main() {
     ManualOrders();
     SquareOffFlattens();
     SquareOffStopsStrategies();
+    SquareOffOneToken();
     std::printf("all scenarios passed\n");
 }

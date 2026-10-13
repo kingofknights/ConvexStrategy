@@ -6,7 +6,9 @@
 
 #include "RatioLegStrategy.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -67,15 +69,26 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
         _manualOrder.OnRequest(request_);
         return;
     }
-    if (request_.header.message_code == UiMessageCode_SQUARE_OFF) {
+    if (request_.header.message_code == UiMessageCode_SQUARE_OFF || request_.header.message_code == UiMessageCode_SQUARE_OFF_TOKEN) {
+        int32_t token = 0;  // 0: every token
+        if (request_.header.message_code == UiMessageCode_SQUARE_OFF_TOKEN) {
+            oms_transaction3l request;  // copied out: the packed struct is not aligned inside UIStruct::message
+            std::memcpy(&request, request_.message, sizeof(request));
+            token = static_cast<int32_t>(request.packet_.product_id_[0] & 0xFFFFFFFFU);
+        }
+        const auto holdsToken = [token](const RatioLegStrategy& strategy_) { return token == 0 || std::ranges::find(strategy_.GetTokens(), token) != strategy_.GetTokens().end(); };
         // Strategies stop first, so none opens or hedges against the flatten. Once the square-off owns the
         // positions they drop theirs, else a pending hedge or cut would re-open a leg it just closed.
         for (const auto& [strategyId, strategy] : _strategies) {
-            strategy->Stop("GUI square-off");
+            if (holdsToken(*strategy)) {
+                strategy->Stop("GUI square-off");
+            }
         }
-        if (_squareOff->Start(request_.header.interface_id)) {
+        if (_squareOff->Start(request_.header.interface_id, token)) {
             for (const auto& [strategyId, strategy] : _strategies) {
-                strategy->Forget("GUI square-off");
+                if (holdsToken(*strategy)) {
+                    strategy->Forget("GUI square-off");
+                }
             }
         }
         return;

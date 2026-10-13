@@ -33,13 +33,7 @@ SquareOff::SquareOff(MinixStrategy* hub_, const nlohmann::json& config_)
     _clientUid.composite_id_.client_id = static_cast<uint32_t>(_hub->_clientId + 2) & 0b111U;
 }
 
-auto SquareOff::Start(int32_t interface_) -> bool {
-    if (!_positions.empty()) {
-        std::cout << "[SquareOff] already running for " << _positions.size() << " tokens -- ignored" << std::endl;
-        return false;
-    }
-
-    _interface = interface_;
+auto SquareOff::Start(int32_t interface_, int32_t token_) -> bool {
     std::map<int32_t, int32_t> netQuantities;
     try {
         // ponytail: blocks the strategy thread for the DB round trip, as the example does; move off-thread if it stalls ticks.
@@ -48,11 +42,15 @@ auto SquareOff::Start(int32_t interface_) -> bool {
         std::cout << "[SquareOff] cannot load positions for trader " << _db._traderId << ": " << e.what() << std::endl;
         return false;
     }
+    // A token already being flattened keeps its order: its in-flight fills may not be in the DB yet.
+    std::erase_if(netQuantities, [&](const auto& entry_) { return (token_ != 0 && entry_.first != token_) || _positions.contains(entry_.first); });
     if (netQuantities.empty()) {
-        std::cout << "[SquareOff] no open positions for trader " << _db._traderId << std::endl;
+        std::cout << "[SquareOff] nothing new to flatten for trader " << _db._traderId << " token=" << token_ << " (0 = all), " << _positions.size()
+                  << " tokens already running" << std::endl;
         return false;
     }
 
+    _interface = interface_;
     for (const auto& [token, netQuantity] : netQuantities) {
         const ORDER_SIDE side = netQuantity > 0 ? SELL_SIDE : BUY_SIDE;
         _hub->subscribeProduct(token, _hub->_feedFlags);

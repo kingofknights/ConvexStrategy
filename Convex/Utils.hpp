@@ -110,6 +110,7 @@ enum UiMessageCode : int32_t {
     UiMessageCode_MANUAL_ORDER          = 9911,
     UiMessageCode_MANUAL_ORDER_RESPONSE = 5001,
     UiMessageCode_SQUARE_OFF            = 1331,  // square off every position the trader holds today
+    UiMessageCode_SQUARE_OFF_TOKEN      = 1332,  // square off one token: oms_transaction3l, token in packet_.product_id_[0]
 };
 
 struct UserPortfolio {

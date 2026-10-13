@@ -8,8 +8,8 @@
 
 class MinixStrategy;
 
-// GUI square-off (1331): reads the trader's fills for today from Postgres, then flattens every token with a
-// net position. A long sells at the third bid and a short buys at the third ask, so the order crosses the touch;
+// GUI square-off: reads the trader's fills for today from Postgres, then flattens every token (1331) or one
+// token (1332) with a net position. A long sells at the third bid and a short buys at the third ask, so the order crosses the touch;
 // it is re-priced on each broadcast until the token is flat.
 class SquareOff {
   public:
@@ -21,9 +21,9 @@ class SquareOff {
 
     SquareOff(MinixStrategy* hub_, const nlohmann::json& config_);
 
-    // Loads today's positions and starts flattening them; order responses echo to interface_ on 5001.
-    // Ignored while a square-off is running. True when it took positions to flatten.
-    auto Start(int32_t interface_) -> bool;
+    // Loads today's positions and starts flattening them, only token_'s when it is not 0; order responses echo
+    // to interface_ on 5001. Tokens already being flattened are left alone. True when it took positions to flatten.
+    auto Start(int32_t interface_, int32_t token_ = 0) -> bool;
     void OnBcast(const aef::infra::product::product_data& product_);
     // True when response_ belongs to a square-off order.
     auto OnOrderResponse(const oms_transaction& response_) -> bool;
