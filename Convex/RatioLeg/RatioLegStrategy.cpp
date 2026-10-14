@@ -421,11 +421,11 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int     remainingLots = pack_._params._totalPacks * biddingRatio - tradedLots;
     const float   targetSpread  = pack_._params._targetSpread;
 
-    // Market spread prices every leg at the crossing side. The bid price is leg 0's price that gives exactly the
-    // target with the hedge legs at those prices: past the touch (crosses) when the market beats the target, else it rests.
+    // Market spread prices every leg at the crossing side. When it meets the target, leg 0 takes its crossing touch
+    // (at market). Else the bid rests at leg 0's price that gives exactly the target with the hedge legs at those prices.
     const SpreadQuote spreadQuote   = QuoteSpread(pack_._cache);
     const bool        spreadMatched = spreadQuote._valid && spreadQuote._spread >= targetSpread;
-    const int         bidPrice      = spreadQuote._valid ? TargetBidPrice(pack_, spreadQuote) : 0;
+    const int         bidPrice      = !spreadQuote._valid ? 0 : spreadMatched ? spreadQuote._price[BIDDING_LEG] : TargetBidPrice(pack_, spreadQuote);
 
     size_t        thinLeg = NO_LEG;
     const BidGate gate    = [&] {
@@ -459,12 +459,10 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int orderLots     = (packRemainder > 0) ? (biddingRatio - packRemainder) : (pack_._params._slicePacks * biddingRatio);
     const int quantity      = std::min(orderLots, remainingLots) * _lotSize;
 
-    // A working order moves at once when it is priced past the target (SELL under, BUY over the bid price), because a
-    // fill there lands under the target. Away from the market it moves only by TickSize ticks, or on every tick while
-    // the market spread meets the target (UpdateOrder skips a modify to the same price and quantity).
-    const int  oldPrice   = bidOrder.get_open_price();  // 0 when no order is working
-    const bool pastTarget = (pack_._sides[BIDDING_LEG] == SELL_SIDE) ? oldPrice < bidPrice : oldPrice > bidPrice;
-    if (oldPrice != 0 && !spreadMatched && !pastTarget && std::abs(oldPrice - bidPrice) < _repriceThreshold) {
+    // A resting bid moves only when its price changes by TickSize ticks (GUI), each modify costs a message. While the
+    // market spread meets the target it follows the touch on every tick (UpdateOrder skips a modify to the same price).
+    const int oldPrice = bidOrder.get_open_price();  // 0 when no order is working
+    if (oldPrice != 0 && !spreadMatched && std::abs(oldPrice - bidPrice) < _repriceThreshold) {
         return;
     }
     const std::string_view action = OrderAction(bidOrder);
@@ -472,7 +470,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     if (const uint32_t uid = _hub->UpdateOrder(bidOrder, bidPrice, quantity, _clientUid); uid != 0) {
         WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | BID {} market={} target={} lots=[{}] book=[{}]\n",
                  PackName(pack_), BIDDING_LEG, _tokens[BIDDING_LEG], SideName(pack_._sides[BIDDING_LEG]), action, uid, oldPrice, bidPrice, oldQty, quantity,
-                 spreadMatched ? "CROSS" : "REST", spreadQuote._spread, targetSpread, LotsText(pack_), BookText());
+                 spreadMatched ? "MARKET" : "REST", spreadQuote._spread, targetSpread, LotsText(pack_), BookText());
     }
 }
 
@@ -603,7 +601,10 @@ void RatioLegStrategy::CheckSlippageThreshold(Pack& pack_, const oms_transaction
     _tradeTracer._price        = pack_._params._targetSpread / 100.0F;
     _tradeTracer._ltp          = adjustedTradedSpread / 100.0F;
     _tradeTracer._ltq          = newPacks;
-    _tradeTracer._slippage     = slippagePaise >= static_cast<float>(_allowedSlippage) ? slippagePaise / 100.0F : 0;
+    // Error column says Slippage only when the pack traded worse than the target by a whole paise; else it stays blank.
+    const bool slipped         = std::round(slippagePaise) > 0;
+    _tradeTracer._slippage     = slipped ? slippagePaise / 100.0F : 0;
+    std::strncpy(_tradeTracer._message, slipped ? "Slippage" : "", sizeof(_tradeTracer._message) - 1);
 
     WriteLog("Tracer [{}Leg] symbol {} stratId {} orderId {} time {} side {} price {} ltp {} ltq {} slippage {}\n",
              _legCount, _tradeTracer._symbol, _strategyId, _tradeTracer._orderId, _tradeTracer._time, _tradeTracer._side, _tradeTracer._price, _tradeTracer._ltp, _tradeTracer._ltq, _tradeTracer._slippage);
@@ -704,9 +705,25 @@ void RatioLegStrategy::OnCutTrade(Pack& pack_, size_t leg_, const oms_transactio
                                  buyValue * (_isOption[leg_] ? OptionBuyCost : FutureBuyCost);
         _unwindPnL += pnl;
 
+        const bool wasUnhedged = pack_._isUnhedged;
         UpdateUnhedgedStatus(pack_);  // leg 0 or a hedge leg changed
         WriteLog("[CUT] {} leg={} {} {} lots @{} (entry avg {:.2f}) pnl={:.0f} total={:.0f} | lots=[{}] unhedged={}\n",
                  PackName(pack_), leg_, SideName(Opposite(pack_._sides[leg_])), lots, price, entryValue / (lots * _lotSize), pnl, _unwindPnL, LotsText(pack_), pack_._isUnhedged);
+
+        // A reverted bid (part pack bought or sold back) gets its own Trade Tracer row. A failed hedge's cut does not.
+        if (leg_ == BIDDING_LEG && !wasUnhedged) {
+            _tradeTracer._orderId      = response_.packet_.exchange_order_id;
+            _tradeTracer._time         = response_.hdr_.exchange_timestamp;
+            _tradeTracer._qtyRemaining = pack_._params._totalPacks - CompletedPacks(pack_);
+            _tradeTracer._strategyId   = _strategyId;
+            _tradeTracer._side         = pack_._packSide;
+            _tradeTracer._price        = static_cast<float>(entryValue / (lots * _lotSize) / 100.0);
+            _tradeTracer._ltp          = price / 100.0F;
+            _tradeTracer._ltq          = lots;
+            _tradeTracer._slippage     = 0;
+            std::strncpy(_tradeTracer._message, "PartialFill", sizeof(_tradeTracer._message) - 1);
+            _hub->SendToUi(UiMessageCode_TRADE_TRACER, _interface, _tradeTracer);
+        }
     }
     ProcessPack(pack_);
 }

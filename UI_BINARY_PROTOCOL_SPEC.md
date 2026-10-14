@@ -19,7 +19,7 @@ Strategy updates sent from **ConvexStrategy** to the GUI are migrated from the l
 | **`100001`** | `StrategyStatusUpdate` | **8 bytes** | Strategy lifecycle state transitions (Applied, Active, Inactive). A stopped strategy reports ACTIVE; INACTIVE means the strategy does not exist (creation failed or deleted). |
 | **`100002`** | `StrategySpreadUpdate` | **64 bytes** | Periodic (~1s) spread, PnL, lot, and status snapshot |
 | **`100003`** | `ExternalOrderResponse` | Existing | OMS order response. `_errorCode`: OMS `reason_code` when the header error is -9994, exchange error code when -9995, else the header error code; the exchange error code when the header error is not negative. |
-| **`100004`** | `TradeTracer` | 55 bytes | Trade execution / slippage tracer (unchanged) |
+| **`100004`** | `TradeTracer` | 71 bytes | Trade execution / slippage tracer; `_message[16]` (`Slippage`, `PartialFill` or empty) is the Error column |
 
 ---
 

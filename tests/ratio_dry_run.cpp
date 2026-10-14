@@ -349,6 +349,18 @@ auto CountUi(UiMessageCode code_) -> int {
     return count;
 }
 
+// Trade Tracer rows sent for one strategy with this message ("" for slippage reports).
+auto TracerRows(int strategy_, std::string_view message_) -> std::vector<TradeTracer> {
+    std::vector<TradeTracer> rows;
+    for (const auto& packet : exchange::uiPackets) {
+        if (packet.header.message_code != UiMessageCode_TRADE_TRACER) continue;
+        TradeTracer tracer{};
+        std::memcpy(&tracer, packet.message, sizeof(tracer));
+        if (static_cast<int>(tracer._strategyId) == strategy_ && std::string_view(tracer._message) == message_) rows.push_back(tracer);
+    }
+    return rows;
+}
+
 void TickAllLegs() {
     exchange::Tick(LEG0, 525, 535);
     exchange::Tick(LEG1, 770, 780);
@@ -406,6 +418,7 @@ void FullCycle() {
     exchange::Tick(LEG0, 525, 535);  // bid reaches 525: the resting SELL fills, the next pack crosses at once
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
     CHECK(CountUi(UiMessageCode_TRADE_TRACER) == 2);
+    CHECK(TracerRows(ID, "").size() == 2);  // traded at the target: Error column blank
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // total quantity reached: no more orders
 
     TickAllLegs();
@@ -568,11 +581,12 @@ auto SlippedPacks(int strategyId_, int allowedSlippagePaise_) -> long {
 void SlippageInPaise() {
     CHECK(SlippedPacks(18, 4) == 1);
     CHECK(SlippedPacks(19, 10) == 2);
+    CHECK(TracerRows(18, "Slippage").size() == 1 && TracerRows(19, "Slippage").size() == 1);  // only the slipped pack
     std::printf("  slippage in paise: 5 paise slip stops at AllowedSlippage 4, trades on at 10\n");
 }
 
-// The resting bid follows the hedge legs. Away from the market it moves only by TickSize ticks (2 x 5 paise); priced
-// past the target it moves at once, else a fill lands under the target (09:32 log: SELL left at 175 while 190 was needed).
+// The resting bid follows the hedge legs only by TickSize ticks (2 x 5 paise), also when it is priced past the target:
+// each modify costs a message, and chasing every tick hit the message limit (2026-10-14 13:08 log).
 void BidTracksHedgeLegs() {
     constexpr int  ID              = 20;
     nlohmann::json config          = RatioConfig(ID, "Applied");
@@ -584,16 +598,16 @@ void BidTracksHedgeLegs() {
     CHECK(LivePrice(ID, LEG0) == 525);
     exchange::Tick(LEG2, 310, 320);  // (140 + 780 + 2*320) / 3 = 520: 5 away from the market < 10, not modified
     CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: 525 is past the target, modified on 5
-    CHECK(LivePrice(ID, LEG0) == 530);
-    exchange::Tick(LEG2, 300, 310);  // (140 + 780 + 2*310) / 3 = 513.33 -> 515: 15 away from the market, modified
+    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: 525 is past the target, still 5 < 10
+    CHECK(LivePrice(ID, LEG0) == 525);
+    exchange::Tick(LEG2, 300, 310);  // (140 + 780 + 2*310) / 3 = 513.33 -> 515: 10 away, modified
     CHECK(LivePrice(ID, LEG0) == 515);
     exchange::Tick(LEG0, 515, 525);  // bid reaches 515: both packs fill, traded 1545 - 780 - 620 = 145 >= 140
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
-    std::printf("  bid tracks hedges: 525 kept on a 5 paise passive move, 530 at once past the target, 515 after 15 paise, filled\n");
+    std::printf("  bid tracks hedges: 525 kept on 5 paise moves either way, 515 after 10 paise, filled\n");
 }
 
-// While the market spread meets the target, the bid follows every tick, under the TickSize threshold too.
+// While the market spread meets the target, the bid takes leg 0's touch (at market), under the TickSize threshold too.
 void BidTracksEveryTickWhenSpreadMatched() {
     constexpr int  ID            = 33;
     nlohmann::json config        = RatioConfig(ID, "Applied");
@@ -605,23 +619,23 @@ void BidTracksEveryTickWhenSpreadMatched() {
     CHECK(LivePrice(ID, LEG0) == 530);
     exchange::Tick(LEG2, 315, 325, false);  // 523.33 -> 525: moved 5 < 10, market 1500 - 1430 = 70 < 140, not modified
     CHECK(exchange::sent.back().hdr_.transaction_code == OMS_PLACE_REQ);
-    exchange::Tick(LEG0, 530, 540, false);  // market 1590 - 1430 = 160 >= 140: 525 sent although it moved only 5
-    CHECK(exchange::sent.back().hdr_.transaction_code == OMS_REPLACE_REQ && exchange::sent.back().packet_.price_ == 525);
+    exchange::Tick(LEG0, 535, 545, false);  // market 1605 - 1430 = 175 >= 140: SELL at the 535 bid although it moved only 5
+    CHECK(exchange::sent.back().hdr_.transaction_code == OMS_REPLACE_REQ && exchange::sent.back().packet_.price_ == 535);
     exchange::Pump();
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
-    std::printf("  spread matched: bid modified 530 -> 525 on a 5 paise move, filled\n");
+    std::printf("  spread matched: bid modified 530 -> 535 (the touch) on a 5 paise move, filled\n");
 }
 
-// Market beats the target: the bid is still priced at the target, so it crosses past the touch.
+// Market beats the target: leg 0 sells at its touch (at market), not at the target price.
 void BidCrossesWhenMarketBeatsTarget() {
     constexpr int ID = 21;
     SendConfig(RatioConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 540, 550);  // market 3*540 - 1430 = 190 > 140: SELL priced at 525, under the 540 bid
-    CHECK(NthPlacePrice(ID, LEG0, 1) == 525 && NthPlacePrice(ID, LEG0, 2) == 525);
+    exchange::Tick(LEG0, 540, 550);  // market 3*540 - 1430 = 190 > 140: SELL at the 540 bid
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 540 && NthPlacePrice(ID, LEG0, 2) == 540);
     CHECK(Position(ID, LEG0) == -6 * LOT && exchange::LiveOrdersOf(ID) == 0);
-    std::printf("  market 190 > target 140: SELL @525 crosses the 540 bid, 2 packs filled\n");
+    std::printf("  market 190 > target 140: SELL @540 at the touch, 2 packs filled\n");
 }
 
 // A target no positive leg 0 price can reach sends nothing.
@@ -675,13 +689,16 @@ void PartialPackUnwinds() {
     CHECK(unwind.packet_.flags_.order_type == IOC_ORDER_TYPE && unwind.packet_.flags_.order_side == BUY_SIDE);
     CHECK(unwind.packet_.price_ == 510 && unwind.packet_.quantity_ == LOT);
     CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    const std::vector<TradeTracer> reverted = TracerRows(ID, "PartialFill");
+    CHECK(reverted.size() == 1 && reverted[0]._ltq == 1 && reverted[0]._price == 5.25F && reverted[0]._ltp == 5.10F && reverted[0]._slippage == 0);
     const oms_transaction rebid = NthPlace(ID, LEG0, 3);
     CHECK(rebid.packet_.flags_.order_side == SELL_SIDE && rebid.packet_.price_ == 525 && rebid.packet_.quantity_ == 3 * LOT);
 
     exchange::Tick(LEG0, 525, 535);  // bid reaches 525: both packs fill whole and hedge
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
+    CHECK(TracerRows(ID, "PartialFill").size() == 1 && !TracerRows(ID, "").empty());  // pack reports carry no message
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  part pack: 1 of 3 lots sold @525, bought back @510 after 20 ms, 2 whole packs traded after\n");
+    std::printf("  part pack: 1 of 3 lots sold @525, bought back @510 after 20 ms (PartialFill tracer row), 2 whole packs traded after\n");
 }
 
 // Count of new orders a strategy sent on a token, of one side.
@@ -810,6 +827,7 @@ void FailedHedgeIsCut() {
     const int rejects = exchange::rejectCount;
     for (int i = 0; i < 5; ++i) TickAllLegs();  // market 145 still meets the target 140
     CHECK(exchange::rejectCount == rejects && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);  // stopped: no re-entry
+    CHECK(TracerRows(ID, "PartialFill").empty());  // a failed hedge's cut is not a reverted bid
     exchange::rejectToken   = 0;
     exchange::rejectForever = false;
     std::printf("  failed hedge: leg2 rejected %d times, cut after 20 ms: leg0 bought back, leg1 sold, flat, stopped\n", rejects);

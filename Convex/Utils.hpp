@@ -36,6 +36,7 @@ struct TradeTracer {
     float    _ltp;
     float    _slippage;
     char     _symbol[11];
+    char     _message[16];  // GUI Error column: "Slippage", "PartialFill" or empty
 };
 
 // ponytail: 4-byte enum for strategy lifecycle / running status
@@ -239,6 +240,6 @@ struct ExternalOrderResponse {
 #pragma pack(pop)
 
 // The UI decodes these byte-for-byte (UI_BINARY_PROTOCOL_SPEC.md); a size change breaks it.
-static_assert(sizeof(TradeTracer) == 55);
+static_assert(sizeof(TradeTracer) == 71);
 static_assert(sizeof(StrategySpreadUpdate) == 64);
 static_assert(sizeof(StrategyStatusUpdate) == 8);

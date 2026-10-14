@@ -70,7 +70,7 @@ No tokens are subscribed at start-up. Each strategy subscribes its own legs when
 | `100001` | `StrategyStatusUpdate` (8 B) | After each config request. |
 | `100002` | `StrategySpreadUpdate` (64 B) | Every ~1 s from `doWork` (`steady_clock`): BCmp, SCmp, cost, FLP, gap, traded packs, M2M, NLP, RLP, CLP, B-ATP, S-ATP, and ticks processed since the last send (in `_reserved`, reset on read). |
 | `100003` | `ExternalOrderResponse` | Each placed / modified / cancelled / traded / rejected response. `_errorCode`: OMS `reason_code` when the header error is -9994, exchange error code when -9995, else the header error code; the exchange error code when the header error is not negative. |
-| `100004` | `TradeTracer` (55 B) | Each time whole packs complete (slippage report). |
+| `100004` | `TradeTracer` (71 B) | Each time whole packs complete (slippage report), and on each reverted bid (`_message` = `PartialFill`). |
 
 ---
 
