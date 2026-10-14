@@ -156,6 +156,7 @@ class RatioLegStrategy {
     static constexpr uint64_t THROTTLE_PAUSE_NS   = 1'000'000'000;  // exchange message limits count per second
     static constexpr uint64_t THROTTLE_RETRY_NS   = 5'000'000;      // after a THROTTLE_LIMIT reject nothing is resent sooner (was every tick)
     static constexpr int    BID_GATE_REOPEN_TICKS = 3;     // a TOO_FAR gate reopens this many ticks inside AllowedBidDepth
+    static constexpr int    PAST_TARGET_MOVE_TICKS = 3;    // a bid past the target this close to its touch moves at once
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;

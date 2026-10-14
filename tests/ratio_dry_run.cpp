@@ -585,8 +585,8 @@ void SlippageInPaise() {
     std::printf("  slippage in paise: 5 paise slip stops at AllowedSlippage 4, trades on at 10\n");
 }
 
-// The resting bid follows the hedge legs only by TickSize ticks (2 x 5 paise), also when it is priced past the target:
-// each modify costs a message, and chasing every tick hit the message limit (2026-10-14 13:08 log).
+// The resting bid follows the hedge legs by TickSize ticks (2 x 5 paise). Priced past the target within 3 ticks of the
+// touch it moves at once, else a fill lands under the target (2026-10-14 14:53 log: BUY left at 410 while 400 was needed).
 void BidTracksHedgeLegs() {
     constexpr int  ID              = 20;
     nlohmann::json config          = RatioConfig(ID, "Applied");
@@ -598,13 +598,32 @@ void BidTracksHedgeLegs() {
     CHECK(LivePrice(ID, LEG0) == 525);
     exchange::Tick(LEG2, 310, 320);  // (140 + 780 + 2*320) / 3 = 520: 5 away from the market < 10, not modified
     CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: 525 is past the target, still 5 < 10
-    CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG2, 300, 310);  // (140 + 780 + 2*310) / 3 = 513.33 -> 515: 10 away, modified
+    exchange::Tick(LEG2, 320, 330);  // (140 + 780 + 2*330) / 3 = 526.67 -> 530: 525 is past the target 3 ticks off the touch
+    CHECK(LivePrice(ID, LEG0) == 530);
+    exchange::Tick(LEG2, 300, 310);  // (140 + 780 + 2*310) / 3 = 513.33 -> 515: 15 away, modified
     CHECK(LivePrice(ID, LEG0) == 515);
     exchange::Tick(LEG0, 515, 525);  // bid reaches 515: both packs fill, traded 1545 - 780 - 620 = 145 >= 140
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
-    std::printf("  bid tracks hedges: 525 kept on 5 paise moves either way, 515 after 10 paise, filled\n");
+    std::printf("  bid tracks hedges: 525 kept on a 5 paise passive move, 530 at once past the target, 515 after 15 paise, filled\n");
+}
+
+// A bid past the target but more than 3 ticks behind its touch cannot fill on the next tick: it waits for TickSize ticks,
+// each modify costs a message. It moves at once when the touch comes within 3 ticks.
+void DeepPastTargetBidWaits() {
+    constexpr int  ID            = 40;
+    nlohmann::json config        = RatioConfig(ID, "Applied");
+    config["Params"]["TickSize"] = 2;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 340, 350);
+    exchange::Tick(LEG0, 500, 510);  // (140 + 780 + 2*350) / 3 = 540: SELL rests 6 ticks over the 510 ask
+    CHECK(LivePrice(ID, LEG0) == 540);
+    exchange::Tick(LEG2, 345, 355);  // 543.33 -> 545: 540 is past the target but 6 ticks deep, 5 < 10: kept
+    CHECK(LivePrice(ID, LEG0) == 540);
+    exchange::Tick(LEG0, 520, 530);  // ask 530: 540 is 2 ticks away, moved to 545 at once
+    CHECK(LivePrice(ID, LEG0) == 545);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  deep past-target bid: 540 kept 6 ticks deep, moved to 545 once the touch is 2 ticks away\n");
 }
 
 // While the market spread meets the target, the bid takes leg 0's touch (at market), under the TickSize threshold too.
@@ -1145,6 +1164,7 @@ int main() {
     ThrottledBidLeavesBook();
     BidGateHysteresis();
     BidTracksEveryTickWhenSpreadMatched();
+    DeepPastTargetBidWaits();
     BidCrossesWhenMarketBeatsTarget();
     UnreachableTargetSendsNothing();
     StrikeGapBackSolve();

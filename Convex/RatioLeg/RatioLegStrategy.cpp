@@ -459,10 +459,14 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int orderLots     = (packRemainder > 0) ? (biddingRatio - packRemainder) : (pack_._params._slicePacks * biddingRatio);
     const int quantity      = std::min(orderLots, remainingLots) * _lotSize;
 
-    // A resting bid moves only when its price changes by TickSize ticks (GUI), each modify costs a message. While the
-    // market spread meets the target it follows the touch on every tick (UpdateOrder skips a modify to the same price).
-    const int oldPrice = bidOrder.get_open_price();  // 0 when no order is working
-    if (oldPrice != 0 && !spreadMatched && std::abs(oldPrice - bidPrice) < _repriceThreshold) {
+    // A resting bid moves only when its price changes by TickSize ticks (GUI), each modify costs a message. A bid priced
+    // past the target (SELL under, BUY over the bid price) within PAST_TARGET_MOVE_TICKS of its touch moves at once: one
+    // leg 0 tick is ratio x tick of spread, so a fill there slipped 10-35 paise (2026-10-14 14:52 log). While the market
+    // spread meets the target it follows the touch on every tick (UpdateOrder skips a modify to the same price).
+    const int  oldPrice   = bidOrder.get_open_price();  // 0 when no order is working
+    const bool pastTarget = (pack_._sides[BIDDING_LEG] == SELL_SIDE) ? oldPrice < bidPrice : oldPrice > bidPrice;
+    const bool canFill    = TicksBehindTouch(pack_, oldPrice) <= PAST_TARGET_MOVE_TICKS;
+    if (oldPrice != 0 && !spreadMatched && !(pastTarget && canFill) && std::abs(oldPrice - bidPrice) < _repriceThreshold) {
         return;
     }
     const std::string_view action = OrderAction(bidOrder);
