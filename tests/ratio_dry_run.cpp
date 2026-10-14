@@ -504,7 +504,7 @@ void StopKeepsHedging() {
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);
     exchange::Tick(LEG2, 315, 330);  // asks return
     CHECK(Position(ID, LEG2) == 2 * LOT);
-    CHECK(NthPlacePrice(ID, LEG2, 1) == 330);  // the touch once asks return
+    CHECK(NthPlacePrice(ID, LEG2, 1) == 335);  // level 2 once asks return
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
@@ -523,9 +523,9 @@ void RejectsUnknownToken() {
     std::printf("  unknown token: creation refused, nothing subscribed\n");
 }
 
-// A hedge goes straight to the touch: leg2's ask moved 325 -> 335 while the bid was in flight, so one order at 335,
-// no steps up from the 325 the bid was priced on (each step cost a message under the ~30 per second throttle).
-void HedgeTakesTouch() {
+// A hedge goes straight to level 2: leg2's ask moved 325 -> 335 while the bid was in flight, so one order at 340
+// (level 2), no steps up from the 325 the bid was priced on (each step cost a message under the ~30 per second throttle).
+void HedgeTakesLevel2() {
     constexpr int ID = 14;
     SendConfig(RatioConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
@@ -533,14 +533,14 @@ void HedgeTakesTouch() {
     exchange::Tick(LEG0, 525, 535, false);  // market 145 >= 140: bid crosses at 525, not answered yet
     exchange::Tick(LEG2, 325, 335, false);  // leg2 ask moves before the fill
     exchange::Pump();
-    CHECK(Position(ID, LEG2) == 2 * LOT && NthPlacePrice(ID, LEG2, 1) == 335);
+    CHECK(Position(ID, LEG2) == 2 * LOT && NthPlacePrice(ID, LEG2, 1) == 340);
     int leg2Modifies = 0;
     for (const auto& request : exchange::sent) {
         leg2Modifies += request.hdr_.uid_.composite_id_.strategy_id == ID && request.packet_.product_id_ == LEG2 && request.hdr_.transaction_code == OMS_REPLACE_REQ;
     }
     CHECK(leg2Modifies == 0);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  hedge takes the touch: leg2 bought @335 in one order, no modifies\n");
+    std::printf("  hedge takes level 2: leg2 placed @340, bought @335 in one order, no modifies\n");
 }
 
 // The GUI payload verbatim: short pack, 5 packs at a credit of at least -0.05.
@@ -1201,7 +1201,7 @@ int main() {
     StopRacesPendingBid();
     StopKeepsHedging();
     RejectsUnknownToken();
-    HedgeTakesTouch();
+    HedgeTakesLevel2();
     ShortPackFromGuiPayload();
     MissedEntryLogsEveryTick();
     SlippageInPaise();

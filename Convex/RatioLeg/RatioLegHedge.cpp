@@ -48,8 +48,9 @@ void RatioLegStrategy::ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedge
     const int missingLots = targetHedgeLots_ - pack_._tradedLots[leg_];
     if (missingLots <= 0) return;
 
-    // Take the opposite touch at once, and follow it while unfilled; TradeGear adds its ticks on top. Stepping up from
-    // the bid's prices cost a message per step under a ~30 per second throttle and reached the touch within 1 ms anyway.
+    // Price at the opposite side's level 2 at once (the touch when level 2 is empty), and follow it while unfilled;
+    // TradeGear adds its ticks on top. Stepping up from the bid's prices cost a message per step under a ~30 per second
+    // throttle and reached the touch within 1 ms anyway.
     const int touch = GetPrice(_quote[leg_], pack_._cache._takeSide[leg_], 0);
     if (touch <= 0) {
         // Opposite side empty: wait for a real price instead of resting near zero.
@@ -63,7 +64,9 @@ void RatioLegStrategy::ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedge
     pack_._hedgeWaiting[leg_] = false;
 
     const int sideMultiplier = (pack_._sides[leg_] == BUY_SIDE) ? 1 : -1;
-    const int targetPrice    = std::max(touch + sideMultiplier * _tradeGearOffset, _tickSize);
+    const int level2         = GetPrice(_quote[leg_], pack_._cache._takeSide[leg_], 1);
+    const int basePrice      = level2 > 0 ? level2 : touch;
+    const int targetPrice    = std::max(basePrice + sideMultiplier * _tradeGearOffset, _tickSize);
     // Sliced like the bid, but never below one pack: SoQ 0 must not leave the hedge unsent.
     const int quantity = std::min(missingLots * _lotSize, std::max(pack_._cache._sliceQuantity[leg_], _ratios[leg_] * _lotSize));
 
@@ -72,9 +75,9 @@ void RatioLegStrategy::ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedge
     const int              oldPrice = order.get_open_price();
     const int              oldQty   = order.get_open_qty();
     if (const uint32_t uid = _hub->UpdateOrder(order, targetPrice, quantity, _clientUid); uid != 0) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | HEDGE touch={} missingLots={} lots=[{}] book=[{}]\n",
+        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | HEDGE touch={} level2={} missingLots={} lots=[{}] book=[{}]\n",
                  PackName(pack_), leg_, _tokens[leg_], SideName(pack_._sides[leg_]), action, uid, oldPrice, targetPrice, oldQty, quantity,
-                 touch, missingLots, LotsText(pack_), BookText());
+                 touch, level2, missingLots, LotsText(pack_), BookText());
     }
 }
 
