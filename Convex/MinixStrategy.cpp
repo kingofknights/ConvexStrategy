@@ -367,7 +367,12 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
             }
         }
     }
+    if (errorCode == -9996) {
+        return;
+    }
+
     OrderResponseInfoT& info = response._response;
+    info._remainingQuantity  = 0;
     info._response           = responseType;
     info._timestamp          = response_.hdr_.exchange_timestamp;
     info._orderId            = response_.packet_.exchange_order_id;
