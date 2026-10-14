@@ -204,6 +204,8 @@ class RatioLegStrategy {
     void ExecuteHedgeLeg(Pack& pack_, size_t leg_, int targetHedgeLots_);
     void UpdateUnhedgedStatus(Pack& pack_);
     void CheckSlippageThreshold(Pack& pack_, const oms_transaction& response_);
+    // One Trade Tracer row (GUI 100004); message_ is the Error column ("Slippage", "PartialFill" or empty).
+    void SendTracer(const Pack& pack_, const oms_transaction& response_, float price_, float ltp_, int ltq_, float slippage_, std::string_view message_);
 
     // ── Reverse cut: lots beyond the completed packs ──────────────────────────
     [[nodiscard]] auto ExtraLots(const Pack& pack_, size_t leg_) const noexcept -> int;

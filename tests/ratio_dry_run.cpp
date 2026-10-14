@@ -7,7 +7,7 @@
 //
 // Build and run from the repo root (one line):
 //   g++ -std=c++20 -O1 -g -Wall -Wextra -DFMT_HEADER_ONLY -I Convex -I Convex/RatioLeg -I Convex/ManualOrder -I Convex/SquareOff
-//       -I vendor/minix/include -I vendor/minix -I vendor tests/ratio_dry_run.cpp Convex/MinixStrategy.cpp Convex/RatioLeg/RatioLegStrategy.cpp
+//       -I vendor/minix/include -I vendor/minix -I vendor tests/ratio_dry_run.cpp Convex/MinixStrategy.cpp Convex/RatioLeg/RatioLeg*.cpp
 //       Convex/ManualOrder/ManualOrder.cpp Convex/SquareOff/SquareOff.cpp vendor/minix/src/order_instance.cpp
 //       -o build/ratio_dry_run && (cd build && ./ratio_dry_run)
 

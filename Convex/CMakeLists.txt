@@ -6,6 +6,9 @@ find_package(PostgreSQL REQUIRED)
 add_library(${PROJECT_NAME} SHARED MinixStrategy.cpp
                                    ManualOrder/ManualOrder.cpp
                                    RatioLeg/RatioLegStrategy.cpp
+                                   RatioLeg/RatioLegEntry.cpp
+                                   RatioLeg/RatioLegHedge.cpp
+                                   RatioLeg/RatioLegReport.cpp
                                    SquareOff/SquareOff.cpp
                                    SquareOff/TradeDb.cpp)
 

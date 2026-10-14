@@ -11,7 +11,7 @@ All prices and values are **paise**. The engine is single-threaded: `OnTick`, `O
 | Component | Purpose |
 | :--- | :--- |
 | [`Convex/MinixStrategy.hpp/.cpp`](Convex/MinixStrategy.cpp) | Entry point (`create` / `destroy`) and hub. Reassembles GUI config, owns the strategies (`std::map<uint32_t, std::unique_ptr<RatioLegStrategy>>`), fans out ticks and order responses, places/modifies orders (`UpdateOrder`), and echoes state to the UI (`SendToUi`). |
-| [`Convex/RatioLeg/RatioLegStrategy.hpp/.cpp`](Convex/RatioLeg/RatioLegStrategy.cpp) | One N-leg ratio spread (2..6 legs). Leg 0 bids passively; the other legs hedge. Runs a long pack and a short pack independently. |
+| [`Convex/RatioLeg/RatioLegStrategy.hpp`](Convex/RatioLeg/RatioLegStrategy.hpp) + `RatioLeg*.cpp` | One N-leg ratio spread (2..6 legs). Leg 0 bids passively; the other legs hedge. Runs a long pack and a short pack independently. |
 | [`Convex/Utils.hpp`](Convex/Utils.hpp) | Cost constants, `StrategyStatus`, `UiMessageCode`, packed UI wire structs (size-checked with `static_assert`). |
 | [`vendor/minix/.../order_instance`](vendor/minix/src/order_instance.cpp) | Vendor wrapper of one order's OMS lifecycle. Read-only. |
 | [`vendor/minix/include/AlgoBase.hpp`](vendor/minix/include/AlgoBase.hpp) | Platform base class (feeds, product details, `send_order`, `sentoUI`, logging). Implemented in `lib/libAlgoBase.so`. |
