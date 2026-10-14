@@ -57,20 +57,41 @@ auto SquareOff::Start(int32_t interface_, int32_t token_) -> bool {
         _positions[token] = Position{netQuantity, std::make_unique<OrderObjectT>(token, side, std::abs(netQuantity), _hub->_clientId, _hub->_algoId, _hub->_omsId,
                                                                                  ORDER_TYPE::LIMIT_ORDER_TYPE, _hub)};
         std::cout << "[SquareOff] token=" << token << " net=" << netQuantity << " -> " << (side == SELL_SIDE ? "SELL" : "BUY") << " " << std::abs(netQuantity) << std::endl;
+        // Priced now from the last quote: waiting for a broadcast left 7 tokens unsent on 2026-10-14 15:04.
+        if (Quote last{}; _hub->getLastQuote(token, last)) {
+            Reprice(token, last.message.bid_levels, last.message.ask_levels);
+        }
     }
     return true;
 }
 
+void SquareOff::OnQuote(const Quote& quote_) {
+    if (!_positions.empty()) Reprice(quote_.header.product_id, quote_.message.bid_levels, quote_.message.ask_levels);
+}
+
 void SquareOff::OnBcast(const aef::infra::product::product_data& product_) {
-    const auto position = _positions.find(product_.product_id_);
+    Reprice(product_.product_id_, product_.bid_mbp, product_.ask_mbp);
+}
+
+template <typename Level>
+void SquareOff::Reprice(int32_t token_, const Level* bids_, const Level* asks_) {
+    const auto position = _positions.find(token_);
     if (position == _positions.end()) {
         return;
     }
     // Third level, as the example does: deep enough to cross the touch, so the order trades on arrival.
     const int32_t netQuantity = position->second._netQuantity;
-    const int32_t price       = netQuantity > 0 ? product_.bid_mbp[2].price : product_.ask_mbp[2].price;
-    if (price > 0) {
-        _hub->UpdateOrder(*position->second._order, price, std::abs(netQuantity), _clientUid);
+    const Level*  levels      = netQuantity > 0 ? bids_ : asks_;
+    int32_t       price       = 0;
+    for (int level = 2; level >= 0 && price <= 0; --level) price = levels[level].price;
+    if (price <= 0) {
+        return;
+    }
+    OrderObjectT& order = *position->second._order;
+    const bool    isNew = order.get_current_state() == static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE);
+    if (const uint32_t uid = _hub->UpdateOrder(order, price, std::abs(netQuantity), _clientUid); uid != 0) {
+        std::cout << "[SquareOff] token=" << token_ << " " << (isNew ? "PLACE " : "MODIFY ") << (netQuantity > 0 ? "SELL " : "BUY ") << std::abs(netQuantity)
+                  << " @" << price << " uid=" << uid << std::endl;
     }
 }
 
@@ -96,6 +117,10 @@ auto SquareOff::OnOrderResponse(const oms_transaction& response_) -> bool {
         if (position->second._netQuantity == 0) {
             _positions.erase(position);
         }
+    } else if (code == OMS_ORDER_CANCELLED) {
+        // Cancelled by the exchange or OMS: dropped like a reject, so the next press takes the token again.
+        std::cout << "[SquareOff] token=" << token << " cancelled -- dropped, net " << position->second._netQuantity << " still open" << std::endl;
+        _positions.erase(position);
     } else if (code == OMS_REQ_REJ) {
         // Dropped, not retried: re-placing on every broadcast would repeat the reject. Press square-off again to retry.
         std::cout << "[SquareOff] token=" << token << " rejected error=" << response_.hdr_.error_code << " reason=" << response_.hdr_.reason_code

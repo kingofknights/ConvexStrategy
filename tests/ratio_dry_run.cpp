@@ -1113,6 +1113,28 @@ void SquareOffStopsStrategies() {
     std::printf("  square-off mid-hedge: strategy stopped and forgot its lots, account flat, leg2 never bought\n");
 }
 
+// A tick prices square-off too: on 2026-10-14 15:04 no broadcast came and 7 tokens were never sent. An order the
+// exchange cancels is dropped, so the next press takes its token again instead of "already running".
+void SquareOffFromTicksAndCancel() {
+    exchange::dbPositions = {{LEG1, LOT}};
+    const size_t sent     = exchange::sent.size();
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF;
+    packet.header.interface_id = 7;
+    exchange::hub->onUIRequest(packet);
+    exchange::Tick(LEG1, 770, 780, false);  // third bid 760: SELL 65 @760 sent, not answered yet
+    CHECK(exchange::sent.size() == sent + 1);
+    const oms_transaction sell = exchange::sent[sent];
+    CHECK(sell.packet_.product_id_ == LEG1 && sell.packet_.flags_.order_side == SELL_SIDE && sell.packet_.price_ == 760 && sell.packet_.quantity_ == LOT);
+
+    exchange::outbox.clear();  // the exchange cancels it instead
+    exchange::Respond(sell, OMS_ORDER_CANCELLED, 760, LOT);
+    exchange::hub->onUIRequest(packet);  // pressed again: LEG1 is taken again
+    exchange::Tick(LEG1, 770, 780);
+    CHECK(exchange::sent.size() == sent + 2 && exchange::sent.back().packet_.price_ == 760 && !exchange::live.count(exchange::sent.back().hdr_.uid_.id_));
+    std::printf("  square-off from ticks: SELL 65 @760 on a tick, exchange cancel dropped, next press re-sent and filled\n");
+}
+
 // Token-wise square-off (1332) flattens only the token the GUI names; other open tokens stay.
 void SquareOffOneToken() {
     exchange::dbPositions = {{LEG1, LOT}, {LEG2, -LOT}};
@@ -1180,5 +1202,6 @@ int main() {
     SquareOffFlattens();
     SquareOffStopsStrategies();
     SquareOffOneToken();
+    SquareOffFromTicksAndCancel();
     std::printf("all scenarios passed\n");
 }
