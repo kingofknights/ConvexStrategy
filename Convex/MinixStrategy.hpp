@@ -90,5 +90,4 @@ class MinixStrategy final : public AlgoBase {
 
     uint16_t _feedFlags = 0;                          // market-data event flags requested per token
     int32_t  _clientId = 0, _algoId = 0, _omsId = 0;  // ids from config (order routing)
-    int32_t  _eventCount = 0;
 };

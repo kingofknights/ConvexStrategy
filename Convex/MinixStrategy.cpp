@@ -218,7 +218,6 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
 void MinixStrategy::OnTick(const Quote& quote_) {
     _eventTimestamp   = quote_.header.event_timestamp;
     _triggerTimestamp = quote_.header.trigger_timestamp;
-    _eventCount       = 0;
     // Only the strategies trading this token: a tick no longer walks every strategy.
     if (const auto routes = _tickRoutes.find(quote_.header.product_id); routes != _tickRoutes.end()) {
         for (RatioLegStrategy* strategy : routes->second) {
@@ -276,8 +275,6 @@ auto MinixStrategy::doWork() -> int {
     if (now - _lastSpreadSendNs >= 1'000'000'000) {
         _lastSpreadSendNs = now;
         SendStrategySpreadsToUi();
-        std::cout << "[doWork] event_timestamp=" << _eventTimestamp << " _eventCount=" << _eventCount << std::endl;
-        _eventCount = 0;
     }
     return 0;
 }
