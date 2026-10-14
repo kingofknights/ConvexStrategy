@@ -228,13 +228,12 @@ auto RatioLegStrategy::GetAvailableQuantity(const Quote& quote_, size_t depth_, 
     return totalQuantity;
 }
 
-auto RatioLegStrategy::CheckOrderDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool {
-    for (size_t levelIndex = 0; levelIndex < depth_; ++levelIndex) {
-        if (GetOrderCount(quote_, side_, levelIndex) <= 0) {
-            return false;
-        }
+auto RatioLegStrategy::CountOrders(const Quote& quote_, ORDER_SIDE side_) noexcept -> int {
+    int totalOrders = 0;
+    for (size_t levelIndex = 0; levelIndex < aef::infra::quote::QUOTE_LEVELS; ++levelIndex) {
+        totalOrders += std::max(GetOrderCount(quote_, side_, levelIndex), 0);
     }
-    return true;
+    return totalOrders;
 }
 
 auto RatioLegStrategy::CheckPriceDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool {
@@ -247,18 +246,18 @@ auto RatioLegStrategy::CheckPriceDepth(const Quote& quote_, size_t depth_, ORDER
 }
 
 // First level that fails a depth check, and why; "ok" when none does. Only for logs, off the hot path.
-auto RatioLegStrategy::DescribeDepth(const Quote& quote_, size_t orderDepth_, size_t priceDepth_, ORDER_SIDE side_, double requiredQuantity_) -> std::string {
-    for (size_t levelIndex = 0; levelIndex < std::max(orderDepth_, priceDepth_); ++levelIndex) {
-        if (levelIndex < priceDepth_ && GetPrice(quote_, side_, levelIndex) <= 0) {
+auto RatioLegStrategy::DescribeDepth(const Quote& quote_, int minOrders_, size_t priceDepth_, ORDER_SIDE side_, double requiredQuantity_) -> std::string {
+    if (const int orders = CountOrders(quote_, side_); orders < minOrders_) {
+        return fmt::format("{} orders in the book < {}", orders, minOrders_);
+    }
+    for (size_t levelIndex = 0; levelIndex < priceDepth_; ++levelIndex) {
+        if (GetPrice(quote_, side_, levelIndex) <= 0) {
             return fmt::format("level {} has no price", levelIndex);
         }
-        if (levelIndex < orderDepth_ && GetOrderCount(quote_, side_, levelIndex) <= 0) {
-            return fmt::format("level {} has no orders (price {})", levelIndex, GetPrice(quote_, side_, levelIndex));
-        }
     }
-    const int available = GetAvailableQuantity(quote_, orderDepth_, side_);
+    const int available = GetAvailableQuantity(quote_, priceDepth_, side_);
     if (available < requiredQuantity_) {
-        return fmt::format("quantity {} over {} levels < required {}", available, orderDepth_, requiredQuantity_);
+        return fmt::format("quantity {} over {} levels < required {}", available, priceDepth_, requiredQuantity_);
     }
     return "ok";
 }

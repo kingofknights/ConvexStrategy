@@ -185,14 +185,15 @@ namespace exchange {
     }
 
     // pump_ = false leaves the strategy's requests unanswered, as if the exchange were slow.
-    // Every level holds levelQty_; level n is n ticks away from the touch.
-    auto Tick(int token_, int bid_, int ask_, bool pump_ = true, int levelQty_ = 300) -> void {
+    // bidLevels_ / askLevels_ price levels, each with 3 orders and levelQty_; level n is n ticks away from the touch.
+    auto Tick(int token_, int bid_, int ask_, bool pump_ = true, int levelQty_ = 300,
+              int bidLevels_ = aef::infra::quote::QUOTE_LEVELS, int askLevels_ = aef::infra::quote::QUOTE_LEVELS) -> void {
         books[token_] = Book{bid_, ask_};
         Quote quote{};
         quote.header.product_id = token_;
         for (int level = 0; level < aef::infra::quote::QUOTE_LEVELS; ++level) {
-            if (bid_ > 0) quote.message.bid_levels[level] = {levelQty_, bid_ - level * TICK, 3, 0};
-            if (ask_ > 0) quote.message.ask_levels[level] = {levelQty_, ask_ + level * TICK, 3, 0};
+            if (bid_ > 0 && level < bidLevels_) quote.message.bid_levels[level] = {levelQty_, bid_ - level * TICK, 3, 0};
+            if (ask_ > 0 && level < askLevels_) quote.message.ask_levels[level] = {levelQty_, ask_ + level * TICK, 3, 0};
         }
         hub->OnTick(quote);
         if (pump_) {
@@ -547,17 +548,17 @@ void HedgeTakesTouch() {
 void ShortPackFromGuiPayload() {
     constexpr int ID = 15;
     SendConfig(GuiConfig(ID, "Applied"));
-    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: BUY at (1400 + 5) / 3 = 468.33 -> 465 (rounded down)
-    CHECK(PlacesOf(ID, LEG0, BUY_SIDE) == 0);  // 465 is 12 ticks under the 525 bid > AllowedBidDepth 10: not sent
-    exchange::Tick(LEG0, 470, 475);  // 1 tick behind: rests; credit -25 < -5
+    TickAllLegs();  // credit 770 + 2*315 - 3*535 = -205 < -5: BUY rests at (1400 + 5) / 3 = 468.33 -> 465, 12 ticks under the bid
     const oms_transaction bid = NthPlace(ID, LEG0, 1);
     CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.flags_.order_side == BUY_SIDE && bid.packet_.price_ == 465);
     CHECK(exchange::LiveOrdersOf(ID) == 1 && LivePrice(ID, LEG0) == 465 && Position(ID, LEG0) == 0);
+    exchange::Tick(LEG0, 470, 475);  // credit -25 < -5: target still 465, not modified
+    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 0 && LivePrice(ID, LEG0) == 465);
 
     exchange::Tick(LEG0, 460, 465);  // ask reaches 465: fills, then each pack crosses until done
     CHECK(Position(ID, LEG0) == 15 * LOT && Position(ID, LEG1) == -5 * LOT && Position(ID, LEG2) == -10 * LOT);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
-    std::printf("  GUI payload verbatim: BUY 465 held back at 12 ticks deep, rests @465 at 1 tick, 5 packs filled, hedged SELL 23100 + 2 x 23300\n");
+    std::printf("  GUI payload verbatim: BUY rests @465 12 ticks deep, 5 packs filled, hedged SELL 23100 + 2 x 23300\n");
 }
 
 // AllowedSlippage is in paise. Leg2 hedges at 330 instead of 325: traded 1575 - 780 - 660 = 135, 5 paise under target 140.
@@ -802,25 +803,48 @@ void ThrottledBidLeavesBook() {
     std::printf("  throttled bid: refused modify not resent within 5 ms, bid pulled while paused, back @530 after 1 s\n");
 }
 
-// A TOO_FAR gate reopens BID_GATE_REOPEN_TICKS inside AllowedBidDepth, so a bid at the edge does not place and cancel
-// on every tick (13:13:30 log: 2.5k reopens at 8-10 ticks).
-void BidGateHysteresis() {
-    constexpr int ID = 37;
-    SendConfig(RatioConfig(ID, "Applied"));
+// AllowedBidDepth (Fractal): leg 0 needs that many price levels on its own side, where the bid rests (SELL -> asks).
+// How far the bid sits from the touch does not matter.
+void BidDepthGate() {
+    constexpr int  ID                   = 37;
+    nlohmann::json config               = RatioConfig(ID, "Applied");
+    config["Params"]["AllowedBidDepth"] = 3;
+    SendConfig(config);
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 465, 470);  // SELL 525 is 11 ticks above the 470 ask > 10: closed
+    exchange::Tick(LEG0, 500, 510, true, 300, 5, 2);  // 2 ask levels < 3 (5 bid levels do not count): no bid
     CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
-    exchange::Tick(LEG0, 470, 475);  // 10 ticks: inside the limit, not 3 inside it: stays closed
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
-    exchange::Tick(LEG0, 480, 490);  // 7 ticks: reopens
+    exchange::Tick(LEG0, 500, 510, true, 300, 5, 3);  // 3 ask levels: SELL rests at 525
     CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::Tick(LEG0, 470, 475);  // 10 ticks: an open gate keeps the full depth
+    exchange::Tick(LEG0, 400, 410);                // 525 is 23 ticks above the 410 ask: still rests
     CHECK(LivePrice(ID, LEG0) == 525 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);
-    exchange::Tick(LEG0, 465, 470);  // 11 ticks: closes, pulled
+    exchange::Tick(LEG0, 500, 510, true, 300, 5, 2);  // back to 2 ask levels: pulled
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  bid gate hysteresis: closed at 11 ticks stays closed at 10, reopens at 7, open bid kept at 10, pulled at 11\n");
+    std::printf("  bid depth: no bid on 2 ask levels, rests @525 on 3, kept 23 ticks deep, pulled on 2\n");
+}
+
+// OrderDepth (Fractal) counts orders over the whole side a hedge takes; ThresholdQty % of the hedge slice must sit in the
+// first PriceDepth levels. Leg2 needs 2 lots x 65 x 300% = 390.
+void HedgeDepthCountsOrders() {
+    constexpr int  ID                = 41;
+    nlohmann::json config            = RatioConfig(ID, "Applied");
+    config["Params"]["OrderDepth"]   = 4;
+    config["Params"]["PriceDepth"]   = 1;
+    config["Params"]["ThresholdQty"] = 300;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325, true, 400, 5, 1);  // 400 >= 390, but 3 orders on 1 ask level < 4
+    exchange::Tick(LEG0, 500, 510);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
+    exchange::Tick(LEG2, 315, 325, true, 300, 5, 2);  // 6 orders on 2 ask levels >= 4, but 300 in 1 level < 390
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0);
+    config["Params"]["PriceDepth"] = 2;
+    SendConfig(config);
+    exchange::Tick(LEG2, 315, 325, true, 300, 5, 2);  // 600 in 2 levels >= 390: SELL rests at 525
+    CHECK(LivePrice(ID, LEG0) == 525);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  hedge depth: 3 orders < OrderDepth 4 blocks, 6 orders on 2 levels pass, ThresholdQty over PriceDepth levels\n");
 }
 
 // Leg2's hedge is refused every time (price band). After TimeToRevertBidMs the pack is cut back: leg 0 bought back, leg1 sold,
@@ -1184,7 +1208,8 @@ int main() {
     BidTracksHedgeLegs();
     ThrottlePausesNewBids();
     ThrottledBidLeavesBook();
-    BidGateHysteresis();
+    BidDepthGate();
+    HedgeDepthCountsOrders();
     BidTracksEveryTickWhenSpreadMatched();
     DeepPastTargetBidWaits();
     BidCrossesWhenMarketBeatsTarget();

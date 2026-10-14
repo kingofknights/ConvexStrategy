@@ -92,14 +92,14 @@ class RatioLegStrategy {
 
     // Why the bidding leg is (not) quoting. Logged only when it changes, so a silent strategy explains itself.
     // BID: leg 0 order works at the target price. UNREACHABLE: the target needs a leg 0 price <= 0.
-    // TOO_FAR: the target price sits more than AllowedBidDepth ticks behind leg 0's own touch.
+    // BID_DEPTH: leg 0's own side (where the bid rests) has fewer than AllowedBidDepth price levels.
     enum class BidGate : uint8_t { UNKNOWN,
                                    BID,
                                    DONE,
                                    HEDGE_DEPTH,
                                    NO_PRICE,
                                    UNREACHABLE,
-                                   TOO_FAR };
+                                   BID_DEPTH };
 
     struct PackParams {
         int   _totalPacks   = 0;  // packs to trade in total
@@ -155,16 +155,15 @@ class RatioLegStrategy {
     static constexpr size_t LOG_BUFFER_BYTES      = 1 << 16;
     static constexpr uint64_t THROTTLE_PAUSE_NS   = 1'000'000'000;  // exchange message limits count per second
     static constexpr uint64_t THROTTLE_RETRY_NS   = 5'000'000;      // after a THROTTLE_LIMIT reject nothing is resent sooner (was every tick)
-    static constexpr int    BID_GATE_REOPEN_TICKS = 3;     // a TOO_FAR gate reopens this many ticks inside AllowedBidDepth
     static constexpr int    PAST_TARGET_MOVE_TICKS = 3;    // a bid past the target this close to its touch moves at once
 
     [[nodiscard]] static auto GetPrice(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetQuantity(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetOrderCount(const Quote& quote_, ORDER_SIDE side_, size_t levelIndex_) noexcept -> int;
     [[nodiscard]] static auto GetAvailableQuantity(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> int;
-    [[nodiscard]] static auto CheckOrderDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
+    [[nodiscard]] static auto CountOrders(const Quote& quote_, ORDER_SIDE side_) noexcept -> int;  // over every quote level
     [[nodiscard]] static auto CheckPriceDepth(const Quote& quote_, size_t depth_, ORDER_SIDE side_) noexcept -> bool;
-    [[nodiscard]] static auto DescribeDepth(const Quote& quote_, size_t orderDepth_, size_t priceDepth_, ORDER_SIDE side_, double requiredQuantity_) -> std::string;
+    [[nodiscard]] static auto DescribeDepth(const Quote& quote_, int minOrders_, size_t priceDepth_, ORDER_SIDE side_, double requiredQuantity_) -> std::string;
 
     [[nodiscard]] auto FindLegIndex(int token_) const noexcept -> size_t {
         for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -249,12 +248,12 @@ class RatioLegStrategy {
 
     // ── Params ────────────────────────────────────────────────────────────────
     size_t _repriceTicks       = 0;
-    size_t _orderDepth         = 0;
-    size_t _priceDepth         = 0;
-    int    _hedgeDepthPercent  = 0;
+    int    _orderDepth         = 0;  // orders a hedge leg needs on the side it takes, summed over every quote level
+    size_t _priceDepth         = 0;  // price levels a hedge leg needs on the side it takes; also ThresholdQty's window
+    int    _hedgeDepthPercent  = 0;  // ThresholdQty: % of a hedge leg's slice quantity its first PriceDepth levels must hold
     int    _allowedSlippage    = 0;  // paise
     int    _tradeGear          = 0;
-    int    _allowedBidDepth    = 0;  // ticks a resting bid may sit behind its own touch; 0 = no limit
+    size_t _allowedBidDepth    = 0;  // price levels leg 0 needs on its own side (where the bid rests); 0 = no check
     int    _revertBidMs        = DEFAULT_REVERT_BID_MS;  // length of each complete / reverse-cut window
 
     // ── Cached fast-path lookup ───────────────────────────────────────────────

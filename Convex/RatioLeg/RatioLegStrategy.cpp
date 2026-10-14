@@ -142,12 +142,12 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _shortPack._params._targetSpread = ToPaise(params.value("ShortSellPrice", 0.0));
 
         _repriceTicks         = params.value("TickSize", 0U);
-        _orderDepth           = std::min<size_t>(params.value("OrderDepth", 1U), aef::infra::quote::QUOTE_LEVELS);
+        _orderDepth           = params.value("OrderDepth", 1);
         _priceDepth           = std::min<size_t>(params.value("PriceDepth", 1U), aef::infra::quote::QUOTE_LEVELS);
         _hedgeDepthPercent    = params.value("ThresholdQty", 100);
         _allowedSlippage      = params.value("AllowedSlippage", 0);
         _tradeGear            = params.value("TradeGear", 0);
-        _allowedBidDepth      = params.value("AllowedBidDepth", 0);
+        _allowedBidDepth      = std::min<size_t>(params.value("AllowedBidDepth", 0U), aef::infra::quote::QUOTE_LEVELS);
         const int revertBidMs = params.value("TimeToRevertBidMs", 0);
         _revertBidMs          = revertBidMs > 0 ? revertBidMs : DEFAULT_REVERT_BID_MS;
 

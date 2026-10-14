@@ -42,13 +42,8 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         if (!spreadQuote._valid) return BidGate::NO_PRICE;
         thinLeg = FindThinHedgeLeg(pack_);
         if (thinLeg != NO_LEG) return BidGate::HEDGE_DEPTH;
+        if (!CheckPriceDepth(_quote[BIDDING_LEG], _allowedBidDepth, pack_._sides[BIDDING_LEG])) return BidGate::BID_DEPTH;
         if (bidPrice <= 0) return BidGate::UNREACHABLE;
-        if (_allowedBidDepth > 0) {
-            // A closed gate reopens a few ticks inside the limit: a bid jittering at the edge flapped TOO_FAR <-> BID
-            // on every tick, a place and a cancel each time, and used up the message limit the hedges need.
-            const int depth = (pack_._bidGate == BidGate::TOO_FAR) ? std::max(_allowedBidDepth - BID_GATE_REOPEN_TICKS, 0) : _allowedBidDepth;
-            if (TicksBehindTouch(pack_, bidPrice) > depth) return BidGate::TOO_FAR;
-        }
         return BidGate::BID;
     }();
     SetBidGate(pack_, gate, thinLeg, spreadQuote, spreadMatched, bidPrice);
@@ -120,9 +115,9 @@ auto RatioLegStrategy::FindThinHedgeLeg(const Pack& pack_) const -> size_t {
         if (leg == BIDDING_LEG) continue;
         // A hedge crosses the book, so check liquidity on the side it will take (BUY hedge -> asks).
         const ORDER_SIDE takeSide = pack_._cache._takeSide[leg];
-        if (!CheckOrderDepth(_quote[leg], _orderDepth, takeSide) ||
+        if (CountOrders(_quote[leg], takeSide) < _orderDepth ||
             !CheckPriceDepth(_quote[leg], _priceDepth, takeSide) ||
-            GetAvailableQuantity(_quote[leg], _orderDepth, takeSide) < pack_._cache._requiredHedgeDepth[leg]) {
+            GetAvailableQuantity(_quote[leg], _priceDepth, takeSide) < pack_._cache._requiredHedgeDepth[leg]) {
             return leg;
         }
     }
@@ -136,7 +131,7 @@ void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, c
     if (pack_._bidGate == gate_ && !missedEntry) {
         return;
     }
-    static constexpr std::array<std::string_view, 7> GateNames{"UNKNOWN", "BID", "DONE", "HEDGE_DEPTH", "NO_PRICE", "UNREACHABLE", "TOO_FAR"};
+    static constexpr std::array<std::string_view, 7> GateNames{"UNKNOWN", "BID", "DONE", "HEDGE_DEPTH", "NO_PRICE", "UNREACHABLE", "BID_DEPTH"};
 
     WriteLog("[BID-GATE] {} {} -> {} | target={} market={} valid={} matched={} bid={} lots=[{}] book=[{}]\n",
              PackName(pack_), GateNames[static_cast<size_t>(pack_._bidGate)], GateNames[static_cast<size_t>(gate_)],
@@ -160,10 +155,12 @@ void RatioLegStrategy::SetBidGate(Pack& pack_, BidGate gate_, size_t thinLeg_, c
         case BidGate::UNREACHABLE:
             WriteLog("[BID-GATE] {} target {} needs leg 0 price {} <= 0: no order\n", PackName(pack_), pack_._params._targetSpread, bidPrice_);
             break;
-        case BidGate::TOO_FAR:
-            WriteLog("[BID-GATE] {} bid {} is {} ticks behind the touch > AllowedBidDepth {}: no order\n",
-                     PackName(pack_), bidPrice_, TicksBehindTouch(pack_, bidPrice_), _allowedBidDepth);
+        case BidGate::BID_DEPTH: {
+            const ORDER_SIDE ownSide = pack_._sides[BIDDING_LEG];
+            WriteLog("[BID-GATE] {} leg 0 token={} side={}: {} (AllowedBidDepth={}): no order\n", PackName(pack_), _tokens[BIDDING_LEG],
+                     BookSideName(ownSide), DescribeDepth(_quote[BIDDING_LEG], 0, _allowedBidDepth, ownSide, 0), _allowedBidDepth);
             break;
+        }
         default:
             break;
     }

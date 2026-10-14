@@ -139,7 +139,8 @@ $$\text{Spread} = \text{AdjustGap}\Big(\sum_{i=0}^{N-1} \text{SideSign}_i \times
 | :--- | :--- |
 | `DONE` | Lots left: $\text{remaining} = \text{\_totalPacks} \times \text{Ratio}_0 - \text{tradedLots}_0 > 0$. |
 | `NO_PRICE` | Every leg has a price on its crossing side (valid spread). |
-| `HEDGE_DEPTH` | Each hedge leg, on the side it takes: `OrderDepth` levels with orders, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `OrderDepth` levels. |
+| `HEDGE_DEPTH` | Each hedge leg, on the side it takes: at least `OrderDepth` orders summed over all 5 levels, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `PriceDepth` levels. |
+| `BID_DEPTH` | Leg 0, on its own side (where the bid rests): `AllowedBidDepth` levels with prices (0 = no check). |
 | `UNREACHABLE` | The target price of leg 0 (below) is > 0. |
 
 All gates pass → `BID`: **one LIMIT order on leg 0 at the target price** (`TargetBidPrice`, "reverse bid"). It is the leg 0 price that makes the spread exactly the target, with every hedge leg at its crossing touch:
