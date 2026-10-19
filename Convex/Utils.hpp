@@ -4,6 +4,10 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -22,6 +26,42 @@ template <typename PriceType, typename TickType>
 [[nodiscard]] constexpr inline auto RoundOFF(PriceType price, TickType tickSize) noexcept -> PriceType {
     return price > 0 ? ((price + tickSize / 2) / tickSize) * tickSize
                      : ((price - tickSize / 2) / tickSize) * tickSize;
+}
+
+struct FileCloser {
+    void operator()(std::FILE* file_) const noexcept { std::fclose(file_); }
+};
+using LogFilePtrT = std::unique_ptr<std::FILE, FileCloser>;
+
+constexpr static size_t LogBufferBytes = 1 << 16;
+
+inline auto LocalTime() -> std::tm {
+    const std::time_t now = std::time(nullptr);
+    std::tm           local{};
+    localtime_r(&now, &local);
+    return local;
+}
+
+inline auto UtcOffsetSeconds() -> long { return LocalTime().tm_gmtoff; }
+
+inline auto OpenLogFile(UserIdT userId_, PortfolioT strategyId_) -> LogFilePtrT {
+    const std::tm local = LocalTime();
+    char          dateText[16];
+    char          timeText[16];
+    std::strftime(dateText, sizeof(dateText), "%Y%m%d", &local);
+    std::strftime(timeText, sizeof(timeText), "%H%M%S", &local);
+
+    const std::string dir = std::string("log/") + dateText;
+    char              path[128];
+    std::snprintf(path, sizeof(path), "%s/user_%u_portfolio_%u_%s.log", dir.c_str(), userId_, strategyId_, timeText);
+
+    std::error_code ignored;
+    std::filesystem::create_directories(dir, ignored);
+    LogFilePtrT file(std::fopen(path, "a"));
+    if (file) {
+        std::setvbuf(file.get(), nullptr, _IOFBF, LogBufferBytes);
+    }
+    return file;
 }
 
 #pragma pack(push, 1)
@@ -92,6 +132,8 @@ struct StrategySpreadUpdate {
     float          _reserved;   // was _trSpread; always 0, kept so B-ATP/S-ATP offsets do not move
     float          _bATP;
     float          _sATP;
+
+    friend auto operator==(const StrategySpreadUpdate&, const StrategySpreadUpdate&) -> bool = default;
 };
 
 // ponytail: packed POD struct replaces JSON for strategy lifecycle updates to UI (code 100001)

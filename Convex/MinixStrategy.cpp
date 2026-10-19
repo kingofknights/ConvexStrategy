@@ -256,10 +256,12 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
 void MinixStrategy::onBcastData(const aef::infra::product::product_data& product_details_) { _squareOff->OnBcast(product_details_); }
 
 auto MinixStrategy::doWork() -> int {
-    bool erased = false;
+    const uint64_t now    = aef::infra::get_time_in_nanos();
+    bool           erased = false;
     for (auto iterator = _strategies.begin(); iterator != _strategies.end();) {
         RatioLegStrategy& strategy = *iterator->second;
         strategy.FlushLog();  // off the event path: logs buffer while ticks and responses are handled
+        strategy.DoWork(now);
         if (!strategy.IsDeleted() || !strategy.IsIdle()) {
             ++iterator;
             continue;
@@ -269,13 +271,13 @@ auto MinixStrategy::doWork() -> int {
         iterator = _strategies.erase(iterator);
         erased   = true;
     }
-    if (erased) RebuildTickRoutes();
+    if (erased) {
+        RebuildTickRoutes();
+    }
 
-    // Monotonic clock: a wall-clock step (NTP) must not stall or burst the UI echo.
-    const uint64_t now = aef::infra::get_time_in_nanos();
     if (now - _lastSpreadSendNs >= 1'000'000'000) {
         _lastSpreadSendNs = now;
-        SendStrategySpreadsToUi();
+        SendStrategySpreadsToUi(now);
     }
     return 0;
 }
@@ -313,26 +315,11 @@ auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t qu
 
 // ═══ UI echo ═════════════════════════════════════════════════════════════════
 
-void MinixStrategy::SendStrategySpreadsToUi() {
+void MinixStrategy::SendStrategySpreadsToUi(uint64_t nowNs_) {
     for (const auto& [strategyId, strategy] : _strategies) {
-        StrategySpreadUpdate update{};
-        update._strategyId = strategy->GetStrategyID();
-        update._status     = strategy->GetStatus();
-        update._bcmp       = strategy->GetBCmp()._spread / 100.0F;
-        update._scmp       = strategy->GetSCmp()._spread / 100.0F;
-        update._cost       = static_cast<float>(strategy->GetCost()) / 100.0F;
-        update._flp        = static_cast<float>(strategy->GetFLP()) / 100.0F;
-        update._gap        = static_cast<float>(strategy->GetGap());
-        update._bTrQ       = strategy->GetLongTradedPacks();
-        update._sTrQ       = strategy->GetShortTradedPacks();
-        update._m2m        = static_cast<float>(strategy->GetM2M()) / 100.0F;
-        update._netPL      = static_cast<float>(strategy->GetNetPL()) / 100.0F;
-        update._rlp        = static_cast<float>(strategy->GetRLP()) / 100.0F;
-        update._cutPL      = static_cast<float>(strategy->GetCutPL()) / 100.0F;
-        update._bATP       = static_cast<float>(strategy->GetBATP()) / 100.0F;
-        update._sATP       = static_cast<float>(strategy->GetSATP()) / 100.0F;
-        update._reserved   = static_cast<float>(strategy->GetEventCount());
-        SendToUi(UiMessageCode_STRATEGY_SPREAD, strategy->GetInterface(), update);
+        if (const auto update = strategy->SpreadUpdate(nowNs_)) {
+            SendToUi(UiMessageCode_STRATEGY_SPREAD, strategy->GetInterface(), *update);
+        }
     }
 }
 

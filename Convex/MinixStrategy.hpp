@@ -51,7 +51,7 @@ class MinixStrategy final : public AlgoBase {
     void RebuildTickRoutes();
 
     // Once per ~1s, echo spread and PnL of every strategy back to the GUI.
-    void SendStrategySpreadsToUi();
+    void SendStrategySpreadsToUi(uint64_t nowNs_);
     void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
 
     // Copies a packed POD straight into one UI packet (UI_BINARY_PROTOCOL_SPEC.md).

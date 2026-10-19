@@ -1,11 +1,9 @@
 #pragma once
-// Small helpers shared by the RatioLegStrategy source files.
 #include "Utils.hpp"
 
 #include <string_view>
 
 namespace ratioleg {
-
     constexpr auto Opposite(ORDER_SIDE side_) noexcept -> ORDER_SIDE { return side_ == BUY_SIDE ? SELL_SIDE : BUY_SIDE; }
 
     constexpr auto SideName(ORDER_SIDE side_) noexcept -> std::string_view { return side_ == BUY_SIDE ? "BUY" : "SELL"; }
@@ -36,7 +34,6 @@ namespace ratioleg {
 
     inline constexpr auto IDLE = static_cast<uint32_t>(execution_strat::STRAT_ORDER_STATE::STRAT_INITIAL_STATE);
 
-    // What UpdateOrder will send for this order: a new order or a modify.
     inline auto OrderAction(const OrderObjectT& order_) noexcept -> std::string_view { return order_.get_current_state() == IDLE ? "PLACE" : "MODIFY"; }
 
-}  // namespace ratioleg
+}

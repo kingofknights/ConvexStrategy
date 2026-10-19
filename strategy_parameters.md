@@ -45,3 +45,7 @@ This document outlines the usage and logic behind the key execution parameters d
 * **Details:** Configured as an integer tick count. Converted internally to `_tradeGearOffset = _tradeGear * _tickSize`.
 * **Engine Behavior:** When a fill occurs on the primary bidding leg and hedge legs must execute, the target limit price is offset by `_tradeGear` ticks in the aggressive direction (BUY: $\text{Ask} + \text{TradeGear} \times \text{TickSize}$; SELL: $\text{Bid} - \text{TradeGear} \times \text{TickSize}$). This accelerates fill latency and improves order queue priority. Each subsequent retry step adds one additional tick on top of this aggressive offset.
 
+
+### 9. Passive Bid Ticks (`PassiveBidTicks` / `_passiveBidTicks`)
+* **Description:** How many ticks leg 0 bids away from the exact target price P1. This is the "constant" in `Flow.md`'s reverse formula.
+* **Engine Behavior:** `RateBid` moves P1 this many ticks further from the market: SELL up, BUY down. The level 3 (index 2) too-deep rule checks the moved price. The GUI does not send this key yet, so it defaults to `DEFAULT_PASSIVE_BID_TICKS = 5`. Negative values are read as 0.
