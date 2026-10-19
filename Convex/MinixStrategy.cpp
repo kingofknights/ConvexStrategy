@@ -261,7 +261,6 @@ auto MinixStrategy::doWork() -> int {
     for (auto iterator = _strategies.begin(); iterator != _strategies.end();) {
         RatioLegStrategy& strategy = *iterator->second;
         strategy.FlushLog();  // off the event path: logs buffer while ticks and responses are handled
-        strategy.DoWork(now);
         if (!strategy.IsDeleted() || !strategy.IsIdle()) {
             ++iterator;
             continue;

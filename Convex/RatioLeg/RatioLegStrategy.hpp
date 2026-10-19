@@ -3,6 +3,7 @@
 #include "nlohmann/json.hpp"
 
 #include <fmt/format.h>
+#include <oms_api.hpp>
 
 #include <array>
 #include <cstddef>
@@ -18,9 +19,34 @@
 class MinixStrategy;
 
 class RatioLegStrategy {
-  public:
-    static constexpr size_t MAX_LEGS = 6;
+    static constexpr size_t MaxLegs = 6;
+    static constexpr size_t NoLeg   = std::numeric_limits<size_t>::max();
 
+    template <typename T>
+    using LegArrayT = std::array<T, MaxLegs>;
+
+    struct Pack {
+        LegArrayT<ORDER_SIDE> _sides{};
+        LegArrayT<ORDER_SIDE> _oppositeSide{};
+        LegArrayT<int>        _signedRatio{};
+
+        LegArrayT<OrderObjectPtrT> _orders;
+        LegArrayT<int32_t>         _tradedLots{};
+        LegArrayT<uint64_t>        _tradedValue{};
+        LegArrayT<int32_t>         _reportedLots{};
+        LegArrayT<uint64_t>        _reportedValue{};
+
+        int   _totalAllowedPacks = 0;
+        int   _singleOrderPacks  = 0;
+        float _targetSpread      = 0;
+
+        double     _tradedSpread = 0.0;
+        int        _tradedPack   = 0;
+        bool       _hedgeMode    = false;
+        ORDER_SIDE _packSide     = BUY_SIDE;
+    };
+
+  public:
     RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
     ~RatioLegStrategy();
 
@@ -50,7 +76,6 @@ class RatioLegStrategy {
 
     void               OnTick(const Quote& quote_);
     void               OnOrderResponse(const oms_transaction& response_);
-    void               DoWork(uint64_t nowNs_);
     [[nodiscard]] auto SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySpreadUpdate>;
 
     [[nodiscard]] auto GetTokens() const -> std::span<const int> { return {_tokens.data(), _legCount}; }
@@ -59,67 +84,21 @@ class RatioLegStrategy {
     [[nodiscard]] auto IsActive() const -> bool { return _status == StrategyStatus_APPLIED; }
 
   private:
-    template <typename T>
-    using LegArray = std::array<T, MAX_LEGS>;
+    static constexpr size_t   BiddingLeg     = 0;
+    static constexpr uint64_t SpreadResendNs = 60'000'000'000;
 
-    static constexpr size_t NO_LEG = std::numeric_limits<size_t>::max();
+    void EvaluateBidding(Pack& pack_);
+    void EvaluateHedgeMode(Pack& pack_);
 
-    enum class BidGate : uint8_t { UNKNOWN, BID, DONE, HEDGE_DEPTH, NO_PRICE, UNREACHABLE, BID_DEPTH, TOO_DEEP };
-
-    struct Pack {
-        ORDER_SIDE                _packSide     = BUY_SIDE;
-        LegArray<ORDER_SIDE>      _sides{};
-        int                       _totalPacks   = 0;
-        int                       _slicePacks   = 0;
-        float                     _targetSpread = 0;
-        LegArray<OrderObjectPtrT> _orders;
-        LegArray<OrderObjectPtrT> _cutOrders;
-        LegArray<int32_t>         _tradedLots{};
-        LegArray<uint64_t>        _tradedValue{};
-        LegArray<int32_t>         _unreportedLots{};
-        LegArray<uint64_t>        _unreportedValue{};
-        double                    _tradedSpread      = 0.0;
-        uint64_t                  _incompleteSinceNs = 0;
-        size_t                    _thinHedgeLeg      = NO_LEG;
-        BidGate                   _bidGate           = BidGate::UNKNOWN;
-        LegArray<bool>            _hedgeWaiting{};
-        std::string_view          _cutReason;
-    };
-
-    static constexpr size_t   BIDDING_LEG               = 0;
-    static constexpr size_t   HEDGE_LEVEL               = 2;
-    static constexpr size_t   CHASE_LEVEL               = 1;
-    static constexpr size_t   BID_LEVEL_LIMIT           = 2;
-    static constexpr int      DEFAULT_REVERT_BID_MS     = 1000;
-    static constexpr int      DEFAULT_PASSIVE_BID_TICKS = 5;
-    static constexpr uint64_t THROTTLE_PAUSE_NS         = 1'000'000'000;
-    static constexpr uint64_t THROTTLE_RETRY_NS         = 5'000'000;
-    static constexpr uint64_t DEPTH_CHECK_NS            = 60'000'000'000;
-    static constexpr uint64_t SPREAD_RESEND_NS          = 60'000'000'000;
-
-    void Evaluate(Pack& pack_);
-    void Bid(Pack& pack_);
-    auto Complete(Pack& pack_) -> bool;
-    void Cut(Pack& pack_);
     void OnTrade(Pack& pack_, size_t leg_, const oms_transaction& response_);
-    void OnCutTrade(Pack& pack_, size_t leg_, const oms_transaction& response_);
     void ReportPacks(Pack& pack_, const oms_transaction& response_);
     void SendTracer(const Pack& pack_, const oms_transaction& response_, float price_, float ltp_, int ltq_, float slippage_, std::string_view message_);
-    void CheckHedgeDepth(uint64_t nowNs_);
-    void Send(Pack& pack_, size_t leg_, OrderObjectT& order_, double price_, int lots_, std::string_view reason_);
     void Pull(Pack& pack_, size_t leg_, std::string_view reason_);
-    void LogGate(Pack& pack_, BidGate gate_, float market_, bool valid_, double price_);
+    void UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
     void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_);
 
-    [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArray<int>* prices_ = nullptr) const -> std::optional<float>;
+    [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArrayT<int>* prices_ = nullptr) const -> std::optional<float>;
     [[nodiscard]] auto AdjustGap(double spread_) const -> double;
-    [[nodiscard]] auto CompletedPacks(const Pack& pack_) const -> int;
-    [[nodiscard]] auto IsWhole(const Pack& pack_) const -> bool;
-    [[nodiscard]] auto HedgeTarget(const Pack& pack_) const -> int;
-    [[nodiscard]] auto IsUnhedged(const Pack& pack_) const -> bool;
-    [[nodiscard]] auto ThinHedgeLeg(const Pack& pack_) const -> size_t;
-    [[nodiscard]] auto RequiredHedgeQuantity(const Pack& pack_, size_t leg_) const -> double;
-    [[nodiscard]] auto SignedRatio(const Pack& pack_, size_t leg_) const -> int;
     [[nodiscard]] auto FindLegIndex(int token_) const -> size_t;
     [[nodiscard]] auto PackName(const Pack& pack_) const -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
     [[nodiscard]] auto BookText() const -> std::string;
@@ -149,10 +128,10 @@ class RatioLegStrategy {
     int _tickSize   = 0;
     int _eventCount = 0;
 
-    LegArray<Quote> _quote{};
-    LegArray<int>   _tokens{};
-    LegArray<int>   _ratios{};
-    LegArray<bool>  _isOption{};
+    LegArrayT<Quote> _quote{};
+    LegArrayT<int>   _tokens{};
+    LegArrayT<int>   _ratios{};
+    LegArrayT<bool>  _isOption{};
 
     Pack _longPack;
     Pack _shortPack;
@@ -162,8 +141,6 @@ class RatioLegStrategy {
     int    _hedgeDepthPercent = 0;
     int    _allowedSlippage   = 0;
     size_t _allowedBidDepth   = 0;
-    int    _revertBidMs       = DEFAULT_REVERT_BID_MS;
-    int    _passiveBidTicks   = DEFAULT_PASSIVE_BID_TICKS;
 
     double   _unwindPnL      = 0.0;
     uint64_t _depthCheckedNs = 0;
@@ -171,9 +148,6 @@ class RatioLegStrategy {
     StrategySpreadUpdate _spread{};
     StrategySpreadUpdate _lastSent{};
     uint64_t             _lastSentNs = 0;
-
-    static inline uint64_t _bidPausedUntilNs  = 0;
-    static inline uint64_t _throttleRetryAtNs = 0;
 
     TradeTracer _tradeTracer{};
     LogFilePtrT _logFile;
