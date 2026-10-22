@@ -15,7 +15,8 @@ class ManualOrder {
     void OnRequest(const aef::infra::ui_cmd::UIStruct& request_);
     // True when response_ belongs to a manual order; it has then been echoed to the GUI.
     auto OnOrderResponse(const oms_transaction& response_) -> bool;
-    // Echoes response_ to the GUI on 5001. SquareOff uses it too: its orders are strategy 0, like manual ones.
+    // Echoes response_ to the GUI on 5001 and sends the order update (ORDER_RESPONSE) strategy orders get.
+    // SquareOff uses it too: its orders are strategy 0, like manual ones.
     void SendResponse(const oms_transaction& response_, int32_t interface_);
 
   private:

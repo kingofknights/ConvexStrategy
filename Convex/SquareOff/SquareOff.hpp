@@ -22,7 +22,7 @@ class SquareOff {
     SquareOff(MinixStrategy* hub_, const nlohmann::json& config_);
 
     // Loads today's positions and starts flattening them, only token_'s when it is not 0; order responses echo
-    // to interface_ on 5001. Tokens already being flattened are left alone. True when it took positions to flatten.
+    // to interface_ on 5001 and as order updates. Tokens already being flattened are left alone. True when it took positions to flatten.
     auto Start(int32_t interface_, int32_t token_ = 0) -> bool;
     void OnQuote(const Quote& quote_);
     void OnBcast(const aef::infra::product::product_data& product_);

@@ -147,4 +147,5 @@ void ManualOrder::SendResponse(const oms_transaction& response_, int32_t interfa
     response.packet_.flags_[0].price_type   = response_.packet_.flags_.price_type;
 
     _hub->SendToUi(UiMessageCode_MANUAL_ORDER_RESPONSE, interface_, response);
+    _hub->SendOrderResponse(response_, interface_);  // order book update, as strategy orders get
 }

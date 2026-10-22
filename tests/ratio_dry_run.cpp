@@ -810,6 +810,19 @@ auto ManualEchoes(size_t from_) -> std::vector<oms_transaction3l> {
     return echoes;
 }
 
+// Order updates (ORDER_RESPONSE) sent to the GUI from packet from_ on, as strategy 0 on interface 7.
+auto OrderUpdates(size_t from_) -> std::vector<ExternalOrderResponse> {
+    std::vector<ExternalOrderResponse> updates;
+    for (size_t i = from_; i < exchange::uiPackets.size(); ++i) {
+        if (exchange::uiPackets[i].header.message_code != UiMessageCode_ORDER_RESPONSE) continue;
+        CHECK(exchange::uiPackets[i].header.interface_id == 7);
+        updates.emplace_back();
+        std::memcpy(&updates.back(), exchange::uiPackets[i].message, sizeof(ExternalOrderResponse));
+        CHECK(updates.back()._userDetails._compositeID._fields._portfolio == 0);
+    }
+    return updates;
+}
+
 void ManualOrders() {
     // Place, modify, cancel one leg: each request reaches the exchange and every response echoes with the GUI's request id.
     size_t sent = exchange::sent.size(), ui = exchange::uiPackets.size();
@@ -823,12 +836,16 @@ void ManualOrders() {
     CHECK(echoes.size() == 2 && echoes[0].hdr_.transaction_code == OMS_ORDER_PLACED && echoes[1].hdr_.transaction_code == OMS_ORDER_CONFIRMED);
     CHECK(echoes[1].hdr_.uid_.request_id == 1 && echoes[1].hdr_.uid_.strategy_id == 0);
     CHECK(echoes[1].packet_.product_id_[0] == LEG1 && echoes[1].hdr_.error_code == 0);
+    auto updates = OrderUpdates(ui);
+    CHECK(updates.size() == 1 && updates[0]._response._response == OrderResponse_PLACED && updates[0]._response._token == LEG1);
 
     SendManual(OMS_REPLACE_REQ, 1, {{LEG1, BUY_SIDE, 105, LOT}});
     CHECK(exchange::live.at(placed.hdr_.uid_.id_).price == 105);
     SendManual(OMS_CANCEL_REQ, 1, {{LEG1, BUY_SIDE, 105, LOT}});
     CHECK(!exchange::live.count(placed.hdr_.uid_.id_));
     CHECK(ManualEchoes(ui).back().hdr_.transaction_code == OMS_ORDER_CANCELLED);
+    updates = OrderUpdates(ui);
+    CHECK(updates.size() == 3 && updates[1]._response._response == OrderResponse_MODIFIED && updates[2]._response._response == OrderResponse_CANCELLED);
 
     // Bad input is rejected to the GUI and never reaches the exchange.
     sent = exchange::sent.size();
@@ -841,13 +858,16 @@ void ManualOrders() {
     CHECK(echoes.size() == 3);
     CHECK(echoes[0].hdr_.transaction_code == OMS_REQ_REJ && echoes[0].hdr_.error_code == INVALID_CLIENT_REQ_ID && echoes[0].hdr_.uid_.request_id == 99);
     CHECK(echoes[1].hdr_.error_code == INVALID_QTY && echoes[2].hdr_.error_code == INVALID_PRICE);
+    updates = OrderUpdates(ui);
+    CHECK(updates.size() == 3 && updates[0]._response._response == OrderResponse_NEW_REJECT && updates[0]._response._errorCode == INVALID_CLIENT_REQ_ID);
+    CHECK(updates[1]._response._errorCode == INVALID_QTY && updates[2]._response._errorCode == INVALID_PRICE);
 
     // Two legs: each order goes out on its own leg's token.
     SendManual(OMS_PLACE_REQ, 2, {{LEG1, BUY_SIDE, 100, LOT}, {LEG2, SELL_SIDE, 900, LOT}});
     CHECK(exchange::sent.size() == sent + 2);
     CHECK(exchange::sent[sent].packet_.product_id_ == LEG1 && exchange::sent[sent + 1].packet_.product_id_ == LEG2);
     CHECK(exchange::sent[sent + 1].packet_.flags_.order_side == SELL_SIDE && exchange::sent[sent + 1].packet_.price_ == 900);
-    std::printf("  manual orders: place / modify / cancel echoed on 5001, bad requests rejected, 2 legs on their own tokens\n");
+    std::printf("  manual orders: place / modify / cancel echoed on 5001 and as order updates, bad requests rejected, 2 legs on their own tokens\n");
 }
 
 // ═══ Square-off (GUI 1331 all, 1332 one token) ═════════════════════════════════════
@@ -890,10 +910,12 @@ void SquareOffFlattens() {
     const auto echoes = ManualEchoes(ui);
     CHECK(!echoes.empty() && echoes.back().hdr_.transaction_code == OMS_TRADE && echoes.back().hdr_.uid_.strategy_id == 0);
     CHECK(std::count_if(echoes.begin(), echoes.end(), [](const oms_transaction3l& echo_) { return echo_.hdr_.transaction_code == OMS_TRADE; }) == 2);
+    const auto updates = OrderUpdates(ui);  // and as order updates: the GUI order book sees both fills
+    CHECK(std::count_if(updates.begin(), updates.end(), [](const ExternalOrderResponse& update_) { return update_._response._response == OrderResponse_FILLED; }) == 2);
 
     Bcast(LEG1, 760, 790);  // flat now: nothing more
     CHECK(exchange::sent.size() == sent + 2);
-    std::printf("  square-off: long 130 sold @760, short 65 bought @335, echoed on 5001, flat, repeat press and later broadcasts ignored\n");
+    std::printf("  square-off: long 130 sold @760, short 65 bought @335, echoed on 5001 and as order updates, flat, repeat press and later broadcasts ignored\n");
 }
 
 // Square-off while a pack waits for its leg2 hedge: strategies stop and drop their positions, so the hedge
