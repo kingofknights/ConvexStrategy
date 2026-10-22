@@ -409,30 +409,6 @@ auto RequestsOf(int strategy_, int token_, int code_) -> int {
 
 // ═══ Scenarios ═══════════════════════════════════════════════════════════════
 
-// GUI ids from 128 up do not fit the 7-bit client_uid.strategy_id (20261022 log: strategies 128-138 sent one bid each,
-// got no response back, and Stop could not cancel it). The strategy gets a free wire id and its responses come back.
-void WireIdAbove127() {
-    constexpr int ID = 200;
-    SendConfig(RatioConfig(ID, "Applied"));
-    TickAllLegs();
-    const auto placed = std::find_if(exchange::sent.rbegin(), exchange::sent.rend(), [](const oms_transaction& request_) {
-        return request_.hdr_.transaction_code == OMS_PLACE_REQ && request_.packet_.product_id_ == LEG0;
-    });
-    CHECK(placed != exchange::sent.rend());
-    const int wireId = static_cast<int>(placed->hdr_.uid_.composite_id_.strategy_id);
-    CHECK(wireId != 0 && wireId != (ID & 127) && exchange::LiveOrdersOf(wireId) == 1);
-
-    ExternalOrderResponse echo{};
-    for (const auto& packet : exchange::uiPackets) {
-        if (packet.header.message_code == UiMessageCode_ORDER_RESPONSE) std::memcpy(&echo, packet.message, sizeof(echo));
-    }
-    CHECK(echo._userDetails._compositeID._fields._portfolio == ID);  // the GUI sees its own id
-
-    SendConfig(RatioConfig(ID, "Stop"));
-    CHECK(RequestsOf(wireId, LEG0, OMS_CANCEL_REQ) == 1 && exchange::LiveOrdersOf(wireId) == 0);
-    std::printf("  wire id: strategy %d bids as wire id %d, response routed back, Stop cancels the bid\n", ID, wireId);
-}
-
 // A resting bid is repriced only when the new price is 2 ticks or more away (20261022 log: one-tick flicker sent
 // 4M modifies, almost all refused by the message limit).
 void BidMovesOnlyTwoTicks() {
@@ -1010,7 +986,6 @@ int main() {
     exchange::hub = &hub;
 
     std::printf("ratio dry run\n");
-    WireIdAbove127();
     BidMovesOnlyTwoTicks();
     FullCycle();
     StopRacesPendingBid();

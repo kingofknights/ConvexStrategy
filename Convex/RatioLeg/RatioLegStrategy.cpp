@@ -25,15 +25,14 @@ using namespace ratioleg;
 
 // ═══ Lifecycle ═══════════════════════════════════════════════════════════════
 
-RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, uint32_t wireId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_)
+RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_)
     : _hub(hub_),
       _strategyId(strategyId_),
-      _wireId(wireId_),
       _interface(interface_),
       _legCount(legCount_),
       _hasStrikeGap(hasStrikeGap_) {
     _logFile = OpenLogFile(json_.contains("Strategy") ? json_["Strategy"].value("UserId", 0U) : 0U, _strategyId);
-    WriteLog(">>> [INIT] Opened log file strategyId={} wireId={}\n", _strategyId, _wireId);
+    WriteLog(">>> [INIT] Opened log file strategyId={}\n", _strategyId);
 
     _longPack._packSide  = BUY_SIDE;
     _shortPack._packSide = SELL_SIDE;
@@ -84,7 +83,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, ui
     ParamUpdate(json_);
 
     _clientUid.composite_id_.client_id   = static_cast<uint32_t>(_hub->_clientId);
-    _clientUid.composite_id_.strategy_id = _wireId;
+    _clientUid.composite_id_.strategy_id = _strategyId;
 
     for (Pack* pack : {&_longPack, &_shortPack}) {
         for (size_t leg = 0; leg < _legCount; ++leg) {

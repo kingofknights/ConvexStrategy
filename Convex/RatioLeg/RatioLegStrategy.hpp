@@ -48,7 +48,7 @@ class RatioLegStrategy {
     };
 
   public:
-    RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, uint32_t wireId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
+    RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
     ~RatioLegStrategy();
 
     RatioLegStrategy(const RatioLegStrategy&)            = delete;
@@ -81,8 +81,6 @@ class RatioLegStrategy {
 
     [[nodiscard]] auto GetTokens() const -> std::span<const int> { return {_tokens.data(), _legCount}; }
     [[nodiscard]] auto GetInterface() const -> int32_t { return _interface; }
-    [[nodiscard]] auto GetStrategyId() const -> uint32_t { return _strategyId; }
-    [[nodiscard]] auto GetWireId() const -> uint32_t { return _wireId; }
     [[nodiscard]] auto GetStatus() const -> StrategyStatus { return _status; }
     [[nodiscard]] auto IsActive() const -> bool { return _status == StrategyStatus_APPLIED; }
 
@@ -118,7 +116,6 @@ class RatioLegStrategy {
     client_uid           _clientUid{};
 
     const uint32_t _strategyId;
-    const uint32_t _wireId;
     const int32_t  _interface;
     const size_t   _legCount;
     const bool     _hasStrikeGap;
