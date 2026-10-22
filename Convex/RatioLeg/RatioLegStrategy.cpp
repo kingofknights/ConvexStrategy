@@ -25,14 +25,15 @@ using namespace ratioleg;
 
 // ═══ Lifecycle ═══════════════════════════════════════════════════════════════
 
-RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_)
+RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, uint32_t wireId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_)
     : _hub(hub_),
       _strategyId(strategyId_),
+      _wireId(wireId_),
       _interface(interface_),
       _legCount(legCount_),
       _hasStrikeGap(hasStrikeGap_) {
     _logFile = OpenLogFile(json_.contains("Strategy") ? json_["Strategy"].value("UserId", 0U) : 0U, _strategyId);
-    WriteLog(">>> [INIT] Opened log file\n");
+    WriteLog(">>> [INIT] Opened log file strategyId={} wireId={}\n", _strategyId, _wireId);
 
     _longPack._packSide  = BUY_SIDE;
     _shortPack._packSide = SELL_SIDE;
@@ -83,7 +84,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     ParamUpdate(json_);
 
     _clientUid.composite_id_.client_id   = static_cast<uint32_t>(_hub->_clientId);
-    _clientUid.composite_id_.strategy_id = _strategyId;
+    _clientUid.composite_id_.strategy_id = _wireId;
 
     for (Pack* pack : {&_longPack, &_shortPack}) {
         for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -119,16 +120,17 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _hedgeDepthPercent = params.value("ThresholdQty", 100);
         _allowedSlippage   = params.value("AllowedSlippage", 0);
         _allowedBidDepth   = std::min<size_t>(params.value("AllowedBidDepth", 0U), aef::infra::quote::QUOTE_LEVELS);
+        _minChangeTick     = params.value("TickSize", 2);
 
         WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
             "\nOrderDepth: {}, \nPriceDepth: {}, "
-            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \n_biddingLeg: {}\n",
+            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \nTickSize: {}, \n_biddingLeg: {}\n",
             _strategyId, _longPack._singleOrderPacks, _longPack._totalAllowedPacks, _longPack._targetSpread,
             _shortPack._singleOrderPacks, _shortPack._totalAllowedPacks, _shortPack._targetSpread, _orderDepth, _priceDepth,
-            _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, BiddingLeg);
+            _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, _minChangeTick, BiddingLeg);
     }
     _depthCheckedNs = 0;
 }
@@ -214,6 +216,13 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         order.handle_confirmation(response_);
     }
     LogResponse(pack, leg, order, response_, false);
+    if (response_.hdr_.error_code == THROTTLE_LIMIT) {
+        const uint64_t now = aef::infra::get_time_in_nanos();
+        if (now >= _throttleUntilNs) {
+            WriteLog("[THROTTLE] message limit hit: no bid placed or moved for {} ms\n", ThrottlePauseNs / 1'000'000);
+        }
+        _throttleUntilNs = now + ThrottlePauseNs;
+    }
     if (code == OMS_TRADE) {
         OnTrade(pack, leg, response_);
     }
@@ -223,6 +232,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     if (not IsActive()) {
+        Pull(pack_, BiddingLeg, "Strategy is not active");
         return;
     }
     LegArrayT<int>             prices{};
@@ -236,7 +246,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const double p1           = prices[BiddingLeg] - ((*market - pack_._targetSpread) / pack_._signedRatio[BiddingLeg]);
     const double ticks        = p1 / _tickSize;
     const int    finalPrice   = static_cast<int>(pack_._sides[BiddingLeg] == BUY_SIDE ? std::floor(ticks) : std::ceil(ticks)) * _tickSize;
-    const int    passivePrice = pack_._sides[BiddingLeg] == BUY_SIDE ? -_tickSize * 5 : _tickSize + 5;
+    const int    passivePrice = pack_._sides[BiddingLeg] == BUY_SIDE ? -_tickSize * PassiveTickCount : _tickSize * PassiveTickCount;
     if (finalPrice <= 0) {
         Pull(pack_, BiddingLeg, "target needs a price <= 0");
         return;
@@ -254,7 +264,15 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "nothing left to bid");
         return;
     }
-    UpdateOrder(pack_, BiddingLeg, finalPrice + passivePrice, quantity, "BID");
+    const int           price = finalPrice + passivePrice;
+    const OrderObjectT& order = *pack_._orders[BiddingLeg];
+    if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - order.get_open_price()) < _minChangeTick * _tickSize) {
+        return;
+    }
+    if (aef::infra::get_time_in_nanos() < _throttleUntilNs) {
+        return;
+    }
+    UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");
 }
 
 void RatioLegStrategy::EvaluateHedgeMode(Pack& pack_) {
@@ -335,10 +353,10 @@ void RatioLegStrategy::ReportPacks(Pack& pack_, const oms_transaction& response_
 
     const auto  traded   = static_cast<float>(AdjustGap(spread));
     const float slippage = pack_._targetSpread - traded;
-    const bool  slipped  = std::round(slippage) > 0;
+    const bool  slipped  = std::round(slippage) > static_cast<float>(_allowedSlippage);
     SendTracer(pack_, response_, pack_._targetSpread / 100.0F, traded / 100.0F, newPacks, slipped ? slippage / 100.0F : 0, slipped ? "Slippage" : "");
 
-    if (_allowedSlippage > 0 && slippage > static_cast<float>(_allowedSlippage)) {
+    if (slipped) {
         WriteLog("[SLIPPAGE] {} slippage {} paise > AllowedSlippage {} paise: stopping\n", PackName(pack_), slippage, _allowedSlippage);
         Stop("slippage above AllowedSlippage");
     }

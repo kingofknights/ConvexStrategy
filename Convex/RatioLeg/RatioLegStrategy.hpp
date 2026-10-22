@@ -19,8 +19,9 @@
 class MinixStrategy;
 
 class RatioLegStrategy {
-    static constexpr size_t MaxLegs = 6;
-    static constexpr size_t NoLeg   = std::numeric_limits<size_t>::max();
+    static constexpr size_t MaxLegs          = 6;
+    static constexpr int    PassiveTickCount = 3;
+    static constexpr size_t NoLeg            = std::numeric_limits<size_t>::max();
 
     template <typename T>
     using LegArrayT = std::array<T, MaxLegs>;
@@ -47,7 +48,7 @@ class RatioLegStrategy {
     };
 
   public:
-    RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
+    RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, uint32_t wireId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
     ~RatioLegStrategy();
 
     RatioLegStrategy(const RatioLegStrategy&)            = delete;
@@ -80,12 +81,18 @@ class RatioLegStrategy {
 
     [[nodiscard]] auto GetTokens() const -> std::span<const int> { return {_tokens.data(), _legCount}; }
     [[nodiscard]] auto GetInterface() const -> int32_t { return _interface; }
+    [[nodiscard]] auto GetStrategyId() const -> uint32_t { return _strategyId; }
+    [[nodiscard]] auto GetWireId() const -> uint32_t { return _wireId; }
     [[nodiscard]] auto GetStatus() const -> StrategyStatus { return _status; }
     [[nodiscard]] auto IsActive() const -> bool { return _status == StrategyStatus_APPLIED; }
 
   private:
     static constexpr size_t   BiddingLeg     = 0;
     static constexpr uint64_t SpreadResendNs = 60'000'000'000;
+    static constexpr uint64_t ThrottlePauseNs = 1'000'000'000;
+
+    // Set by a THROTTLE_LIMIT reject: no bid is placed or moved until then. Shared, the message limit is per OMS session.
+    static inline uint64_t _throttleUntilNs = 0;
 
     void EvaluateBidding(Pack& pack_);
     void EvaluateHedgeMode(Pack& pack_);
@@ -115,6 +122,7 @@ class RatioLegStrategy {
     client_uid           _clientUid{};
 
     const uint32_t _strategyId;
+    const uint32_t _wireId;
     const int32_t  _interface;
     const size_t   _legCount;
     const bool     _hasStrikeGap;
@@ -123,9 +131,10 @@ class RatioLegStrategy {
     long           _utcOffsetSeconds = UtcOffsetSeconds();
     bool           _deleted          = false;
 
-    int _strikeGap  = 0;
-    int _lotSize    = 0;
-    int _tickSize   = 0;
+    int _strikeGap     = 0;
+    int _lotSize       = 0;
+    int _tickSize      = 0;
+    int _minChangeTick = 2;  // GUI TickSize: a resting bid is repriced only when the new price is this many ticks away
     int _eventCount = 0;
 
     LegArrayT<Quote> _quote{};

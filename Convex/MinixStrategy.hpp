@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -52,7 +53,7 @@ class MinixStrategy final : public AlgoBase {
 
     // Once per ~1s, echo spread and PnL of every strategy back to the GUI.
     void SendStrategySpreadsToUi(uint64_t nowNs_);
-    void SendOrderResponse(const oms_transaction& response_, int32_t interface_);
+    void SendOrderResponse(const oms_transaction& response_, int32_t interface_, uint32_t strategyId_);
 
     // Copies a packed POD straight into one UI packet (UI_BINARY_PROTOCOL_SPEC.md).
     template <typename Payload>
@@ -78,7 +79,12 @@ class MinixStrategy final : public AlgoBase {
     };
     JsonReassembly _jsonReassembly;
 
+    // client_uid.strategy_id is 7 bits, so GUI ids from 128 up would wrap. Each live strategy gets its own
+    // wire id 1..127 (its GUI id when free) and responses are routed by it. 0 = manual orders / square-off.
+    static constexpr uint32_t WireIdCount = 1U << 7;
+
     std::map<uint32_t, std::unique_ptr<RatioLegStrategy>> _strategies;
+    std::array<RatioLegStrategy*, WireIdCount>            _byWireId{};  // wire strategy_id -> strategy
     std::unordered_map<int32_t, std::vector<RatioLegStrategy*>> _tickRoutes;  // token -> strategies with a leg on it
     uint64_t                                              _lastSpreadSendNs = 0;  // monotonic ns
     ManualOrder                                           _manualOrder{this};

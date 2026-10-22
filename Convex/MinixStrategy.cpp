@@ -189,8 +189,17 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
         if (status == "SUBSCRIBED" || status == "SUBSCRIBE" || status == "NEW" || status == "ACTIVE" ||
             status == "APPLIED" || status == "APPLY") {
             if (iterator == _strategies.end()) {
-                std::cout << "[handleRatioLegStrategy] Creating new RatioLegStrategy for strat=" << strategyId << " with status=" << status << std::endl;
-                iterator = _strategies.emplace(strategyId, std::make_unique<RatioLegStrategy>(this, strategyId, interface_, root_, legCount_, hasStrikeGap_)).first;
+                uint32_t wireId = strategyId > 0 && strategyId < WireIdCount && _byWireId[strategyId] == nullptr ? strategyId : 0;
+                for (uint32_t slot = 1; wireId == 0 && slot < WireIdCount; ++slot) {
+                    if (_byWireId[slot] == nullptr) wireId = slot;
+                }
+                if (wireId == 0) {
+                    std::cout << "[handleRatioLegStrategy] strat=" << strategyId << " not created: all " << WireIdCount - 1 << " wire ids are in use" << std::endl;
+                    return;
+                }
+                std::cout << "[handleRatioLegStrategy] Creating new RatioLegStrategy for strat=" << strategyId << " wireId=" << wireId << " with status=" << status << std::endl;
+                iterator = _strategies.emplace(strategyId, std::make_unique<RatioLegStrategy>(this, strategyId, wireId, interface_, root_, legCount_, hasStrikeGap_)).first;
+                _byWireId[wireId] = iterator->second.get();
                 RebuildTickRoutes();
             } else {
                 std::cout << "[handleRatioLegStrategy] Updating existing RatioLegStrategy for strat=" << strategyId << " with status=" << status << std::endl;
@@ -243,12 +252,12 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
         return;
     }
 
-    const uint32_t strategyId = response_.hdr_.uid_.composite_id_.strategy_id;
-    if (const auto iterator = _strategies.find(strategyId); iterator != _strategies.end()) {
-        iterator->second->OnOrderResponse(response_);
-        SendOrderResponse(response_, iterator->second->GetInterface());
+    const uint32_t wireId = response_.hdr_.uid_.composite_id_.strategy_id;
+    if (RatioLegStrategy* strategy = _byWireId[wireId]) {
+        strategy->OnOrderResponse(response_);
+        SendOrderResponse(response_, strategy->GetInterface(), strategy->GetStrategyId());
     } else {
-        std::cout << "[OnOrderResponse] no strategy " << strategyId << " for uid " << uint32_t{response_.hdr_.uid_.id_}
+        std::cout << "[OnOrderResponse] no strategy on wire id " << wireId << " for uid " << uint32_t{response_.hdr_.uid_.id_}
                   << " code " << int{response_.hdr_.transaction_code} << " token " << int{response_.packet_.product_id_} << " -- ignored" << std::endl;
     }
 }
@@ -267,6 +276,7 @@ auto MinixStrategy::doWork() -> int {
         }
         std::cout << "[doWork] strat=" << iterator->first << " deleted: flat and idle" << std::endl;
         SendToUi(UiMessageCode_STRATEGY_STATUS, strategy.GetInterface(), StrategyStatusUpdate{iterator->first, StrategyStatus_INACTIVE});
+        _byWireId[strategy.GetWireId()] = nullptr;
         iterator = _strategies.erase(iterator);
         erased   = true;
     }
@@ -322,7 +332,7 @@ void MinixStrategy::SendStrategySpreadsToUi(uint64_t nowNs_) {
     }
 }
 
-void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t interface_) {
+void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t interface_, uint32_t strategyId_) {
     const OrderResponse responseType = GetOrderResponse(response_.hdr_.transaction_code);
     if (responseType == OrderResponse_NONE) {
         return;
@@ -334,7 +344,7 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
     response._information._fields._side      = response_.packet_.flags_.order_side == BUY_SIDE ? Side_BUY : Side_SELL;
 
     response._userDetails._compositeID._fields._user      = response_.hdr_.uid_.composite_id_.client_id;
-    response._userDetails._compositeID._fields._portfolio = response_.hdr_.uid_.composite_id_.strategy_id;
+    response._userDetails._compositeID._fields._portfolio = strategyId_;  // GUI id, not the wire id
     int32_t errorCode                                     = response_.packet_.exchange_error_code;
 
     if (response_.hdr_.error_code < 0) {
