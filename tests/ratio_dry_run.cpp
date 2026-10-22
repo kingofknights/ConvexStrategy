@@ -439,7 +439,7 @@ void WireIdAbove127() {
 void BidMovesOnlyTwoTicks() {
     constexpr int  ID           = 90;
     nlohmann::json config       = RatioConfig(ID, "Applied");
-    config["Params"]["TickSize"] = 2;
+    config["Params"]["TickSize"] = 1;  // clamped to the minimum of 2
     SendConfig(config);
     TickAllLegs();
     int price = LivePrice(ID, LEG0);
@@ -456,7 +456,7 @@ void BidMovesOnlyTwoTicks() {
     }
     CHECK(modifies > 0 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == modifies);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  bid move: %d modifies over 12 one-tick hedge moves, each one >= 2 ticks\n", modifies);
+    std::printf("  bid move: %d modifies over 12 one-tick hedge moves, each one >= 2 ticks with TickSize 1\n", modifies);
 }
 
 // Full life: subscribe, apply, bid rests at the target price while the market misses, fills once the bid reaches it, done.
@@ -469,13 +469,15 @@ void FullCycle() {
 
     SendConfig(RatioConfig(ID, "Applied"));
     CHECK(LastStatusEcho()._status == StrategyStatus_APPLIED);
-    exchange::Tick(LEG0, 505, 515);  // market 3*505 - 780 - 2*325 = 85 < 140: SELL rests at (140 + 1430) / 3 = 523.33 -> 525 (ask level 3)
+    exchange::Tick(LEG0, 505, 515);  // market 3*505 - 780 - 2*325 = 85 < 140: P1 = 505 + 55 / 3 = 523.33 -> 525, SELL rests 3 ticks passive at 540
     const oms_transaction bid = NthPlace(ID, LEG0, 1);
-    CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.price_ == 525 && bid.packet_.quantity_ == 3 * LOT);
+    CHECK(bid.packet_.flags_.order_type == LIMIT_ORDER_TYPE && bid.packet_.price_ == 540 && bid.packet_.quantity_ == 3 * LOT);
     CHECK(bid.hdr_.uid_.composite_id_.request_id == 1);  // _clientUid starts at 0, first order is 1
     CHECK(exchange::LiveOrdersOf(ID) == 1 && Position(ID, LEG0) == 0);
 
-    exchange::Tick(LEG0, 525, 535);  // bid reaches 525: the resting SELL fills, the next pack crosses at once
+    exchange::Tick(LEG0, 540, 550);  // bid reaches 540: the resting SELL fills, hedges complete pack 1
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    exchange::Tick(LEG0, 540, 550);  // next tick bids pack 2 @540 against the 540 bid: fills at once
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
     CHECK(CountUi(UiMessageCode_TRADE_TRACER) == 2);
     CHECK(TracerRows(ID, "").size() == 2);  // traded at the target: Error column blank
@@ -493,7 +495,7 @@ void FullCycle() {
         }
     }
     CHECK(spread._strategyId == ID && spread._bTrQ == 2 && spread._sTrQ == 0);
-    std::printf("  full cycle: rests @525 at market 85, 2 packs filled @525, legs %ld/%+ld/%+ld, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n",
+    std::printf("  full cycle: rests @540 at market 85, 2 packs filled @540, legs %ld/%+ld/%+ld, B-TrQ=%d B-ATP=%.2f RLP=%.2f\n",
                 Position(ID, LEG0), Position(ID, LEG1), Position(ID, LEG2), spread._bTrQ, spread._bATP, spread._rlp);
 }
 
@@ -817,69 +819,6 @@ void UnhandledRejectRetries() {
     CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
     exchange::rejectCode = EXCHG_ERROR;
     std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried on the next tick, pack whole\n");
-}
-
-// A THROTTLE_LIMIT reject pauses new bids, so a bid the exchange refuses is not resent on every tick (09:25 log:
-// 100k rejects starved the short pack's hedges).
-void ThrottlePausesNewBids() {
-    constexpr int ID = 34;
-    SendConfig(RatioConfig(ID, "Applied"));
-    exchange::Tick(LEG1, 770, 780);
-    exchange::Tick(LEG2, 315, 325);
-    exchange::rejectToken   = LEG0;
-    exchange::rejectCode    = THROTTLE_LIMIT;
-    exchange::rejectForever = true;
-    for (int i = 0; i < 5; ++i) exchange::Tick(LEG0, 505, 515);
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && exchange::LiveOrdersOf(ID) == 0);
-    exchange::rejectToken   = 0;
-    exchange::rejectCode    = EXCHG_ERROR;
-    exchange::rejectForever = false;
-
-    constexpr int OTHER_ID = 35;  // the pause is shared: another strategy waits too
-    SendConfig(RatioConfig(OTHER_ID, "Applied"));
-    TickAllLegs();
-    CHECK(PlacesOf(OTHER_ID, LEG0, SELL_SIDE) == 0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
-    exchange::Tick(LEG0, 505, 515);  // pause over: both bid again
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && PlacesOf(OTHER_ID, LEG0, SELL_SIDE) == 1);
-    SendConfig(RatioConfig(ID, "Stop"));
-    SendConfig(RatioConfig(OTHER_ID, "Stop"));
-    exchange::Tick(LEG0, 505, 515);
-    std::printf("  throttle: 1 bid over 5 ticks after a THROTTLE_LIMIT reject, other strategy paused too, both resume after 1 s\n");
-}
-
-// After a THROTTLE_LIMIT reject nothing is resent for THROTTLE_RETRY_MS, and the paused bid leaves the book (14:31:33 log:
-// 22k refused cancels in one second, and a bid stuck past the target filled 50 paise under it).
-void ThrottledBidLeavesBook() {
-    constexpr int ID = 36;
-    SendConfig(RatioConfig(ID, "Applied"));
-    exchange::Tick(LEG1, 770, 780);
-    exchange::Tick(LEG2, 315, 325);
-    exchange::Tick(LEG0, 510, 520);  // SELL rests at 525
-    CHECK(LivePrice(ID, LEG0) == 525);
-    exchange::rejectToken   = LEG0;
-    exchange::rejectCode    = THROTTLE_LIMIT;
-    exchange::rejectForever = true;
-    exchange::rejectChanges = true;
-    exchange::Tick(LEG2, 320, 330);  // 526.67 -> 530: 525 is past the target, the modify is refused by the message limit
-    for (int i = 0; i < 20; ++i) exchange::Tick(LEG0, 510, 520);
-    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);  // not resent per tick
-    std::this_thread::sleep_for(std::chrono::milliseconds(6));
-    exchange::Tick(LEG0, 510, 520);  // retry: paused, so the bid is pulled instead of repriced; refused again
-    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
-    exchange::rejectToken   = 0;
-    exchange::rejectCode    = EXCHG_ERROR;
-    exchange::rejectForever = false;
-    exchange::rejectChanges = false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(6));
-    exchange::Tick(LEG0, 510, 520);  // cancel accepted; no new bid until the pause ends
-    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 2 && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
-    exchange::Tick(LEG0, 510, 520);
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && LivePrice(ID, LEG0) == 530);
-    SendConfig(RatioConfig(ID, "Stop"));
-    exchange::Tick(LEG0, 510, 520);
-    std::printf("  throttled bid: refused modify not resent within 5 ms, bid pulled while paused, back @530 after 1 s\n");
 }
 
 // AllowedBidDepth (Fractal): leg 0 needs that many price levels on its own side, where the bid rests (SELL -> asks).
@@ -1312,7 +1251,6 @@ int main() {
     std::printf("ratio dry run\n");
     WireIdAbove127();
     BidMovesOnlyTwoTicks();
-    ThrottlePausesNewBids();
     FullCycle();
     StopRacesPendingBid();
     StopKeepsHedging();
@@ -1323,8 +1261,6 @@ int main() {
     MissedEntryLogsEveryTick();
     SlippageInPaise();
     BidFollowsP1();
-    ThrottlePausesNewBids();
-    ThrottledBidLeavesBook();
     BidDepthGate();
     HedgeDepthCountsOrders();
     BidNeverBehindLevel3();

@@ -120,7 +120,7 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _hedgeDepthPercent = params.value("ThresholdQty", 100);
         _allowedSlippage   = params.value("AllowedSlippage", 0);
         _allowedBidDepth   = std::min<size_t>(params.value("AllowedBidDepth", 0U), aef::infra::quote::QUOTE_LEVELS);
-        _minChangeTick     = params.value("TickSize", 2);
+        _minChangeTick     = std::max(params.value("TickSize", 2), 2);
 
         WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
@@ -216,13 +216,6 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         order.handle_confirmation(response_);
     }
     LogResponse(pack, leg, order, response_, false);
-    if (response_.hdr_.error_code == THROTTLE_LIMIT) {
-        const uint64_t now = aef::infra::get_time_in_nanos();
-        if (now >= _throttleUntilNs) {
-            WriteLog("[THROTTLE] message limit hit: no bid placed or moved for {} ms\n", ThrottlePauseNs / 1'000'000);
-        }
-        _throttleUntilNs = now + ThrottlePauseNs;
-    }
     if (code == OMS_TRADE) {
         OnTrade(pack, leg, response_);
     }
@@ -267,9 +260,6 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const int           price = finalPrice + passivePrice;
     const OrderObjectT& order = *pack_._orders[BiddingLeg];
     if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - order.get_open_price()) < _minChangeTick * _tickSize) {
-        return;
-    }
-    if (aef::infra::get_time_in_nanos() < _throttleUntilNs) {
         return;
     }
     UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");

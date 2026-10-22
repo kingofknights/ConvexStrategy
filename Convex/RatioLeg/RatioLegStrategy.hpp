@@ -89,10 +89,6 @@ class RatioLegStrategy {
   private:
     static constexpr size_t   BiddingLeg     = 0;
     static constexpr uint64_t SpreadResendNs = 60'000'000'000;
-    static constexpr uint64_t ThrottlePauseNs = 1'000'000'000;
-
-    // Set by a THROTTLE_LIMIT reject: no bid is placed or moved until then. Shared, the message limit is per OMS session.
-    static inline uint64_t _throttleUntilNs = 0;
 
     void EvaluateBidding(Pack& pack_);
     void EvaluateHedgeMode(Pack& pack_);
@@ -134,7 +130,7 @@ class RatioLegStrategy {
     int _strikeGap     = 0;
     int _lotSize       = 0;
     int _tickSize      = 0;
-    int _minChangeTick = 2;  // GUI TickSize: a resting bid is repriced only when the new price is this many ticks away
+    int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away
     int _eventCount = 0;
 
     LegArrayT<Quote> _quote{};
