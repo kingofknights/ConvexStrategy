@@ -47,11 +47,6 @@ class RatioLegStrategy {
         ORDER_SIDE _packSide     = BUY_SIDE;
     };
 
-    struct Band {
-        PriceT _high = 0;  // 0: no band known yet
-        PriceT _low  = 0;
-    };
-
   public:
     RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
     ~RatioLegStrategy();
@@ -117,8 +112,6 @@ class RatioLegStrategy {
     [[nodiscard]] static auto OrderCount(const Quote& quote_, ORDER_SIDE side_) -> int;
     [[nodiscard]] static auto DescribeDepth(const Quote& quote_, ORDER_SIDE side_, int minOrders_, size_t depth_, double minQuantity_) -> std::string;
 
-    auto CreateBand(ProductDetails& product_) noexcept -> Band;
-
     MinixStrategy* const _hub;
     client_uid           _clientUid{};
 
@@ -143,7 +136,6 @@ class RatioLegStrategy {
     LegArrayT<bool>  _isOption{};
 
     LegArrayT<aef::infra::product::product_data> _product_data;
-    Band                                         _band{};
 
     Pack _longPack;
     Pack _shortPack;

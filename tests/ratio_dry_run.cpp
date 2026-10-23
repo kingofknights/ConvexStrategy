@@ -457,6 +457,24 @@ void BidCrossesWhenMarketBeatsTarget() {
     std::printf("  spare edge: SELL bid at 530 under the 545 bid, filled at once\n");
 }
 
+// The bid never rests deeper than AllowedBidDepth levels on its own side: not placed, pulled once the book moves away.
+void BidNotDeeperThanAllowedDepth() {
+    constexpr int  ID                   = 92;
+    nlohmann::json config               = RatioConfig(ID, "Applied");
+    config["Params"]["AllowedBidDepth"] = 2;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 505, 515);  // P1 530, asks 515/520: level 2 is 520, 530 is deeper, nothing sent
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && NthPlacePrice(ID, LEG0, 1) == 0);
+    exchange::Tick(LEG0, 515, 525);  // asks 525/530: 530 is level 2, SELL rests at 530
+    CHECK(LivePrice(ID, LEG0) == 530);
+    exchange::Tick(LEG0, 500, 510);  // asks 510/515: 530 is deeper again, pulled
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  bid depth: AllowedBidDepth 2, SELL 530 sent only while 530 is within the best 2 asks, pulled after\n");
+}
+
 // Full life: subscribe, apply, bid rests at the target price while the market misses, fills once the bid reaches it, done.
 void FullCycle() {
     constexpr int ID = 10;
@@ -1035,6 +1053,7 @@ int main() {
     std::printf("ratio dry run\n");
     BidHoldsOnlyWhenPassive();
     BidCrossesWhenMarketBeatsTarget();
+    BidNotDeeperThanAllowedDepth();
     FullCycle();
     StopRacesPendingBid();
     StopKeepsHedging();

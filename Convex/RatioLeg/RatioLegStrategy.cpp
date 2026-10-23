@@ -78,7 +78,6 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     _tickSize           = _product_data[0].tick_size_;
     _spread._strategyId = _strategyId;
     _spread._gap        = static_cast<float>(_strikeGap / 100);
-    _band               = CreateBand(_product_data[BiddingLeg]);
 
     ParamUpdate(json_);
 
@@ -221,33 +220,6 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 }
 
 // ═══ Decision: everything is worked out again on every event ═════════════════
-auto RatioLegStrategy::CreateBand(ProductDetails& product_) noexcept -> Band {
-    const double percentage     = 0.40;
-    const double minDiffInPrice = 2000.0;  // 20 Rs
-
-    const Ladder lastTrade{
-        ._price    = product_.ltp_,
-        ._quantity = product_.ltq_,
-    };
-
-    const PriceT low  = std::max(product_.low_dpr_, product_.lowExecBand_);
-    const PriceT high = std::min(product_.high_dpr_, product_.highExecBand_);
-
-    if (lastTrade._quantity > 0 and product_.volume_traded_today_ > 0) {
-        const double variation = std::max(percentage * lastTrade._price, minDiffInPrice);
-        const double lowerBand = std::max(lastTrade._price - variation, static_cast<double>(product_.tick_size_));
-        const double uppedBand = lastTrade._price + variation;
-
-        return {
-            ._high = std::min(high, RoundOFF(static_cast<PriceT>(uppedBand), product_.tick_size_)),
-            ._low  = std::max(low, RoundOFF(static_cast<PriceT>(lowerBand), product_.tick_size_)),
-        };
-    }
-    return {
-        ._high = high,
-        ._low  = low,
-    };
-}
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     if (not IsActive()) {
@@ -292,9 +264,14 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         return;
     }
     const int price = finalPrice;
-    if (_band._high > 0 and not Between(price, _band._low, _band._high)) {
-        Pull(pack_, BiddingLeg, "Price is not Between otr band");
-        return;
+    // Never rest deeper than AllowedBidDepth levels on our own side; improving or crossing the touch is fine.
+    // AllowedBidDepth 0, or that level empty in a thin book: no limit.
+    if (_allowedBidDepth > 0) {
+        const int deepest = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], _allowedBidDepth - 1);
+        if (deepest > 0 && (pack_._sides[BiddingLeg] == BUY_SIDE ? price < deepest : price > deepest)) {
+            Pull(pack_, BiddingLeg, "deeper than AllowedBidDepth levels");
+            return;
+        }
     }
     // A resting bid within _minChangeTick ticks stays only when it is more passive than the new price; one that overpays always moves.
     const OrderObjectT& order   = *pack_._orders[BiddingLeg];
@@ -447,7 +424,6 @@ auto RatioLegStrategy::SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySp
             m2m += static_cast<double>(net) * (mark - (net > 0 ? avgBuy : avgSell));
         }
         cost += _ratios[leg] * ((bid * buyRate) + (ask * sellRate));
-        _hub->getProductDetails(_tokens[leg], _product_data[leg]);
     }
     _spread._rlp      = static_cast<float>(rlp) / 100.0F;
     _spread._cutPL    = _spread._rlp;
@@ -470,7 +446,6 @@ auto RatioLegStrategy::SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySp
     _spread._reserved = static_cast<float>(std::exchange(_eventCount, 0));
     _lastSent         = _spread;
     _lastSentNs       = nowNs_;
-    _band             = CreateBand(_product_data[BiddingLeg]);
     return _spread;
 }
 
