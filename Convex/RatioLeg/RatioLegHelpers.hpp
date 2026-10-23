@@ -36,4 +36,8 @@ namespace ratioleg {
 
     inline auto OrderAction(const OrderObjectT& order_) noexcept -> std::string_view { return order_.get_current_state() == IDLE ? "PLACE" : "MODIFY"; }
 
-}
+    template <typename T>
+    [[nodiscard]] auto Between(T value_, T first_, T second_) noexcept -> bool {
+        return ((value_ - first_) | (second_ - value_)) >= 0;
+    }
+}  // namespace ratioleg

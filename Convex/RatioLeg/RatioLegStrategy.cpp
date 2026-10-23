@@ -40,7 +40,6 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
 
     const auto& legs = json_.at("Legs");
 
-    LegArrayT<ProductDetails> details{};
     for (size_t leg = 0; leg < _legCount and leg < legs.size(); ++leg) {
         _tokens[leg]            = legs[leg].value("Token", 0);
         ORDER_SIDE side         = legs[leg].value("Side", "BUY") == "BUY" ? BUY_SIDE : SELL_SIDE;
@@ -51,11 +50,11 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
         _shortPack._sides[leg]        = oppositeSide;
         _shortPack._oppositeSide[leg] = side;
 
-        if (!_hub->getProductDetails(_tokens[leg], details[leg]) || details[leg].lot_size_ <= 0 || details[leg].tick_size_ <= 0) {
+        if (!_hub->getProductDetails(_tokens[leg], _product_data[leg])) {
             WriteLog("[INIT] leg {} token {}: product details unavailable, strategy not created\n", leg, _tokens[leg]);
             throw std::runtime_error(fmt::format("strategy {}: leg {} token {} has no product details", _strategyId, leg, _tokens[leg]));
         }
-        _isOption[leg] = details[leg].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
+        _isOption[leg] = _product_data[leg].opt_type_ != aef::infra::product::OPTION_TYPE::FUTXX;
     }
 
     if (json_.contains("Ratio") && json_["Ratio"].contains("LegRatios")) {
@@ -70,15 +69,16 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
 
     for (size_t leg = 0; leg < _legCount; ++leg) {
         WriteLog("[{}LegRatios] {}Leg Token: {} Symbol: {} strike = {}, lot = {} ticksize = {} ratio = {} longSide = {}\n",
-                 _legCount, leg, _tokens[leg], details[leg].symbol, int(details[leg].strike_price_), int(details[leg].lot_size_), int(details[leg].tick_size_), _ratios[leg], SideName(_longPack._sides[leg]));
+                 _legCount, leg, _tokens[leg], _product_data[leg].symbol, int(_product_data[leg].strike_price_), int(_product_data[leg].lot_size_), int(_product_data[leg].tick_size_), _ratios[leg], SideName(_longPack._sides[leg]));
     }
 
-    std::strncpy(_tradeTracer._symbol, details[BiddingLeg].symbol, sizeof(_tradeTracer._symbol) - 1);
-    _strikeGap          = std::abs(details[0].strike_price_ - details[1].strike_price_);
-    _lotSize            = details[0].lot_size_;
-    _tickSize           = details[0].tick_size_;
+    std::strncpy(_tradeTracer._symbol, _product_data[BiddingLeg].symbol, sizeof(_tradeTracer._symbol) - 1);
+    _strikeGap          = std::abs(_product_data[0].strike_price_ - _product_data[1].strike_price_);
+    _lotSize            = _product_data[0].lot_size_;
+    _tickSize           = _product_data[0].tick_size_;
     _spread._strategyId = _strategyId;
     _spread._gap        = static_cast<float>(_strikeGap / 100);
+    _band               = CreateBand(_product_data[BiddingLeg]);
 
     ParamUpdate(json_);
 
@@ -221,6 +221,33 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 }
 
 // ═══ Decision: everything is worked out again on every event ═════════════════
+auto RatioLegStrategy::CreateBand(ProductDetails& product_) noexcept -> Band {
+    const double percentage     = 0.40;
+    const double minDiffInPrice = 2000.0;  // 20 Rs
+
+    const Ladder lastTrade{
+        ._price    = product_.ltp_,
+        ._quantity = product_.ltq_,
+    };
+
+    const PriceT low  = std::max(product_.low_dpr_, product_.lowExecBand_);
+    const PriceT high = std::min(product_.high_dpr_, product_.highExecBand_);
+
+    if (lastTrade._quantity > 0 and product_.volume_traded_today_ > 0) {
+        const double variation = std::max(percentage * lastTrade._price, minDiffInPrice);
+        const double lowerBand = std::max(lastTrade._price - variation, static_cast<double>(product_.tick_size_));
+        const double uppedBand = lastTrade._price + variation;
+
+        return {
+            ._high = std::min(high, RoundOFF(static_cast<PriceT>(uppedBand), product_.tick_size_)),
+            ._low  = std::max(low, RoundOFF(static_cast<PriceT>(lowerBand), product_.tick_size_)),
+        };
+    }
+    return {
+        ._high = high,
+        ._low  = low,
+    };
+}
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     if (not IsActive()) {
@@ -228,17 +255,25 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         return;
     }
     LegArrayT<int>             prices{};
-    const std::optional<float> market = MarketSpread(pack_, &prices);
-    if (!market) {
+    LegArrayT<int>             deeper{};
+    const std::optional<float> market = MarketSpread(pack_, &prices, 0);
+    if (!market or !MarketSpread(pack_, &deeper, 1)) {
         Pull(pack_, BiddingLeg, "no price on a leg");
         return;
     }
 
-    // P1 = p0 - (market - target) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
-    const double p1           = prices[BiddingLeg] - ((*market - pack_._targetSpread) / pack_._signedRatio[BiddingLeg]);
-    const double ticks        = p1 / _tickSize;
-    const int    finalPrice   = static_cast<int>(pack_._sides[BiddingLeg] == BUY_SIDE ? std::floor(ticks) : std::ceil(ticks)) * _tickSize;
-    const int    passivePrice = pack_._sides[BiddingLeg] == BUY_SIDE ? -_tickSize * PassiveTickCount : _tickSize * PassiveTickCount;
+    // Cushion: what the hedge legs lose one level deeper. The bidding leg's own depth is ours to set, so it is left out.
+    double cushion = 0.0;
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BiddingLeg) {
+            cushion += static_cast<double>(prices[leg] - deeper[leg]) * pack_._signedRatio[leg];
+        }
+    }
+
+    // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
+    const double p1         = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]);
+    const double ticks      = p1 / _tickSize;
+    const int    finalPrice = static_cast<int>(pack_._sides[BiddingLeg] == BUY_SIDE ? std::floor(ticks) : std::ceil(ticks)) * _tickSize;
     if (finalPrice <= 0) {
         Pull(pack_, BiddingLeg, "target needs a price <= 0");
         return;
@@ -256,9 +291,16 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "nothing left to bid");
         return;
     }
-    const int           price = finalPrice + passivePrice;
-    const OrderObjectT& order = *pack_._orders[BiddingLeg];
-    if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - order.get_open_price()) < _minChangeTick * _tickSize) {
+    const int price = finalPrice;
+    if (_band._high > 0 and not Between(price, _band._low, _band._high)) {
+        Pull(pack_, BiddingLeg, "Price is not Between otr band");
+        return;
+    }
+    // A resting bid within _minChangeTick ticks stays only when it is more passive than the new price; one that overpays always moves.
+    const OrderObjectT& order   = *pack_._orders[BiddingLeg];
+    const int           open    = order.get_open_price();
+    const bool          passive = pack_._sides[BiddingLeg] == BUY_SIDE ? open <= price : open >= price;
+    if (order.is_order_confirmed() && order.get_open_qty() == quantity && passive && std::abs(price - open) < _minChangeTick * _tickSize) {
         return;
     }
     UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");
@@ -405,14 +447,15 @@ auto RatioLegStrategy::SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySp
             m2m += static_cast<double>(net) * (mark - (net > 0 ? avgBuy : avgSell));
         }
         cost += _ratios[leg] * ((bid * buyRate) + (ask * sellRate));
+        _hub->getProductDetails(_tokens[leg], _product_data[leg]);
     }
     _spread._rlp      = static_cast<float>(rlp) / 100.0F;
     _spread._cutPL    = _spread._rlp;
     _spread._m2m      = static_cast<float>(m2m) / 100.0F;
     _spread._netPL    = _spread._rlp + _spread._m2m;
     _spread._cost     = static_cast<float>(cost) / 100.0F;
-    _spread._bcmp     = MarketSpread(_longPack).value_or(0.0F) / 100.0F;
-    _spread._scmp     = MarketSpread(_shortPack).value_or(0.0F) / 100.0F;
+    _spread._bcmp     = MarketSpread(_longPack, nullptr, 0).value_or(0.0F) / 100.0F;
+    _spread._scmp     = MarketSpread(_shortPack, nullptr, 0).value_or(0.0F) / 100.0F;
     _spread._bTrQ     = (_longPack._tradedPack);
     _spread._sTrQ     = (_shortPack._tradedPack);
     _spread._bATP     = static_cast<float>(_longPack._tradedSpread) / 100.0F;
@@ -427,15 +470,16 @@ auto RatioLegStrategy::SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySp
     _spread._reserved = static_cast<float>(std::exchange(_eventCount, 0));
     _lastSent         = _spread;
     _lastSentNs       = nowNs_;
+    _band             = CreateBand(_product_data[BiddingLeg]);
     return _spread;
 }
 
 // ═══ Pack math ═══════════════════════════════════════════════════════════════
 
-auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_) const -> std::optional<float> {
+auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_, size_t index_) const -> std::optional<float> {
     long long raw = 0;
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        const int price = Price(_quote[leg], pack_._oppositeSide[leg], 0);
+        const int price = Price(_quote[leg], pack_._oppositeSide[leg], index_);
         if (price <= 0) {
             return std::nullopt;
         }
