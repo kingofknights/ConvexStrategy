@@ -229,12 +229,12 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     LegArrayT<int>             prices{};
     LegArrayT<int>             deeper{};
     const std::optional<float> market = MarketSpread(pack_, &prices, 0);
-    if (!market or !MarketSpread(pack_, &deeper, 1)) {
+    if (!market or !MarketSpread(pack_, &deeper, 2)) {
         Pull(pack_, BiddingLeg, "no price on a leg");
         return;
     }
 
-    // Cushion: what the hedge legs lose one level deeper. The bidding leg's own depth is ours to set, so it is left out.
+    // Cushion: what the hedge legs lose two levels deeper, the level they are hedged at. The bidding leg's own depth is ours to set, so it is left out.
     double cushion = 0.0;
     for (size_t leg = 0; leg < _legCount; ++leg) {
         if (leg != BiddingLeg) {
