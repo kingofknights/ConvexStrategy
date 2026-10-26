@@ -740,6 +740,68 @@ void DeleteWaitsUntilWhole() {
     std::printf("  delete: bid in flight filled and hedged, erased once idle, INACTIVE echoed\n");
 }
 
+// A synthetic-trade tick: the feed saw a trade on side_ of token_ before the exchange told us. Requests stay unanswered.
+void SyntheticTick(int token_, int bid_, int ask_, ORDER_SIDE side_) {
+    Quote quote                           = exchange::BookQuote(token_, bid_, ask_);
+    quote.message.updatetype_.update_type = 'S';
+    quote.message.updatetype_.update_side = side_;
+    exchange::Publish(quote, false);
+}
+
+// Leg 1 and 2 at 770/780 and 315/325, then leg 0 at 505/515: the SELL bid rests at 535.
+void RestBidAt535(int strategyId_) {
+    SendConfig(RatioConfig(strategyId_, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 505, 515);
+    CHECK(LivePrice(strategyId_, LEG0) == 535);
+}
+
+// An 'S' tick on the ask side leaves our SELL 535 better than the 540 ask: hedged before the fill arrives, the fill completes the pack.
+void EarlyHedgeThenFill() {
+    constexpr int ID = 60;
+    RestBidAt535(ID);
+    SyntheticTick(LEG0, 505, 540, SELL_SIDE);
+    CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 1 && PlacesOf(ID, LEG2, BUY_SIDE) == 1 && Position(ID, LEG0) == 0);
+    exchange::FillPassive(ID, LEG0, 3 * LOT);  // the real fill, then the early hedges cross
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 1 && PlacesOf(ID, LEG2, BUY_SIDE) == 1 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);
+    SyntheticTick(LEG0, 505, 540, SELL_SIDE);  // a repeat 'S': only the pack 2 bid goes out, still unconfirmed, so no hedge
+    CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 1 && PlacesOf(ID, LEG0, SELL_SIDE) == 2);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  'S' early hedge: SELL 535 beats the 540 ask, hedges sent before the fill, pack whole once it arrives\n");
+}
+
+// The 'S' guess was wrong: the hedges fill, leg 0 did not, so leg 0 is chased by a modify of the same order.
+void EarlyHedgeChasesLeg0() {
+    constexpr int ID = 61;
+    RestBidAt535(ID);
+    SyntheticTick(LEG0, 505, 540, SELL_SIDE);
+    exchange::Pump();  // hedges fill; leg 0 modified to the bid's index 2 (495), trades at the 505 bid
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1 && exchange::LiveOrdersOf(ID) == 0);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  'S' guessed wrong: hedges filled, leg 0 chased by a modify to 495, filled at 505\n");
+}
+
+// A wrong 'S' guess with hedges that do not fill: leg 0 is not repriced or pulled while they work; STOP cancels it, then the early hedges are pulled.
+void EarlyHedgePulledWithoutFill() {
+    constexpr int ID = 62;
+    RestBidAt535(ID);
+    SyntheticTick(LEG0, 505, 540, SELL_SIDE);
+    exchange::books[LEG1].ask = 900;  // hedge asks run away before the hedges arrive
+    exchange::books[LEG2].ask = 900;
+    exchange::Pump();
+    CHECK(exchange::LiveOrdersOf(ID) == 3 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    exchange::Tick(LEG0, 400, 410);  // P1 far below: leg 0 would be repriced or pulled, but is left alone
+    CHECK(LivePrice(ID, LEG0) == 535 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 0 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);
+    SendConfig(RatioConfig(ID, "Stop"));  // leg 0 cancelled
+    exchange::Tick(LEG1, 770, 900);       // leg 0 gone unfilled: early hedges pulled
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    TickAllLegs();
+    std::printf("  'S' guessed wrong, hedges unfilled: leg 0 held at 535, STOP cancels it, early hedges pulled, flat\n");
+}
+
 // SoQ 0 used to size the hedge at 0 lots, so it was never sent.
 void HedgeIgnoresZeroSlice() {
     constexpr int  ID                 = 31;
@@ -1067,6 +1129,9 @@ int main() {
     StrikeGapBackSolve();
     UnhandledRejectRetries();
     DeleteWaitsUntilWhole();
+    EarlyHedgeThenFill();
+    EarlyHedgeChasesLeg0();
+    EarlyHedgePulledWithoutFill();
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
     QuietTicks();

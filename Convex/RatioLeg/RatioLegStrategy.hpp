@@ -45,6 +45,7 @@ class RatioLegStrategy {
         int        _tradedPack   = 0;
         bool       _hedgeMode    = false;
         ORDER_SIDE _packSide     = BUY_SIDE;
+        uint32_t   _earlyHedgeUid = 0;  // leg 0 uid an 'S' tick hedged early; leg 0 is left alone while that order lives
     };
 
   public:
@@ -90,6 +91,8 @@ class RatioLegStrategy {
 
     void EvaluateBidding(Pack& pack_);
     void EvaluateHedgeMode(Pack& pack_);
+    void TryEarlyHedge(Pack& pack_, int updateSide_);
+    void HedgeEarly(Pack& pack_);
 
     void OnTrade(Pack& pack_, size_t leg_, const oms_transaction& response_);
     void ReportPacks(Pack& pack_, const oms_transaction& response_);

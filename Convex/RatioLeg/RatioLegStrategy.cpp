@@ -162,6 +162,7 @@ void RatioLegStrategy::Forget(std::string_view reason_) {
         pack->_tradedSpread = 0.0;
         pack->_tradedPack   = 0;
         pack->_hedgeMode    = false;
+        pack->_earlyHedgeUid = 0;
     }
     Stop(reason_);
 }
@@ -186,6 +187,10 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     }
     _quote[leg] = quote_;
     _eventCount += 1;
+    if (leg == BiddingLeg && quote_.message.updatetype_.update_type == 'S') {
+        TryEarlyHedge(_longPack, quote_.message.updatetype_.update_side);
+        TryEarlyHedge(_shortPack, quote_.message.updatetype_.update_side);
+    }
     if (_longPack._hedgeMode) {
         EvaluateHedgeMode(_longPack);
     } else {
@@ -222,6 +227,18 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 // ═══ Decision: everything is worked out again on every event ═════════════════
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
+    // Leg 0 hedged early on an 'S' tick: it may be filled already, so no reprice or cancel. The early hedges follow the book until a fill decides.
+    const OrderObjectT& bid = *pack_._orders[BiddingLeg];
+    if (bid.get_uid() == pack_._earlyHedgeUid && bid.get_current_state() != IDLE) {
+        HedgeEarly(pack_);
+        return;
+    }
+    // Every leg is level here, so a hedge still working is an early hedge whose leg 0 went away unfilled.
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BiddingLeg) {
+            Pull(pack_, leg, "early hedge without a leg 0 fill");
+        }
+    }
     if (not IsActive()) {
         Pull(pack_, BiddingLeg, "Strategy is not active");
         return;
@@ -302,6 +319,37 @@ void RatioLegStrategy::EvaluateHedgeMode(Pack& pack_) {
         if (missingLots > 0) {
             const int price = Price(_quote[leg], pack_._oppositeSide[leg], 2);
             UpdateOrder(pack_, leg, price, missingLots * _lotSize, "HEDGE");
+        }
+    }
+}
+
+// A synthetic trade on leg 0's own side that leaves our bid better than that side's top has probably filled it:
+// hedge the whole open bid now instead of waiting for the fill. Once per leg 0 uid.
+void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
+    const OrderObjectT& order = *pack_._orders[BiddingLeg];
+    const ORDER_SIDE    side  = pack_._sides[BiddingLeg];
+    if (not IsActive() || pack_._hedgeMode || updateSide_ != side || !order.is_order_confirmed() || order.is_response_pending() || order.get_uid() == pack_._earlyHedgeUid) {
+        return;
+    }
+    const int top  = Price(_quote[BiddingLeg], side, 0);
+    const int open = order.get_open_price();
+    if (top > 0 && (side == BUY_SIDE ? open <= top : open >= top)) {
+        return;
+    }
+    pack_._earlyHedgeUid = order.get_uid();
+    WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}: hedging now\n",
+             PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
+    HedgeEarly(pack_);
+}
+
+// Hedges for leg 0's traded plus open lots, at the opposite side's index 2 like any hedge.
+// Leg 0 itself is not chased here: EvaluateHedgeMode does that once a hedge fill puts the hedge legs ahead.
+void RatioLegStrategy::HedgeEarly(Pack& pack_) {
+    const int packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        const int missingLots = (packs * _ratios[leg]) - pack_._tradedLots[leg];
+        if (leg != BiddingLeg && missingLots > 0) {
+            UpdateOrder(pack_, leg, Price(_quote[leg], pack_._oppositeSide[leg], 2), missingLots * _lotSize, "EARLY-HEDGE");
         }
     }
 }

@@ -1,6 +1,6 @@
 # Convex Flow — Design and Plan
 
-> **Status 2026-10-19:** `RatioLegStrategy` was rewritten as one file (`Convex/RatioLeg/RatioLegStrategy.cpp`) that recomputes everything on every event. Since this document was written: the `'S'` synthetic-trade early hedge was removed, the GUI spread dirty-flag cache was removed (values are recomputed on every `doWork` pass), and every reverse-cut fill now sends a Trade Tracer row (`HedgeFailed`, `ChaseFailed` or `PartialFill`). Sections below that describe those parts are out of date.
+> **Status 2026-10-19:** `RatioLegStrategy` was rewritten as one file (`Convex/RatioLeg/RatioLegStrategy.cpp`) that recomputes everything on every event. Since this document was written: the `'S'` synthetic-trade early hedge was removed (restored 2026-10-26 in `TryEarlyHedge` / `HedgeEarly`: leg 0 is chased at the opposite side's index 2 by `EvaluateHedgeMode`, and an early hedge left working after leg 0 goes away unfilled is pulled), the GUI spread dirty-flag cache was removed (values are recomputed on every `doWork` pass), and every reverse-cut fill now sends a Trade Tracer row (`HedgeFailed`, `ChaseFailed` or `PartialFill`). Sections below that describe those parts are out of date.
 
 Branch `convex-flow`, cut from `manaul_order` (d18ad1d). Source spec: `Flow.md`.
 This document is the agreed understanding of `Flow.md`, mapped onto `RatioLegStrategy`.
