@@ -590,6 +590,26 @@ void HedgeTakesLevel3() {
     std::printf("  hedge takes level 3: leg2 placed @345, bought @335 in one order, no modifies\n");
 }
 
+// Hedges go out highest price first: leg2 (ask 780) is placed before leg1 (ask 325), against leg order.
+void HedgesHighestPriceFirst() {
+    constexpr int ID = 16;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 315, 325);
+    exchange::Tick(LEG2, 770, 780);
+    exchange::Tick(LEG0, 700, 710);  // 3 x 700 - 335 - 2 x 790 = 185 beats the 140 target: the SELL crosses and fills
+    size_t leg1At = 0, leg2At = 0;
+    for (size_t index = 0; index < exchange::sent.size(); ++index) {
+        const auto& request = exchange::sent[index];
+        if (request.hdr_.uid_.composite_id_.strategy_id != ID || request.hdr_.transaction_code != OMS_PLACE_REQ) continue;
+        if (request.packet_.product_id_ == LEG1 && leg1At == 0) leg1At = index;
+        if (request.packet_.product_id_ == LEG2 && leg2At == 0) leg2At = index;
+    }
+    CHECK(leg1At > 0 && leg2At > 0 && leg2At < leg1At);
+    CHECK(Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  hedges highest price first: leg2 @790 placed before leg1 @335\n");
+}
+
 // A hedge rests at ask level 3 and is repriced to the new level 3 on every tick until it fills.
 void HedgeRepricedEveryTick() {
     constexpr int  ID              = 48;
@@ -1121,6 +1141,7 @@ int main() {
     StopKeepsHedging();
     RejectsUnknownToken();
     HedgeTakesLevel3();
+    HedgesHighestPriceFirst();
     HedgeRepricedEveryTick();
     ShortPackFromGuiPayload();
     SlippageInPaise();

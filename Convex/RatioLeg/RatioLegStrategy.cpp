@@ -313,14 +313,12 @@ void RatioLegStrategy::EvaluateHedgeMode(Pack& pack_) {
     }
     pack_._hedgeMode = true;
 
-    const int target = std::min(minMax.max, pack_._totalAllowedPacks);
+    const int      target = std::min(minMax.max, pack_._totalAllowedPacks);
+    LegArrayT<int> missingLots{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        const int missingLots = (target * _ratios[leg]) - pack_._tradedLots[leg];
-        if (missingLots > 0) {
-            const int price = Price(_quote[leg], pack_._oppositeSide[leg], 2);
-            UpdateOrder(pack_, leg, price, missingLots * _lotSize, "HEDGE");
-        }
+        missingLots[leg] = (target * _ratios[leg]) - pack_._tradedLots[leg];
     }
+    SendHedges(pack_, missingLots, "HEDGE");
 }
 
 // A synthetic trade on leg 0's own side that leaves our bid better than that side's top has probably filled it:
@@ -346,10 +344,26 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
 // Leg 0 itself is not chased here: EvaluateHedgeMode does that once a hedge fill puts the hedge legs ahead.
 void RatioLegStrategy::HedgeEarly(Pack& pack_) {
     const int packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
+    LegArrayT<int> missingLots{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        const int missingLots = (packs * _ratios[leg]) - pack_._tradedLots[leg];
-        if (leg != BiddingLeg && missingLots > 0) {
-            UpdateOrder(pack_, leg, Price(_quote[leg], pack_._oppositeSide[leg], 2), missingLots * _lotSize, "EARLY-HEDGE");
+        missingLots[leg] = leg == BiddingLeg ? 0 : (packs * _ratios[leg]) - pack_._tradedLots[leg];
+    }
+    SendHedges(pack_, missingLots, "EARLY-HEDGE");
+}
+
+// Sends every leg with missing lots at the opposite side's index 2, highest price first.
+void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots_, std::string_view reason_) {
+    LegArrayT<int>    prices{};
+    LegArrayT<size_t> order{};
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        prices[leg] = Price(_quote[leg], pack_._oppositeSide[leg], 2);
+        order[leg]  = leg;
+    }
+    const std::span legs = std::span{order}.first(_legCount);
+    std::ranges::stable_sort(legs, std::ranges::greater{}, [&](size_t leg_) { return prices[leg_]; });
+    for (const size_t leg : legs) {
+        if (missingLots_[leg] > 0) {
+            UpdateOrder(pack_, leg, prices[leg], missingLots_[leg] * _lotSize, reason_);
         }
     }
 }
