@@ -282,12 +282,17 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     }
 
     // Cushion: what the hedge legs lose two levels deeper, the level they are hedged at. The bidding leg's own depth is ours to set, so it is left out.
-    double cushion = 0.0;
-    for (size_t leg = 0; leg < _legCount; ++leg) {
-        if (leg != BiddingLeg) {
-            cushion += static_cast<double>(prices[leg] - deeper[leg]) * pack_._signedRatio[leg];
+    // Refreshed at most once a second, so level-2 noise alone does not move the bid.
+    if (const uint64_t now = aef::infra::get_time_in_nanos(); now - pack_._cushionNs >= CushionRefreshNs) {
+        pack_._cushion   = 0.0;
+        pack_._cushionNs = now;
+        for (size_t leg = 0; leg < _legCount; ++leg) {
+            if (leg != BiddingLeg) {
+                pack_._cushion += static_cast<double>(prices[leg] - deeper[leg]) * pack_._signedRatio[leg];
+            }
         }
     }
+    const double cushion = pack_._cushion;
 
     // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
     const double p1         = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]);
@@ -320,11 +325,10 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
             return;
         }
     }
-    // A resting bid within _minChangeTick ticks stays only when it is more passive than the new price; one that overpays always moves.
-    const OrderObjectT& order   = *pack_._orders[BiddingLeg];
-    const int           open    = order.get_open_price();
-    const bool          passive = pack_._sides[BiddingLeg] == BUY_SIDE ? open <= price : open >= price;
-    if (order.is_order_confirmed() && order.get_open_qty() == quantity && passive && std::abs(price - open) < _minChangeTick * _tickSize) {
+    // A resting bid within _minChangeTick ticks of the new price stays, either way, while a fill at its price still makes the target.
+    const OrderObjectT& order = *pack_._orders[BiddingLeg];
+    const int           open  = order.get_open_price();
+    if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - open) < _minChangeTick * _tickSize && SpreadPresent(pack_, open)) {
         return;
     }
     UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");

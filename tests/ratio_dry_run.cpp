@@ -406,9 +406,9 @@ auto RequestsOf(int strategy_, int token_, int code_) -> int {
 
 // ═══ Scenarios ═══════════════════════════════════════════════════════════════
 
-// A resting bid that overpays moves on any tick; one that is more passive than the new price moves only 2 ticks or more
+// A resting bid moves only when the new price is 2 ticks away, either way, or when a fill at its price would miss the target
 // (20261022 log: one-tick flicker sent 4M modifies; 20261023 log: a bid left overpaying filled with slippage).
-void BidHoldsOnlyWhenPassive() {
+void BidHoldsWithinBand() {
     constexpr int  ID           = 90;
     nlohmann::json config       = RatioConfig(ID, "Applied");
     config["Params"]["TickSize"] = 1;  // clamped to the minimum of 2
@@ -417,33 +417,24 @@ void BidHoldsOnlyWhenPassive() {
     int price = LivePrice(ID, LEG0);
     CHECK(price > 0);
     int modifies = 0;
-    int oneTicks = 0;
-    // Hedge leg ask rises: the SELL bid must rise with it, every tick it can.
-    for (int step = 1; step <= 12; ++step) {
-        exchange::Tick(LEG1, 770 + step * exchange::TICK, 780 + step * exchange::TICK);
+    int held     = 0;
+    // Hedge leg ask rises, then falls back: the SELL bid follows in steps of 2 ticks or more.
+    for (int step = -12; step <= 12; ++step) {
+        const int ask = 780 + (12 - std::abs(step)) * exchange::TICK;
+        exchange::Tick(LEG1, ask - 10, ask);
         const int now = LivePrice(ID, LEG0);
-        CHECK(now >= price);
-        if (now != price) {
-            oneTicks += now - price == exchange::TICK;
-            ++modifies;
-            price = now;
+        if (now == price) {
+            ++held;
+            CHECK(3 * price - ask - 2 * 325 >= 140);  // held only while a fill still makes the target
+            continue;
         }
+        CHECK(std::abs(now - price) >= 2 * exchange::TICK || 3 * price - ask - 2 * 325 < 140);
+        ++modifies;
+        price = now;
     }
-    CHECK(oneTicks > 0);
-    // Hedge leg ask falls back: the SELL bid is now more passive than needed, so it waits for 2 ticks.
-    for (int step = 11; step >= 0; --step) {
-        exchange::Tick(LEG1, 770 + step * exchange::TICK, 780 + step * exchange::TICK);
-        const int now = LivePrice(ID, LEG0);
-        CHECK(now <= price);
-        if (now != price) {
-            CHECK(price - now >= 2 * exchange::TICK);
-            ++modifies;
-            price = now;
-        }
-    }
-    CHECK(modifies > 0 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == modifies);
+    CHECK(modifies > 0 && held > modifies && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == modifies);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  bid move: %d modifies, %d one-tick moves while overpaying, passive moves all >= 2 ticks\n", modifies, oneTicks);
+    std::printf("  bid band: %d modifies over 25 hedge moves, %d held within 2 ticks while the target held\n", modifies, held);
 }
 
 // The market beats the target: the bid moves toward the market by the spare edge and fills at once
@@ -882,6 +873,22 @@ void EarlyHedgeSkippedWhenSpreadGone() {
     std::printf("  'S' with the spread gone: no early hedge, the fill is bought back\n");
 }
 
+// Level 2 of a hedge leg jumps: the cushion stays as it was for a second, so the bid does not move; after a second it does.
+void CushionRefreshedEverySecond() {
+    constexpr int ID = 93;
+    RestBidAt535(ID);
+    exchange::Tick(LEG0, 520, 530);  // asks 530..550: room for 550; P1 still 520 + (170 - 130) / 3 = 533.33 -> 535
+    Quote quote                       = exchange::BookQuote(LEG1, 770, 780);
+    quote.message.ask_levels[2].price = 830;  // leg1 cushion 10 -> 50: P1 520 + (210 - 130) / 3 = 546.67 -> 550
+    exchange::Publish(quote, true);
+    CHECK(LivePrice(ID, LEG0) == 535 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    exchange::Publish(quote, true);
+    CHECK(LivePrice(ID, LEG0) == 550 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  cushion: leg1 level 2 jumps to 830, bid held at 535 for a second, then moved to 550\n");
+}
+
 // SoQ 0 used to size the hedge at 0 lots, so it was never sent.
 void HedgeIgnoresZeroSlice() {
     constexpr int  ID                 = 31;
@@ -1193,7 +1200,7 @@ int main() {
     exchange::hub = &hub;
 
     std::printf("ratio dry run\n");
-    BidHoldsOnlyWhenPassive();
+    BidHoldsWithinBand();
     BidCrossesWhenMarketBeatsTarget();
     BidNotDeeperThanAllowedDepth();
     FullCycle();
@@ -1216,6 +1223,7 @@ int main() {
     ReverseWhenSpreadGone();
     ReversePartialCancelsRest();
     EarlyHedgeSkippedWhenSpreadGone();
+    CushionRefreshedEverySecond();
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
     QuietTicks();

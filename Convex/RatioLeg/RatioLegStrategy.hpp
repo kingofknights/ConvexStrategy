@@ -50,6 +50,9 @@ class RatioLegStrategy {
         OrderObjectPtrT _reverse;           // leg 0 on the opposite side: sends back lots filled after the spread went away
         int32_t         _reverseLots  = 0;  // leg 0 lots still to send back; not in _tradedLots
         uint64_t        _reverseValue = 0;  // what those lots traded at, for the unwind P&L
+
+        double   _cushion   = 0.0;  // hedge legs' level 0 to level 2 loss, refreshed every CushionRefreshNs
+        uint64_t _cushionNs = 0;
     };
 
   public:
@@ -91,7 +94,8 @@ class RatioLegStrategy {
 
   private:
     static constexpr size_t   BiddingLeg     = 0;
-    static constexpr uint64_t SpreadResendNs = 60'000'000'000;
+    static constexpr uint64_t SpreadResendNs   = 60'000'000'000;
+    static constexpr uint64_t CushionRefreshNs = 1'000'000'000;
 
     void EvaluateBidding(Pack& pack_);
     void EvaluateHedgeMode(Pack& pack_);
@@ -138,7 +142,7 @@ class RatioLegStrategy {
     int _strikeGap     = 0;
     int _lotSize       = 0;
     int _tickSize      = 0;
-    int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away
+    int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away, or a fill would miss the target
     int _eventCount    = 0;
 
     LegArrayT<Quote> _quote{};
