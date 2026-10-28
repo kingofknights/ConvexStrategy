@@ -371,6 +371,9 @@ void TickAllLegs() {
     exchange::Tick(LEG2, 315, 325);
 }
 
+// Leg2 thins to 2 asks before the exchange answers: the spread still holds at its top, but there is no index 2 to hedge at.
+void ThinLeg2() { exchange::Tick(LEG2, 315, 325, false, 300, aef::infra::quote::QUOTE_LEVELS, 2); }
+
 auto Position(int strategy_, int token_) -> long { return exchange::position[{strategy_, token_}]; }
 
 // Price of a strategy's working order on a token, 0 when none.
@@ -543,19 +546,19 @@ void StopKeepsHedging() {
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 540, 550, false);  // SELL 540 sent at the 325 leg2 snapshot
-    exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // bid fills: leg1 hedges, leg2 waits with no ask to take
+    ThinLeg2();
+    exchange::Pump();                       // bid fills: leg1 hedges, leg2 waits for a third ask
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
 
     SendConfig(RatioConfig(ID, "Stop"));
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);
-    exchange::Tick(LEG2, 315, 330);  // asks return
+    exchange::Tick(LEG2, 315, 330);  // asks deepen again
     CHECK(Position(ID, LEG2) == 2 * LOT);
-    CHECK(NthPlacePrice(ID, LEG2, 1) == 340);  // level 3 once asks return
+    CHECK(NthPlacePrice(ID, LEG2, 1) == 340);  // level 3 once it is there
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
     CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
-    std::printf("  stop keeps hedging: leg2 hedged after STOP once asks returned, flat\n");
+    std::printf("  stop keeps hedging: leg2 hedged after STOP once a third ask returned, flat\n");
 }
 
 // A leg without product details: no strategy, no subscription, UI told INACTIVE.
@@ -659,8 +662,8 @@ auto SlippedPacks(int strategyId_, int allowedSlippagePaise_) -> long {
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 540, 550, false);  // SELL 540 sent at the 325 leg2 snapshot
-    exchange::Tick(LEG2, 315, 0, false);    // leg2 asks vanish before the exchange answers
-    exchange::Pump();                       // bid fills, leg2 hedge waits for an ask
+    ThinLeg2();
+    exchange::Pump();                       // bid fills, leg2 hedge waits for a third ask
     exchange::Tick(LEG2, 345, 355);         // hedge takes 355: pack done, 10 paise slipped
     CHECK(Position(strategyId_, LEG2) == 2 * LOT);
     exchange::Tick(LEG2, 315, 325);         // SELL 540 crosses the 540 bid again: second pack unless stopped
@@ -822,6 +825,63 @@ void EarlyHedgePulledWithoutFill() {
     std::printf("  'S' guessed wrong, hedges unfilled: leg 0 held at 535, STOP cancels it, early hedges pulled, flat\n");
 }
 
+// Leg 0 fills after leg1's asks jumped to 820: 3 x 535 - 820 - 2 x 325 = 135 misses the 140 target, so no hedge.
+// Leg 0 is bought back at the ask's index 2, a "Reverse" row goes to the Trade Tracer, and bidding goes on.
+void ReverseWhenSpreadGone() {
+    constexpr int ID = 63;
+    RestBidAt535(ID);
+    exchange::Tick(LEG1, 800, 820, false);     // P1 550 is past 5 ask levels: the bid's cancel is still in flight
+    exchange::FillPassive(ID, LEG0, 3 * LOT);  // the SELL 535 fills first; BUY 525 takes the 515 ask
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    CHECK(PlacesOf(ID, LEG0, BUY_SIDE) == 1 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
+    const std::vector<TradeTracer> rows = TracerRows(ID, "Reverse");
+    CHECK(rows.size() == 1 && rows[0]._ltq == 3 && std::abs(rows[0]._ltp - 5.15F) < 0.001F && rows[0]._slippage == 0);
+    CHECK(TracerRows(ID, "").empty());
+    exchange::Tick(LEG1, 770, 780);  // bids again at 535
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && LivePrice(ID, LEG0) == 535);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  spread gone at the fill: no hedge, SELL 535 bought back @515, Reverse row sent, bid again @535\n");
+}
+
+// One lot of 3 fills after the spread went: that lot is bought back, the other 2 are cancelled before the next bid.
+void ReversePartialCancelsRest() {
+    constexpr int ID = 64;
+    RestBidAt535(ID);
+    exchange::Tick(LEG0, 520, 530);         // asks 530..550: room for P1 550
+    exchange::Tick(LEG1, 800, 820, false);  // the bid's modify to 550 is still in flight
+    exchange::books[LEG0].ask = 0;          // no sellers: the buy-back rests
+    exchange::FillPassive(ID, LEG0, LOT);   // 1 lot @535; the modify lands on the other 2
+    CHECK(Position(ID, LEG0) == -LOT && exchange::LiveOrdersOf(ID) == 2 && PlacesOf(ID, LEG0, BUY_SIDE) == 1);
+    exchange::Tick(LEG0, 520, 530);  // the rest of the bid is cancelled, the BUY 540 buy-back takes the 530 ask
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1 && exchange::LiveOrdersOf(ID) == 0);
+    CHECK(TracerRows(ID, "Reverse").size() == 1 && TracerRows(ID, "Reverse")[0]._ltq == 1);
+    exchange::Tick(LEG0, 520, 530);  // reversed: bids again at 550
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  partial fill after the spread went: 1 lot bought back, 2 lots cancelled, bid again\n");
+}
+
+// An 'S' tick while the bid is stuck at 535 (its modify refused) and leg1's asks are at 820: the spread is gone, so no early hedge.
+// The fill then decides: it is reversed.
+void EarlyHedgeSkippedWhenSpreadGone() {
+    constexpr int ID = 65;
+    RestBidAt535(ID);
+    exchange::rejectToken   = LEG0;
+    exchange::rejectChanges = true;
+    exchange::Tick(LEG1, 800, 820);  // modify to 550 refused: SELL 535 stays
+    exchange::rejectChanges = false;
+    exchange::rejectToken   = 0;
+    CHECK(LivePrice(ID, LEG0) == 535);
+    SyntheticTick(LEG0, 505, 540, SELL_SIDE);
+    CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
+    exchange::FillPassive(ID, LEG0, 3 * LOT);  // fills @535, bought back at the 540 ask
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
+    CHECK(TracerRows(ID, "Reverse").size() == 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  'S' with the spread gone: no early hedge, the fill is bought back\n");
+}
+
 // SoQ 0 used to size the hedge at 0 lots, so it was never sent.
 void HedgeIgnoresZeroSlice() {
     constexpr int  ID                 = 31;
@@ -830,8 +890,8 @@ void HedgeIgnoresZeroSlice() {
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 540, 550, false);
-    exchange::Tick(LEG2, 315, 0, false);
-    exchange::Pump();  // leg2 waits for an ask, no order
+    ThinLeg2();
+    exchange::Pump();  // leg2 waits for a third ask, no order
     config["Params"]["LongBuySoQ"] = 0;  // Applied: STOP does not read params. SoQ 0 also means no new bid
     SendConfig(config);
     exchange::Tick(LEG2, 315, 325);
@@ -1051,8 +1111,8 @@ void SquareOffStopsStrategies() {
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 540, 550, false);
-    exchange::Tick(LEG2, 315, 0, false);
-    exchange::Pump();  // leg2 hedge rests with no ask to take
+    ThinLeg2();
+    exchange::Pump();  // leg2 hedge waits for a third ask
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 0);
 
     std::map<int, long> squareOffBefore;  // strategy 0 also holds earlier square-off and manual fills
@@ -1065,7 +1125,7 @@ void SquareOffStopsStrategies() {
     exchange::Pump();  // the strategy's leg2 hedge is cancelled
     Bcast(LEG0, 530, 560);
     Bcast(LEG1, 760, 790);
-    exchange::Tick(LEG2, 315, 325);  // asks return
+    exchange::Tick(LEG2, 315, 325);  // a third ask returns
     TickAllLegs();
     const auto net = [&](int token_) { return Position(ID, token_) + Position(0, token_) - squareOffBefore[token_]; };
     CHECK(net(LEG0) == 0 && net(LEG1) == 0 && net(LEG2) == 0);
@@ -1153,6 +1213,9 @@ int main() {
     EarlyHedgeThenFill();
     EarlyHedgeChasesLeg0();
     EarlyHedgePulledWithoutFill();
+    ReverseWhenSpreadGone();
+    ReversePartialCancelsRest();
+    EarlyHedgeSkippedWhenSpreadGone();
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
     QuietTicks();

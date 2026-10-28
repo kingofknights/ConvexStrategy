@@ -88,6 +88,7 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
         for (size_t leg = 0; leg < _legCount; ++leg) {
             pack->_orders[leg] = std::make_unique<OrderObjectT>(_tokens[leg], pack->_sides[leg], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
         }
+        pack->_reverse = std::make_unique<OrderObjectT>(_tokens[BiddingLeg], Opposite(pack->_sides[BiddingLeg]), _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
     }
 
     for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -163,12 +164,20 @@ void RatioLegStrategy::Forget(std::string_view reason_) {
         pack->_tradedPack   = 0;
         pack->_hedgeMode    = false;
         pack->_earlyHedgeUid = 0;
+        pack->_reverseLots   = 0;
+        pack->_reverseValue  = 0;
+        if (pack->_reverse->is_order_confirmed() && !pack->_reverse->is_response_pending()) {
+            pack->_reverse->cancel_order();
+        }
     }
     Stop(reason_);
 }
 
 auto RatioLegStrategy::IsIdle() const -> bool {
     for (const Pack* pack : {&_longPack, &_shortPack}) {
+        if (pack->_reverseLots != 0 || pack->_reverse->get_current_state() != IDLE) {
+            return false;
+        }
         for (size_t leg = 0; leg < _legCount; ++leg) {
             if (pack->_orders[leg]->get_current_state() != IDLE || pack->_tradedLots[leg] != pack->_tradedPack * _ratios[leg]) {
                 return false;
@@ -190,6 +199,11 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     if (leg == BiddingLeg && quote_.message.updatetype_.update_type == 'S') {
         TryEarlyHedge(_longPack, quote_.message.updatetype_.update_side);
         TryEarlyHedge(_shortPack, quote_.message.updatetype_.update_side);
+    }
+    for (Pack* pack : {&_longPack, &_shortPack}) {
+        if (pack->_reverseLots > 0) {
+            Reverse(*pack);
+        }
     }
     if (_longPack._hedgeMode) {
         EvaluateHedgeMode(_longPack);
@@ -213,6 +227,18 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         return;
     }
 
+    for (Pack* reversing : {&_longPack, &_shortPack}) {
+        OrderObjectT& reverse = *reversing->_reverse;
+        if (leg == BiddingLeg && reverse.get_uid() == uid) {
+            reverse.handle_confirmation(response_);
+            LogResponse(*reversing, leg, reverse, response_, true);
+            if (code == OMS_TRADE) {
+                OnReverseTrade(*reversing, response_);
+            }
+            return;
+        }
+    }
+
     Pack&         pack  = (side == _longPack._sides[leg]) ? _longPack : _shortPack;
     OrderObjectT& order = *pack._orders[leg];
     if (order.get_uid() == uid) {
@@ -227,6 +253,10 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
 // ═══ Decision: everything is worked out again on every event ═════════════════
 
 void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
+    if (pack_._reverseLots > 0) {
+        Pull(pack_, BiddingLeg, "reversing leg 0");
+        return;
+    }
     // Leg 0 hedged early on an 'S' tick: it may be filled already, so no reprice or cancel. The early hedges follow the book until a fill decides.
     const OrderObjectT& bid = *pack_._orders[BiddingLeg];
     if (bid.get_uid() == pack_._earlyHedgeUid && bid.get_current_state() != IDLE) {
@@ -334,6 +364,11 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
     if (top > 0 && (side == BUY_SIDE ? open <= top : open >= top)) {
         return;
     }
+    if (!SpreadPresent(pack_, open)) {
+        WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}, spread gone: no hedge, the fill decides\n",
+                 PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
+        return;
+    }
     pack_._earlyHedgeUid = order.get_uid();
     WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}: hedging now\n",
              PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
@@ -368,11 +403,59 @@ void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots
     }
 }
 
+// Sends leg 0's unwanted lots back at its own side's index 2 (a BUY sells into the bids), repriced every tick until filled.
+void RatioLegStrategy::Reverse(Pack& pack_) {
+    OrderObjectT& order    = *pack_._reverse;
+    const int     price    = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2);
+    const int     oldPrice = order.get_open_price();
+    if (const uint32_t uid = _hub->UpdateOrder(order, price, pack_._reverseLots * _lotSize, _clientUid); uid != 0) {
+        WriteLog("[ORDER-OUT] {} leg={} token={} {} REVERSE uid={} price={}->{} qty={} | lots=[{}] book=[{}]\n",
+                 PackName(pack_), BiddingLeg, _tokens[BiddingLeg], SideName(Opposite(pack_._sides[BiddingLeg])), uid, oldPrice, price, pack_._reverseLots * _lotSize, LotsText(pack_), BookText());
+    }
+}
+
+void RatioLegStrategy::OnReverseTrade(Pack& pack_, const oms_transaction& response_) {
+    const int32_t price = response_.packet_.price_;
+    const int32_t lots  = std::min(response_.packet_.quantity_ / _lotSize, pack_._reverseLots);
+    if (lots <= 0) {
+        WriteLog("[REVERSE] {} fill {}@{} with no lots left to reverse: ignored\n", PackName(pack_), int32_t{response_.packet_.quantity_}, price);
+        return;
+    }
+    const uint64_t entry  = pack_._reverseValue * static_cast<uint64_t>(lots) / static_cast<uint64_t>(pack_._reverseLots);
+    const uint64_t exit   = static_cast<uint64_t>(price) * static_cast<uint64_t>(lots * _lotSize);
+    const bool     bought = pack_._sides[BiddingLeg] == BUY_SIDE;
+    const auto     buy    = static_cast<double>(bought ? entry : exit);
+    const auto     sell   = static_cast<double>(bought ? exit : entry);
+    _unwindPnL += sell - buy - (buy * (_isOption[BiddingLeg] ? OptionBuyCost : FutureBuyCost)) - (sell * (_isOption[BiddingLeg] ? OptionSellCost : FutureSellCost));
+
+    pack_._reverseLots -= lots;
+    pack_._reverseValue -= entry;
+    WriteLog("[REVERSE] {} leg 0 {} lots back @{}, {} lots left to reverse, unwind P&L {}\n", PackName(pack_), lots, price, pack_._reverseLots, _unwindPnL);
+    SendTracer(pack_, response_, pack_._targetSpread / 100.0F, static_cast<float>(price) / 100.0F, lots, 0, "Reverse");
+}
+
 void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& response_) {
     const int32_t  price    = response_.packet_.price_;
     const int32_t  quantity = response_.packet_.quantity_;
     const int32_t  lots     = quantity / _lotSize;
     const uint64_t value    = static_cast<uint64_t>(price) * static_cast<uint64_t>(quantity);
+
+    if (leg_ == BiddingLeg) {
+        // Hedges already out for this fill (early on an 'S' tick, or leg 0 chased behind hedge fills): reversing would leave them naked.
+        bool hedged = uint32_t{response_.hdr_.uid_.id_} == pack_._earlyHedgeUid;
+        for (size_t leg = 0; leg < _legCount; ++leg) {
+            hedged = hedged || pack_._tradedLots[leg] * _ratios[BiddingLeg] > pack_._tradedLots[BiddingLeg] * _ratios[leg];
+        }
+        if (!hedged && !SpreadPresent(pack_, price)) {
+            pack_._reverseLots += lots;
+            pack_._reverseValue += static_cast<uint64_t>(price) * static_cast<uint64_t>(lots * _lotSize);
+            WriteLog("[TRADE EVENT] index: 0, token: {}, {} {}@{}: spread gone at the hedge legs' top, reversing {} lots, book=[{}]\n",
+                     _tokens[BiddingLeg], PackName(pack_), quantity, price, pack_._reverseLots, BookText());
+            Pull(pack_, BiddingLeg, "spread gone, reversing leg 0");
+            Reverse(pack_);
+            return;
+        }
+    }
 
     pack_._tradedLots[leg_] += lots;
     pack_._tradedValue[leg_] += value;
@@ -526,6 +609,22 @@ auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_, 
         raw += static_cast<long long>(price) * pack_._signedRatio[leg];
     }
     return static_cast<float>(AdjustGap(static_cast<double>(raw)));
+}
+
+// Leg 0 at price_ and the hedge legs at the opposite side's top: does the pack still make its target?
+// A hedge leg with no price cannot be hedged, so the spread counts as gone.
+auto RatioLegStrategy::SpreadPresent(const Pack& pack_, int price_) const -> bool {
+    double raw = static_cast<double>(price_) * pack_._signedRatio[BiddingLeg];
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BiddingLeg) {
+            const int price = Price(_quote[leg], pack_._oppositeSide[leg], 0);
+            if (price <= 0) {
+                return false;
+            }
+            raw += static_cast<double>(price) * pack_._signedRatio[leg];
+        }
+    }
+    return AdjustGap(raw) >= pack_._targetSpread;
 }
 
 auto RatioLegStrategy::AdjustGap(double spread_) const -> double {

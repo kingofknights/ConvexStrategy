@@ -46,6 +46,10 @@ class RatioLegStrategy {
         bool       _hedgeMode    = false;
         ORDER_SIDE _packSide     = BUY_SIDE;
         uint32_t   _earlyHedgeUid = 0;  // leg 0 uid an 'S' tick hedged early; leg 0 is left alone while that order lives
+
+        OrderObjectPtrT _reverse;           // leg 0 on the opposite side: sends back lots filled after the spread went away
+        int32_t         _reverseLots  = 0;  // leg 0 lots still to send back; not in _tradedLots
+        uint64_t        _reverseValue = 0;  // what those lots traded at, for the unwind P&L
     };
 
   public:
@@ -94,8 +98,10 @@ class RatioLegStrategy {
     void TryEarlyHedge(Pack& pack_, int updateSide_);
     void HedgeEarly(Pack& pack_);
     void SendHedges(Pack& pack_, const LegArrayT<int>& missingLots_, std::string_view reason_);
+    void Reverse(Pack& pack_);
 
     void OnTrade(Pack& pack_, size_t leg_, const oms_transaction& response_);
+    void OnReverseTrade(Pack& pack_, const oms_transaction& response_);
     void ReportPacks(Pack& pack_, const oms_transaction& response_);
     void SendTracer(const Pack& pack_, const oms_transaction& response_, float price_, float ltp_, int ltq_, float slippage_, std::string_view message_);
     void Pull(Pack& pack_, size_t leg_, std::string_view reason_);
@@ -103,6 +109,7 @@ class RatioLegStrategy {
     void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_);
 
     [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArrayT<int>* prices_ = nullptr, size_t index_ = 0) const -> std::optional<float>;
+    [[nodiscard]] auto SpreadPresent(const Pack& pack_, int price_) const -> bool;
     [[nodiscard]] auto AdjustGap(double spread_) const -> double;
     [[nodiscard]] auto FindLegIndex(int token_) const -> size_t;
     [[nodiscard]] auto PackName(const Pack& pack_) const -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
