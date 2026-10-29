@@ -146,11 +146,12 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
 
 void RatioLegStrategy::Stop(std::string_view reason_) {
     _status = StrategyStatus_ACTIVE;
-    WriteLog("[RatioLeg:Stop] strat={} _status=ACTIVE reason='{}' long_lots=[{}] short_lots=[{}]\n",
-             _strategyId, reason_, LotsText(_longPack), LotsText(_shortPack));
     for (Pack* pack : {&_longPack, &_shortPack}) {
         Pull(*pack, BiddingLeg, reason_);
     }
+    WriteLog("[RatioLeg:Stop] strat={} _status=ACTIVE reason='{}' long_lots=[{}] short_lots=[{}]\n",
+             _strategyId, reason_, LotsText(_longPack), LotsText(_shortPack));
+    FlushOrderOuts();  // reason_ is only borrowed: write the cancel lines before returning
 }
 
 void RatioLegStrategy::Forget(std::string_view reason_) {
@@ -215,6 +216,7 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     } else {
         EvaluateBidding(_shortPack);
     }
+    FlushOrderOuts();
 }
 
 void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
@@ -231,7 +233,7 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         OrderObjectT& reverse = *reversing->_reverse;
         if (leg == BiddingLeg && reverse.get_uid() == uid) {
             reverse.handle_confirmation(response_);
-            LogResponse(*reversing, leg, reverse, response_, true);
+            LogResponse(*reversing, leg, OrderSnapshot{reverse}, response_, true);
             if (code == OMS_TRADE) {
                 OnReverseTrade(*reversing, response_);
             }
@@ -244,10 +246,13 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     if (order.get_uid() == uid) {
         order.handle_confirmation(response_);
     }
-    LogResponse(pack, leg, order, response_, false);
+    // Hedges for a fill go out before the [ORDER-IN] line; a hedge may reuse this order, so its state is taken now.
+    const OrderSnapshot state{order};
     if (code == OMS_TRADE) {
         OnTrade(pack, leg, response_);
     }
+    LogResponse(pack, leg, state, response_, false);
+    FlushOrderOuts();
 }
 
 // ═══ Decision: everything is worked out again on every event ═════════════════
@@ -374,9 +379,9 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
         return;
     }
     pack_._earlyHedgeUid = order.get_uid();
-    WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}: hedging now\n",
-             PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
     HedgeEarly(pack_);
+    WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}: hedged\n",
+             PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
 }
 
 // Hedges for leg 0's traded plus open lots, at the opposite side's index 2 like any hedge.
@@ -409,13 +414,8 @@ void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots
 
 // Sends leg 0's unwanted lots back at its own side's index 2 (a BUY sells into the bids), repriced every tick until filled.
 void RatioLegStrategy::Reverse(Pack& pack_) {
-    OrderObjectT& order    = *pack_._reverse;
-    const int     price    = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2);
-    const int     oldPrice = order.get_open_price();
-    if (const uint32_t uid = _hub->UpdateOrder(order, price, pack_._reverseLots * _lotSize, _clientUid); uid != 0) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} REVERSE uid={} price={}->{} qty={} | lots=[{}] book=[{}]\n",
-                 PackName(pack_), BiddingLeg, _tokens[BiddingLeg], SideName(Opposite(pack_._sides[BiddingLeg])), uid, oldPrice, price, pack_._reverseLots * _lotSize, LotsText(pack_), BookText());
-    }
+    const int price = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2);
+    Send(pack_, *pack_._reverse, BiddingLeg, Opposite(pack_._sides[BiddingLeg]), price, pack_._reverseLots * _lotSize, "REVERSE");
 }
 
 void RatioLegStrategy::OnReverseTrade(Pack& pack_, const oms_transaction& response_) {
@@ -453,16 +453,19 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
         if (!hedged && !SpreadPresent(pack_, price)) {
             pack_._reverseLots += lots;
             pack_._reverseValue += static_cast<uint64_t>(price) * static_cast<uint64_t>(lots * _lotSize);
-            WriteLog("[TRADE EVENT] index: 0, token: {}, {} {}@{}: spread gone at the hedge legs' top, reversing {} lots, book=[{}]\n",
-                     _tokens[BiddingLeg], PackName(pack_), quantity, price, pack_._reverseLots, BookText());
             Pull(pack_, BiddingLeg, "spread gone, reversing leg 0");
             Reverse(pack_);
+            WriteLog("[TRADE EVENT] index: 0, token: {}, {} {}@{}: spread gone at the hedge legs' top, reversing {} lots, book=[{}]\n",
+                     _tokens[BiddingLeg], PackName(pack_), quantity, price, pack_._reverseLots, BookText());
             return;
         }
     }
 
     pack_._tradedLots[leg_] += lots;
     pack_._tradedValue[leg_] += value;
+
+    // Hedges go out first, the trade is logged after them.
+    EvaluateHedgeMode(pack_);
 
     const ORDER_SIDE side = pack_._sides[leg_];
     WriteLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, quantity: {}, pack: {}, lots: [{}]\n",
@@ -471,7 +474,6 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
         WriteLog("[TRADE EVENT] WARNING quantity {} is not a multiple of lot size {}; {} units not counted\n", quantity, _lotSize, quantity % _lotSize);
     }
 
-    EvaluateHedgeMode(pack_);
     if (!pack_._hedgeMode) {
         double spread  = 0.0;
         bool   allLegs = true;
@@ -511,11 +513,13 @@ void RatioLegStrategy::ReportPacks(Pack& pack_, const oms_transaction& response_
     const auto  traded   = static_cast<float>(AdjustGap(spread));
     const float slippage = pack_._targetSpread - traded;
     const bool  slipped  = std::round(slippage) > static_cast<float>(_allowedSlippage);
-    SendTracer(pack_, response_, pack_._targetSpread / 100.0F, traded / 100.0F, newPacks, slipped ? slippage / 100.0F : 0, slipped ? "Slippage" : "");
-
+    // Stop cancels the bid, so it goes before the Tracer row and the log.
     if (slipped) {
-        WriteLog("[SLIPPAGE] {} slippage {} paise > AllowedSlippage {} paise: stopping\n", PackName(pack_), slippage, _allowedSlippage);
         Stop("slippage above AllowedSlippage");
+    }
+    SendTracer(pack_, response_, pack_._targetSpread / 100.0F, traded / 100.0F, newPacks, slipped ? slippage / 100.0F : 0, slipped ? "Slippage" : "");
+    if (slipped) {
+        WriteLog("[SLIPPAGE] {} slippage {} paise > AllowedSlippage {} paise: stopped\n", PackName(pack_), slippage, _allowedSlippage);
     }
 }
 
@@ -649,40 +653,55 @@ auto RatioLegStrategy::FindLegIndex(int token_) const -> size_t {
 
 // ═══ Orders ══════════════════════════════════════════════════════════════════
 
-// Logs only what was really sent: UpdateOrder returns 0 for a refused or unchanged order.
 void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_) {
-    OrderObjectT&          order    = *pack_._orders[leg_];
-    const std::string_view action   = OrderAction(order);
-    const int              oldPrice = order.get_open_price();
-    const int              oldQty   = order.get_open_qty();
-    if (const uint32_t uid = _hub->UpdateOrder(order, price_, quantity_, _clientUid); uid != 0) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | {} lots=[{}] book=[{}]\n",
-                 PackName(pack_), leg_, _tokens[leg_], SideName(pack_._sides[leg_]), action, uid, oldPrice, price_, oldQty, quantity_, reason_, LotsText(pack_), BookText());
-    }
+    Send(pack_, *pack_._orders[leg_], leg_, pack_._sides[leg_], price_, quantity_, reason_);
+}
+
+void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_) {
+    OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};
+    out._uid = _hub->UpdateOrder(order_, price_, quantity_, _clientUid);
+    RecordOrderOut(out);
 }
 
 void RatioLegStrategy::Pull(Pack& pack_, size_t leg_, std::string_view reason_) {
     OrderObjectT& order = *pack_._orders[leg_];
-    if (!order.is_order_confirmed() || order.is_response_pending()) {
+    if (order.is_order_confirmed() && !order.is_response_pending() && order.cancel_order()) {
+        RecordOrderOut({&pack_, leg_, pack_._sides[leg_], "CANCEL", order.get_uid(), order.get_open_price(), order.get_open_price(), order.get_open_qty(), 0, reason_});
+    }
+}
+
+// Keeps only what was really sent: UpdateOrder returns uid 0 for a refused or unchanged order.
+void RatioLegStrategy::RecordOrderOut(const OrderOut& out_) {
+    if (out_._uid == 0) {
         return;
     }
-    if (order.cancel_order()) {
-        WriteLog("[ORDER-OUT] {} leg={} token={} {} CANCEL uid={} price={} qty={} | {}\n",
-                 PackName(pack_), leg_, _tokens[leg_], SideName(pack_._sides[leg_]), order.get_uid(), order.get_open_price(), order.get_open_qty(), reason_);
+    if (_orderOutCount == _orderOuts.size()) {
+        FlushOrderOuts();
     }
+    _orderOuts[_orderOutCount++] = out_;
+}
+
+// Called at the end of every event that sends orders: formatting a line between two sends would delay the second.
+void RatioLegStrategy::FlushOrderOuts() {
+    for (const OrderOut& out : std::span{_orderOuts}.first(_orderOutCount)) {
+        WriteLog("[ORDER-OUT] {} leg={} token={} {} {} uid={} price={}->{} qty={}->{} | {} lots=[{}] book=[{}]\n",
+                 PackName(*out._pack), out._leg, _tokens[out._leg], SideName(out._side), out._action, out._uid, out._oldPrice, out._price, out._oldQty,
+                 out._quantity, out._reason, LotsText(*out._pack), BookText());
+    }
+    _orderOutCount = 0;
 }
 
 // ═══ Logs ════════════════════════════════════════════════════════════════════
 
 // Logs when the gate changes. While the market meets the target but a hedge leg is thin, logs every time: a missed entry.
 
-void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_) {
+void RatioLegStrategy::LogResponse(const Pack& pack_, size_t leg_, const OrderSnapshot& order_, const oms_transaction& response_, bool isCut_) {
     const int32_t code = response_.hdr_.transaction_code;
     WriteLog("[ORDER-IN] {} leg={} token={} {}{} {}({}) uid={} price={} qty={} err={}/{}/{} -> state=0x{:x} open={}@{} filled={} liveUid={}\n",
              PackName(pack_), leg_, _tokens[leg_], SideName(isCut_ ? Opposite(pack_._sides[leg_]) : pack_._sides[leg_]), isCut_ ? " CUT" : "",
              TransactionName(code), code, uint32_t{response_.hdr_.uid_.id_}, int32_t{response_.packet_.price_}, int32_t{response_.packet_.quantity_},
              int32_t{response_.hdr_.error_code}, int32_t{response_.hdr_.reason_code}, int32_t{response_.packet_.exchange_error_code},
-             order_.get_current_state(), order_.get_open_qty(), order_.get_open_price(), order_.get_filled_qty(), order_.get_uid());
+             order_._state, order_._openQty, order_._openPrice, order_._filledQty, order_._uid);
 }
 
 void RatioLegStrategy::WriteTimestamp() const {

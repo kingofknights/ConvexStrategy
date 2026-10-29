@@ -55,6 +55,33 @@ class RatioLegStrategy {
         uint64_t _cushionNs = 0;
     };
 
+    // One order sent this event. FlushOrderOuts writes its [ORDER-OUT] line once every order of the event is out.
+    struct OrderOut {
+        const Pack*      _pack     = nullptr;
+        size_t           _leg      = 0;
+        ORDER_SIDE       _side     = BUY_SIDE;
+        std::string_view _action;
+        uint32_t         _uid      = 0;
+        int              _oldPrice = 0;
+        int              _price    = 0;
+        int              _oldQty   = 0;
+        int              _quantity = 0;
+        std::string_view _reason;
+    };
+
+    // An order's state right after a response, kept so the [ORDER-IN] line can be written after the orders that response caused.
+    struct OrderSnapshot {
+        uint32_t _state;
+        int32_t  _openQty;
+        int32_t  _openPrice;
+        int32_t  _filledQty;
+        uint32_t _uid;
+
+        explicit OrderSnapshot(const OrderObjectT& order_)
+            : _state(order_.get_current_state()), _openQty(order_.get_open_qty()), _openPrice(order_.get_open_price()),
+              _filledQty(order_.get_filled_qty()), _uid(order_.get_uid()) {}
+    };
+
   public:
     RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, int32_t interface_, const nlohmann::json& json_, size_t legCount_, bool hasStrikeGap_);
     ~RatioLegStrategy();
@@ -110,7 +137,10 @@ class RatioLegStrategy {
     void SendTracer(const Pack& pack_, const oms_transaction& response_, float price_, float ltp_, int ltq_, float slippage_, std::string_view message_);
     void Pull(Pack& pack_, size_t leg_, std::string_view reason_);
     void UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
-    void LogResponse(const Pack& pack_, size_t leg_, const OrderObjectT& order_, const oms_transaction& response_, bool isCut_);
+    void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_);
+    void RecordOrderOut(const OrderOut& out_);
+    void FlushOrderOuts();
+    void LogResponse(const Pack& pack_, size_t leg_, const OrderSnapshot& order_, const oms_transaction& response_, bool isCut_);
 
     [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArrayT<int>* prices_ = nullptr, size_t index_ = 0) const -> std::optional<float>;
     [[nodiscard]] auto SpreadPresent(const Pack& pack_, int price_) const -> bool;
@@ -167,6 +197,9 @@ class RatioLegStrategy {
     StrategySpreadUpdate _spread{};
     StrategySpreadUpdate _lastSent{};
     uint64_t             _lastSentNs = 0;
+
+    std::array<OrderOut, 64> _orderOuts{};  // held until the event's last order is out; flushed early only when full
+    size_t                   _orderOutCount = 0;
 
     TradeTracer _tradeTracer{};
     LogFilePtrT _logFile;
