@@ -146,6 +146,7 @@ class RatioLegStrategy {
     [[nodiscard]] auto SpreadPresent(const Pack& pack_, int price_) const -> bool;
     [[nodiscard]] auto AdjustGap(double spread_) const -> double;
     [[nodiscard]] auto FindLegIndex(int token_) const -> size_t;
+    [[nodiscard]] auto LegSweep() const -> int;
     [[nodiscard]] auto PackName(const Pack& pack_) const -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
     [[nodiscard]] auto BookText() const -> std::string;
     [[nodiscard]] auto LotsText(const Pack& pack_) const -> std::string;
@@ -174,6 +175,12 @@ class RatioLegStrategy {
     int _tickSize      = 0;
     int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away, or a fill would miss the target
     int _eventCount    = 0;
+
+    // Sweep gate on leg 0: worst sweep score (msgs/ms) over the streams of all legs, worked out once per tick.
+    int   _sweepBufferLevel = 150;  // above: leg 0 bids _sweepBuffer more passive
+    int   _sweepStopLevel   = 200;  // above: no leg 0 bid
+    float _sweepBuffer      = 25;   // paise of spread
+    int   _sweepBand        = 0;    // 0 normal, 1 buffer, 2 stop; logged when it changes
 
     LegArrayT<Quote> _quote{};
     LegArrayT<int>   _tokens{};

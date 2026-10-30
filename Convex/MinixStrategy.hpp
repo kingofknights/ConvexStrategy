@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -44,6 +45,10 @@ class MinixStrategy final : public AlgoBase {
     auto UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t;
 
     auto subscribeProduct(int32_t product_id_, uint16_t flags_) -> bool;
+
+    // Sweep score of a TBT stream: messages the exchange sent on it in the last 1 ms, from feed_status of the
+    // sweep feed publisher. 0 once the stream has not ticked within 1 ms of the newest tick (it went quiet).
+    [[nodiscard]] auto StreamSweep(int16_t streamId_) const -> int32_t;
 
   private:
     void ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
@@ -87,6 +92,16 @@ class MinixStrategy final : public AlgoBase {
     // Timestamps of the last tick, stamped on orders for latency tracing.
     uint64_t _eventTimestamp   = 0;
     uint64_t _triggerTimestamp = 0;
+
+    // Last sweep score seen per stream and the exchange time of that tick.
+    struct StreamLoad {
+        int32_t  _sweep      = 0;
+        uint64_t _exchangeNs = 0;
+    };
+    static constexpr size_t   MaxStreams    = 64;
+    static constexpr uint64_t SweepWindowNs = 1'000'000;
+    std::array<StreamLoad, MaxStreams> _streamLoad{};
+    uint64_t                           _latestExchangeNs = 0;
 
     uint16_t _feedFlags = 0;                          // market-data event flags requested per token
     int32_t  _clientId = 0, _algoId = 0, _omsId = 0;  // ids from config (order routing)

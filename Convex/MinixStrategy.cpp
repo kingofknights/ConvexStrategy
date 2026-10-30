@@ -52,6 +52,15 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
 
 MinixStrategy::~MinixStrategy() { log_info("Convex : destructor"); }
 
+auto MinixStrategy::StreamSweep(const int16_t streamId_) const -> int32_t {
+    const auto stream = static_cast<size_t>(streamId_);
+    if (stream >= MaxStreams) {
+        return 0;
+    }
+    const StreamLoad& load = _streamLoad[stream];
+    return load._exchangeNs + SweepWindowNs >= _latestExchangeNs ? load._sweep : 0;
+}
+
 auto MinixStrategy::subscribeProduct(const int32_t product_id_, const uint16_t flags_) -> bool {
     LOG_DEBUG("[SUB] subscribeProduct product_id=%d flags=%d", product_id_, flags_);
     return AlgoBase::subscribeProduct(product_id_, flags_);
@@ -218,6 +227,10 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
 void MinixStrategy::OnTick(const Quote& quote_) {
     _eventTimestamp   = quote_.header.event_timestamp;
     _triggerTimestamp = quote_.header.trigger_timestamp;
+    if (const auto stream = static_cast<size_t>(quote_.header.stream_id); stream < MaxStreams) {
+        _streamLoad[stream] = {quote_.header.feed_status, quote_.header.exchange_timestamp};
+    }
+    _latestExchangeNs = std::max(_latestExchangeNs, quote_.header.exchange_timestamp);
     _squareOff->OnQuote(quote_);
     // Only the strategies trading this token: a tick no longer walks every strategy.
     if (const auto routes = _tickRoutes.find(quote_.header.product_id); routes != _tickRoutes.end()) {

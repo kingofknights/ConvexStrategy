@@ -120,16 +120,21 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _allowedSlippage   = params.value("AllowedSlippage", 0);
         _allowedBidDepth   = std::min<size_t>(params.value("AllowedBidDepth", 0U), aef::infra::quote::QUOTE_LEVELS);
         _minChangeTick     = std::max(params.value("TickSize", 2), 2);
+        _sweepBufferLevel  = params.value("SweepBufferLevel", 150);
+        _sweepStopLevel    = params.value("SweepStopLevel", 200);
+        _sweepBuffer       = ToPaise(params.value("SweepBuffer", 0.25));
 
         WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
             "\nLongBuySoQ: {}, \nLongBuyQty: {}, \nLongBuyPrice: {}; "
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
             "\nOrderDepth: {}, \nPriceDepth: {}, "
-            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \nTickSize: {}, \n_biddingLeg: {}\n",
+            "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \nTickSize: {}, \n_biddingLeg: {}, "
+            "\nSweepBufferLevel: {}, \nSweepStopLevel: {}, \nSweepBuffer: {}\n",
             _strategyId, _longPack._singleOrderPacks, _longPack._totalAllowedPacks, _longPack._targetSpread,
             _shortPack._singleOrderPacks, _shortPack._totalAllowedPacks, _shortPack._targetSpread, _orderDepth, _priceDepth,
-            _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, _minChangeTick, BiddingLeg);
+            _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, _minChangeTick, BiddingLeg,
+            _sweepBufferLevel, _sweepStopLevel, _sweepBuffer);
     }
     _depthCheckedNs = 0;
 }
@@ -197,6 +202,9 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     }
     _quote[leg] = quote_;
     _eventCount += 1;
+    const int sweep    = LegSweep();
+    const int lastBand = _sweepBand;
+    _sweepBand         = (_sweepStopLevel > 0 && sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && sweep > _sweepBufferLevel) ? 1 : 0;
     if (leg == BiddingLeg && quote_.message.updatetype_.update_type == 'S') {
         TryEarlyHedge(_longPack, quote_.message.updatetype_.update_side);
         TryEarlyHedge(_shortPack, quote_.message.updatetype_.update_side);
@@ -217,6 +225,10 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
         EvaluateBidding(_shortPack);
     }
     FlushOrderOuts();
+    if (_sweepBand != lastBand) {
+        WriteLog("[SWEEP] strat={} sweep={} msgs/ms band {} -> {} ({})\n", _strategyId, sweep, lastBand, _sweepBand,
+                 _sweepBand == 2 ? "no leg 0 bid" : _sweepBand == 1 ? "leg 0 buffer" : "normal");
+    }
 }
 
 void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
@@ -285,6 +297,11 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "no price on a leg");
         return;
     }
+    // Sweep on a leg's stream: exchange round trips stretch to ms, so hedges fill late and worse.
+    if (_sweepBand == 2) {
+        Pull(pack_, BiddingLeg, "stream sweep above SweepStopLevel");
+        return;
+    }
 
     // Cushion: what the hedge legs lose two levels deeper, the level they are hedged at. The bidding leg's own depth is ours to set, so it is left out.
     // Refreshed at most once a second, so level-2 noise alone does not move the bid.
@@ -300,7 +317,10 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const double cushion = pack_._cushion;
 
     // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
-    const double p1         = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]);
+    // In the sweep buffer band leg 0 also moves SweepBuffer of spread away from the market.
+    const double away       = pack_._sides[BiddingLeg] == BUY_SIDE ? -1.0 : 1.0;
+    const double buffer     = _sweepBand == 1 ? away * _sweepBuffer / std::abs(pack_._signedRatio[BiddingLeg]) : 0.0;
+    const double p1         = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]) + buffer;
     const double ticks      = p1 / _tickSize;
     const int    finalPrice = static_cast<int>(pack_._sides[BiddingLeg] == BUY_SIDE ? std::floor(ticks) : std::ceil(ticks)) * _tickSize;
     if (finalPrice <= 0) {
@@ -640,6 +660,16 @@ auto RatioLegStrategy::AdjustGap(double spread_) const -> double {
         return spread_;
     }
     return spread_ < 0 ? spread_ + _strikeGap : spread_ - _strikeGap;
+}
+
+auto RatioLegStrategy::LegSweep() const -> int {
+    int worst = 0;
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (_quote[leg].header.product_id != 0) {  // no tick yet: stream_id is 0, not the leg's stream
+            worst = std::max(worst, _hub->StreamSweep(_quote[leg].header.stream_id));
+        }
+    }
+    return worst;
 }
 
 auto RatioLegStrategy::FindLegIndex(int token_) const -> size_t {

@@ -754,6 +754,38 @@ void DeleteWaitsUntilWhole() {
     std::printf("  delete: bid in flight filled and hedged, erased once idle, INACTIVE echoed\n");
 }
 
+// A tick on TBT stream 7 whose feed_status carries the sweep score (msgs/ms), 1 ns after the last one.
+void SweepTick(int token_, int bid_, int ask_, int sweep_) {
+    static uint64_t exchangeNs        = 1'000'000'000;
+    Quote           quote             = exchange::BookQuote(token_, bid_, ask_);
+    quote.header.stream_id            = 7;
+    quote.header.feed_status          = sweep_;
+    quote.header.exchange_timestamp   = ++exchangeNs;
+    exchange::Publish(quote, true);
+}
+
+// Sweep above SweepBufferLevel moves the SELL bid 0.25 / 3 away; above SweepStopLevel it is pulled; calm brings it back.
+void SweepGatesLeg0() {
+    constexpr int  ID                   = 45;
+    nlohmann::json config               = RatioConfig(ID, "Applied");
+    config["Params"]["AllowedBidDepth"] = 0;  // 545 sits past the 5th ask level
+    SendConfig(config);
+    SweepTick(LEG1, 770, 780, 10);
+    SweepTick(LEG2, 315, 325, 10);
+    SweepTick(LEG0, 505, 515, 10);  // P1 533.33 -> 535
+    CHECK(LivePrice(ID, LEG0) == 535);
+    SweepTick(LEG1, 770, 780, 160);  // buffer: 533.33 + 25 / 3 = 541.67 -> 545
+    CHECK(LivePrice(ID, LEG0) == 545);
+    SweepTick(LEG2, 315, 325, 250);  // stop: no leg 0 bid
+    CHECK(LivePrice(ID, LEG0) == 0);
+    SweepTick(LEG1, 770, 780, 10);
+    SweepTick(LEG2, 315, 325, 10);
+    SweepTick(LEG0, 505, 515, 10);  // calm on every stream: back to 535
+    CHECK(LivePrice(ID, LEG0) == 535);
+    SendConfig(GuiConfig(ID, "Stop"));
+    std::printf("  sweep gate: 535 -> 545 in the buffer band -> pulled above stop -> 535 when calm\n");
+}
+
 // A synthetic-trade tick: the feed saw a trade on side_ of token_ before the exchange told us. Requests stay unanswered.
 void SyntheticTick(int token_, int bid_, int ask_, ORDER_SIDE side_) {
     Quote quote                           = exchange::BookQuote(token_, bid_, ask_);
@@ -1227,6 +1259,7 @@ int main() {
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
     QuietTicks();
+    SweepGatesLeg0();
     ManualOrders();
     SquareOffFlattens();
     SquareOffStopsStrategies();
