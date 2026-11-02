@@ -303,6 +303,9 @@ auto GuiConfig(int strategyId_, const std::string& status_) -> nlohmann::json {
     nlohmann::json config            = nlohmann::json::parse(GUI_PAYLOAD);
     config["Strategy"]["StrategyId"] = strategyId_;
     config["Strategy"]["Status"]     = status_;
+    // The hedge-touch and exchange-lag holds read exchange time, which most scenarios leave at 0: on only where tested.
+    config["Params"]["HedgeHoldUs"]  = 0;
+    config["Params"]["MaxConfirmUs"] = 0;
     return config;
 }
 
@@ -467,6 +470,105 @@ void BidNotDeeperThanAllowedDepth() {
     CHECK(exchange::LiveOrdersOf(ID) == 0 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
     SendConfig(RatioConfig(ID, "Stop"));
     std::printf("  bid depth: AllowedBidDepth 2, SELL 535 sent only while 535 is within the best 2 asks, pulled after\n");
+}
+
+// A tick from the sweep feed publisher: feed_status carries the stream's msgs/ms over the last 1 ms.
+void SweepTick(int token_, int bid_, int ask_, int16_t stream_, int32_t sweep_, uint64_t exchangeNs_, bool pump_ = true, int levelQty_ = 300) {
+    Quote quote                     = exchange::BookQuote(token_, bid_, ask_, levelQty_);
+    quote.header.stream_id          = stream_;
+    quote.header.feed_status        = sweep_;
+    quote.header.exchange_timestamp = exchangeNs_;
+    exchange::Publish(quote, pump_);
+}
+
+// Sweep on a leg's stream holds leg 0 back but leaves a resting bid its queue place. 150 < sweep <= 200: a new or
+// toward-market price is SweepBuffer (0.25 of spread) more passive. Above 200: no new or toward-market price, and the
+// resting bid is pulled only once its own spread at the hedge legs' touch falls below target. A stream that has not
+// ticked for 1 ms no longer counts.
+void SweepGatesBid() {
+    constexpr int      ID = 94;
+    constexpr uint64_t T0 = 1'000'000'000;
+    SendConfig(RatioConfig(ID, "Applied"));
+    SweepTick(LEG0, 515, 525, 16, 40, T0);
+    SweepTick(LEG1, 770, 780, 17, 60, T0);
+    SweepTick(LEG2, 315, 325, 18, 50, T0);
+    const int normal = LivePrice(ID, LEG0);  // market 3*515 - 780 - 650 = 115, P1 533.33 -> 535
+    CHECK(normal == 535);
+    SweepTick(LEG1, 770, 780, 17, 170, T0 + 100'000);  // buffer band, nothing to move: the resting SELL keeps 535
+    CHECK(LivePrice(ID, LEG0) == normal);
+    // leg 1 ask 720: market 175, P1 513.33 -> 515 would cross the 515 bid; the buffer adds 25/3 paise: 521.67 -> 525
+    SweepTick(LEG1, 710, 720, 17, 200, T0 + 200'000);  // 200 is still the buffer band
+    CHECK(LivePrice(ID, LEG0) == 525);
+    SweepTick(LEG2, 315, 325, 18, 230, T0 + 300'000);  // stop band, 525 still makes 3*525 - 720 - 650 = 205 >= 140: stays
+    CHECK(LivePrice(ID, LEG0) == 525 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);
+    SweepTick(LEG1, 690, 700, 17, 230, T0 + 350'000);  // P1 506.67 -> 510 is toward the market: held at 525
+    CHECK(LivePrice(ID, LEG0) == 525);
+    SweepTick(LEG1, 890, 900, 17, 230, T0 + 400'000);  // hedge ask 900: 3*525 - 900 - 650 = 25 < 140, pulled
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
+    SweepTick(LEG1, 770, 780, 17, 230, T0 + 450'000);  // back to 780 but still a sweep: no new bid
+    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    // 2 ms later only stream 16 ticks: 17 and 18 went quiet, so their old scores no longer count.
+    SweepTick(LEG0, 515, 525, 16, 40, T0 + 2'400'000);
+    CHECK(LivePrice(ID, LEG0) == normal && Position(ID, LEG0) == 0);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  sweep gate: rests %d and keeps it in the buffer band, 525 on a buffered move, held at 525 above 200, pulled once below target, %d once quiet\n",
+                normal, normal);
+}
+
+// A crossing leg 0 price waits while a hedge touch it prices off is being eaten (less quantity within HedgeHoldUs,
+// whatever its size) or is a new price younger than HedgeHoldUs showing less than HedgeHoldCover times the hedge quantity.
+void HedgeTouchHoldsCross() {
+    constexpr int      ID = 95;
+    constexpr uint64_t T0 = 2'000'000'000;
+    nlohmann::json     config          = RatioConfig(ID, "Applied");
+    config["Params"]["LongBuyQty"]     = 3;
+    config["Params"]["HedgeHoldUs"]    = 300;
+    config["Params"]["HedgeHoldCover"] = 5;
+    SendConfig(config);
+    SweepTick(LEG2, 315, 325, 18, 0, T0);
+    SweepTick(LEG1, 770, 780, 17, 0, T0 + 900'000);
+    // market 3*535 - 780 - 650 = 175: P1 533.33 -> 535 crosses the 535 bid, but leg 1's ask is 100 us old with 300 < 5 * 65
+    SweepTick(LEG0, 535, 545, 16, 0, T0 + 1'000'000);
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && Position(ID, LEG0) == 0);
+    SweepTick(LEG1, 770, 780, 17, 0, T0 + 1'100'000, true, 250);  // less quantity on the touch: being eaten, held
+    SweepTick(LEG0, 535, 545, 16, 0, T0 + 1'300'000);             // 200 us since, still held
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && Position(ID, LEG0) == 0);
+    SweepTick(LEG0, 535, 545, 16, 0, T0 + 1'500'000);  // 400 us: the touch held, the SELL crosses at 535 and fills
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    // A new price showing 5x the hedge quantity does not hold the cross: pack 2 crosses on that tick.
+    SweepTick(LEG1, 770, 775, 17, 0, T0 + 1'600'000, true, 2000);
+    CHECK(Position(ID, LEG0) == -6 * LOT);
+    // The same 2000-lot touch being eaten holds pack 3, whatever its size, until 300 us after the last drop.
+    SweepTick(LEG1, 770, 775, 17, 0, T0 + 1'700'000, true, 1900);
+    CHECK(Position(ID, LEG0) == -6 * LOT);
+    SweepTick(LEG0, 535, 545, 16, 0, T0 + 1'900'000);  // 200 us since the drop: held
+    CHECK(Position(ID, LEG0) == -6 * LOT);
+    SweepTick(LEG0, 535, 545, 16, 0, T0 + 2'050'000);  // 350 us: crosses
+    CHECK(Position(ID, LEG0) == -9 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  hedge hold: no cross on a 100 us old or shrinking hedge ask, crossed once it held 400 us; a 2000 qty new price crosses at once, held while eaten\n");
+}
+
+// The exchange is slow when a confirm took more than MaxConfirmUs on the market clock: no new bid or toward-market
+// move until the round trips are fast again or the slow one is 1 s old. A resting bid is left alone.
+void SlowExchangeHoldsEntry() {
+    constexpr int      ID = 96;
+    constexpr uint64_t T0 = 3'000'000'000;
+    nlohmann::json     config        = RatioConfig(ID, "Applied");
+    config["Params"]["MaxConfirmUs"] = 5000;
+    SendConfig(config);
+    SweepTick(LEG1, 770, 780, 17, 0, T0);
+    SweepTick(LEG2, 315, 325, 18, 0, T0);
+    SweepTick(LEG0, 515, 525, 16, 0, T0, false);  // SELL 535 sent, the exchange does not answer yet
+    SweepTick(LEG1, 770, 780, 17, 0, T0 + 6'000'000, false);
+    exchange::Pump();  // confirmed 6 ms after it was sent
+    CHECK(LivePrice(ID, LEG0) == 535);
+    SweepTick(LEG1, 730, 740, 17, 0, T0 + 6'100'000);  // market 155, P1 520 is toward the market: held
+    CHECK(LivePrice(ID, LEG0) == 535);
+    SweepTick(LEG1, 730, 740, 17, 0, T0 + 1'007'000'000);  // the slow confirm is 1 s old: moves to 520
+    CHECK(LivePrice(ID, LEG0) == 520);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  slow exchange: a 6 ms confirm holds the move to 520 at 535; 1 s later it goes\n");
 }
 
 // Full life: subscribe, apply, bid rests at the target price while the market misses, fills once the bid reaches it, done.
@@ -752,38 +854,6 @@ void DeleteWaitsUntilWhole() {
     TickAllLegs();
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     std::printf("  delete: bid in flight filled and hedged, erased once idle, INACTIVE echoed\n");
-}
-
-// A tick on TBT stream 7 whose feed_status carries the sweep score (msgs/ms), 1 ns after the last one.
-void SweepTick(int token_, int bid_, int ask_, int sweep_) {
-    static uint64_t exchangeNs        = 1'000'000'000;
-    Quote           quote             = exchange::BookQuote(token_, bid_, ask_);
-    quote.header.stream_id            = 7;
-    quote.header.feed_status          = sweep_;
-    quote.header.exchange_timestamp   = ++exchangeNs;
-    exchange::Publish(quote, true);
-}
-
-// Sweep above SweepBufferLevel moves the SELL bid 0.25 / 3 away; above SweepStopLevel it is pulled; calm brings it back.
-void SweepGatesLeg0() {
-    constexpr int  ID                   = 45;
-    nlohmann::json config               = RatioConfig(ID, "Applied");
-    config["Params"]["AllowedBidDepth"] = 0;  // 545 sits past the 5th ask level
-    SendConfig(config);
-    SweepTick(LEG1, 770, 780, 10);
-    SweepTick(LEG2, 315, 325, 10);
-    SweepTick(LEG0, 505, 515, 10);  // P1 533.33 -> 535
-    CHECK(LivePrice(ID, LEG0) == 535);
-    SweepTick(LEG1, 770, 780, 160);  // buffer: 533.33 + 25 / 3 = 541.67 -> 545
-    CHECK(LivePrice(ID, LEG0) == 545);
-    SweepTick(LEG2, 315, 325, 250);  // stop: no leg 0 bid
-    CHECK(LivePrice(ID, LEG0) == 0);
-    SweepTick(LEG1, 770, 780, 10);
-    SweepTick(LEG2, 315, 325, 10);
-    SweepTick(LEG0, 505, 515, 10);  // calm on every stream: back to 535
-    CHECK(LivePrice(ID, LEG0) == 535);
-    SendConfig(GuiConfig(ID, "Stop"));
-    std::printf("  sweep gate: 535 -> 545 in the buffer band -> pulled above stop -> 535 when calm\n");
 }
 
 // A synthetic-trade tick: the feed saw a trade on side_ of token_ before the exchange told us. Requests stay unanswered.
@@ -1235,6 +1305,9 @@ int main() {
     BidHoldsWithinBand();
     BidCrossesWhenMarketBeatsTarget();
     BidNotDeeperThanAllowedDepth();
+    SweepGatesBid();
+    HedgeTouchHoldsCross();
+    SlowExchangeHoldsEntry();
     FullCycle();
     StopRacesPendingBid();
     StopKeepsHedging();
@@ -1259,7 +1332,6 @@ int main() {
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
     QuietTicks();
-    SweepGatesLeg0();
     ManualOrders();
     SquareOffFlattens();
     SquareOffStopsStrategies();

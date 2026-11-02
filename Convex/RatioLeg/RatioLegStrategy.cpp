@@ -123,6 +123,9 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
         _sweepBufferLevel  = params.value("SweepBufferLevel", 150);
         _sweepStopLevel    = params.value("SweepStopLevel", 200);
         _sweepBuffer       = ToPaise(params.value("SweepBuffer", 0.25));
+        _hedgeHoldNs       = static_cast<uint64_t>(std::max(params.value("HedgeHoldUs", 300), 0)) * 1000;
+        _hedgeHoldCover    = params.value("HedgeHoldCover", 5);
+        _maxConfirmNs      = static_cast<uint64_t>(std::max(params.value("MaxConfirmUs", 5000), 0)) * 1000;
 
         WriteLog(
             "[RatioLeg] StrategyId: {} | Params parsed: "
@@ -130,11 +133,12 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             "\nShortSellSoQ: {}, \nShortSellQty: {}, \nShortSellPrice: {}; "
             "\nOrderDepth: {}, \nPriceDepth: {}, "
             "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \nTickSize: {}, \n_biddingLeg: {}, "
-            "\nSweepBufferLevel: {}, \nSweepStopLevel: {}, \nSweepBuffer: {}\n",
+            "\nSweepBufferLevel: {}, \nSweepStopLevel: {}, \nSweepBuffer: {}, "
+            "\nHedgeHoldUs: {}, \nHedgeHoldCover: {}, \nMaxConfirmUs: {}\n",
             _strategyId, _longPack._singleOrderPacks, _longPack._totalAllowedPacks, _longPack._targetSpread,
             _shortPack._singleOrderPacks, _shortPack._totalAllowedPacks, _shortPack._targetSpread, _orderDepth, _priceDepth,
             _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, _minChangeTick, BiddingLeg,
-            _sweepBufferLevel, _sweepStopLevel, _sweepBuffer);
+            _sweepBufferLevel, _sweepStopLevel, _sweepBuffer, _hedgeHoldNs / 1000, _hedgeHoldCover, _maxConfirmNs / 1000);
     }
     _depthCheckedNs = 0;
 }
@@ -201,10 +205,22 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
         return;
     }
     _quote[leg] = quote_;
+    TrackTouch(leg, quote_);
     _eventCount += 1;
-    const int sweep    = LegSweep();
+    _sweep             = LegSweep();
     const int lastBand = _sweepBand;
-    _sweepBand         = (_sweepStopLevel > 0 && sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && sweep > _sweepBufferLevel) ? 1 : 0;
+    _sweepBand         = (_sweepStopLevel > 0 && _sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && _sweep > _sweepBufferLevel) ? 1 : 0;
+    // A band change is logged at most once per GateLogNs, after this tick's orders.
+    uint64_t sweepLogGapNs = 0;
+    bool     logSweep      = false;
+    if (_sweepBand != lastBand) {
+        ++_sweepChanges;
+        if (const uint64_t now = _hub->LatestExchangeNs(); now >= _sweepLogNs + GateLogNs) {
+            sweepLogGapNs = _sweepLogNs == 0 ? 0 : now - _sweepLogNs;
+            _sweepLogNs   = now;
+            logSweep      = true;
+        }
+    }
     if (leg == BiddingLeg && quote_.message.updatetype_.update_type == 'S') {
         TryEarlyHedge(_longPack, quote_.message.updatetype_.update_side);
         TryEarlyHedge(_shortPack, quote_.message.updatetype_.update_side);
@@ -225,9 +241,10 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
         EvaluateBidding(_shortPack);
     }
     FlushOrderOuts();
-    if (_sweepBand != lastBand) {
-        WriteLog("[SWEEP] strat={} sweep={} msgs/ms band {} -> {} ({})\n", _strategyId, sweep, lastBand, _sweepBand,
-                 _sweepBand == 2 ? "no leg 0 bid" : _sweepBand == 1 ? "leg 0 buffer" : "normal");
+    if (logSweep) {
+        WriteLog("[SWEEP] strat={} sweep={} msgs/ms band {} -> {} ({}), {} band changes since the last line ({} ms)\n", _strategyId, _sweep, lastBand,
+                 _sweepBand, _sweepBand == 2 ? "leg 0 holds, pulled below target" : _sweepBand == 1 ? "leg 0 buffer" : "normal",
+                 std::exchange(_sweepChanges, 0), sweepLogGapNs / 1'000'000);
     }
 }
 
@@ -297,11 +314,6 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "no price on a leg");
         return;
     }
-    // Sweep on a leg's stream: exchange round trips stretch to ms, so hedges fill late and worse.
-    if (_sweepBand == 2) {
-        Pull(pack_, BiddingLeg, "stream sweep above SweepStopLevel");
-        return;
-    }
 
     // Cushion: what the hedge legs lose two levels deeper, the level they are hedged at. The bidding leg's own depth is ours to set, so it is left out.
     // Refreshed at most once a second, so level-2 noise alone does not move the bid.
@@ -317,13 +329,11 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const double cushion = pack_._cushion;
 
     // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
-    // In the sweep buffer band leg 0 also moves SweepBuffer of spread away from the market.
-    const double away       = pack_._sides[BiddingLeg] == BUY_SIDE ? -1.0 : 1.0;
-    const double buffer     = _sweepBand == 1 ? away * _sweepBuffer / std::abs(pack_._signedRatio[BiddingLeg]) : 0.0;
-    const double p1         = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]) + buffer;
-    const double ticks      = p1 / _tickSize;
-    const int    finalPrice = static_cast<int>(pack_._sides[BiddingLeg] == BUY_SIDE ? std::floor(ticks) : std::ceil(ticks)) * _tickSize;
-    if (finalPrice <= 0) {
+    const bool   buy     = pack_._sides[BiddingLeg] == BUY_SIDE;
+    const auto   rounded = [&](double price_) { return static_cast<int>(buy ? std::floor(price_ / _tickSize) : std::ceil(price_ / _tickSize)) * _tickSize; };
+    const double p1      = prices[BiddingLeg] + ((pack_._targetSpread + cushion - *market) / pack_._signedRatio[BiddingLeg]);
+    int          price   = rounded(p1);
+    if (price <= 0) {
         Pull(pack_, BiddingLeg, "target needs a price <= 0");
         return;
     }
@@ -340,7 +350,42 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "nothing left to bid");
         return;
     }
-    const int price = finalPrice;
+
+    // Entry gate. A resting bid is never pulled for a sweep alone: queue place is what fills it. In a sweep it goes
+    // only when its own price no longer makes the target at the hedge legs' live touch.
+    const OrderObjectT& order  = *pack_._orders[BiddingLeg];
+    const bool          live   = order.get_current_state() != IDLE;
+    const int           open   = order.get_open_price();
+    const auto          toward = [&](int price_) { return !live || (buy ? price_ > open : price_ < open); };
+    if (_sweepBand == 2 && live && open > 0 && !SpreadPresent(pack_, open)) {
+        Pull(pack_, BiddingLeg, "sweep above SweepStopLevel and the resting spread below target");
+        return;
+    }
+    // A new bid or a move toward the market waits out a sweep or a slow exchange, takes the buffer in the buffer band,
+    // and does not cross on a hedge touch that is being eaten or just appeared thin. Moves away and size changes always go through.
+    if (toward(price)) {
+        if (_sweepBand == 2) {
+            Hold(pack_, "sweep above SweepStopLevel");
+            return;
+        }
+        if (_maxConfirmNs > 0 && _hub->ExchangeLagNs() > _maxConfirmNs) {
+            Hold(pack_, "exchange round trip above MaxConfirmUs");
+            return;
+        }
+        if (_sweepBand == 1) {
+            price = rounded(p1 + ((buy ? -1.0 : 1.0) * _sweepBuffer / std::abs(pack_._signedRatio[BiddingLeg])));
+            if (!toward(price)) {
+                Hold(pack_, "sweep buffer keeps the resting bid");
+                return;
+            }
+        }
+        if (const size_t leg = FreshHedge(pack_, quantity); leg != NoLeg && Crosses(pack_, price)) {
+            Hold(pack_, "hedge touch younger than HedgeHoldUs", leg);
+            return;
+        }
+    }
+    Hold(pack_, {});
+
     // Never rest deeper than AllowedBidDepth levels on our own side; improving or crossing the touch is fine.
     // AllowedBidDepth 0, or that level empty in a thin book: no limit.
     if (_allowedBidDepth > 0) {
@@ -351,8 +396,6 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         }
     }
     // A resting bid within _minChangeTick ticks of the new price stays, either way, while a fill at its price still makes the target.
-    const OrderObjectT& order = *pack_._orders[BiddingLeg];
-    const int           open  = order.get_open_price();
     if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - open) < _minChangeTick * _tickSize && SpreadPresent(pack_, open)) {
         return;
     }
@@ -672,6 +715,32 @@ auto RatioLegStrategy::LegSweep() const -> int {
     return worst;
 }
 
+// price_ takes leg 0's opposite touch: a BUY at or above the ask, a SELL at or below the bid.
+auto RatioLegStrategy::Crosses(const Pack& pack_, int price_) const -> bool {
+    const int top = Price(_quote[BiddingLeg], pack_._oppositeSide[BiddingLeg], 0);
+    return top > 0 && (pack_._sides[BiddingLeg] == BUY_SIDE ? price_ >= top : price_ <= top);
+}
+
+// First hedge leg whose touch (the side its hedge would take) is not to be trusted yet: its quantity dropped within
+// _hedgeHoldNs (being eaten, whatever its size), or its price is newer than _hedgeHoldNs and shows less than
+// _hedgeHoldCover times what leg 0's quantity_ needs on it. NoLeg when every touch has held.
+auto RatioLegStrategy::FreshHedge(const Pack& pack_, int quantity_) const -> size_t {
+    if (_hedgeHoldNs == 0) {
+        return NoLeg;
+    }
+    const uint64_t now   = _hub->LatestExchangeNs();
+    const int      packs = quantity_ / _lotSize / _ratios[BiddingLeg];
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        const Touch& touch = _touch[leg][pack_._oppositeSide[leg] == BUY_SIDE ? 0 : 1];
+        const bool   eaten = touch._shrunkNs + _hedgeHoldNs > now;
+        const bool   young = touch._movedNs + _hedgeHoldNs > now && touch._qty < _hedgeHoldCover * packs * _ratios[leg] * _lotSize;
+        if (leg != BiddingLeg && (eaten || young)) {
+            return leg;
+        }
+    }
+    return NoLeg;
+}
+
 auto RatioLegStrategy::FindLegIndex(int token_) const -> size_t {
     for (size_t leg = 0; leg < _legCount; ++leg) {
         if (_tokens[leg] == token_) {
@@ -696,6 +765,7 @@ void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDE
 void RatioLegStrategy::Pull(Pack& pack_, size_t leg_, std::string_view reason_) {
     OrderObjectT& order = *pack_._orders[leg_];
     if (order.is_order_confirmed() && !order.is_response_pending() && order.cancel_order()) {
+        _hub->NoteRequest(order.get_uid());
         RecordOrderOut({&pack_, leg_, pack_._sides[leg_], "CANCEL", order.get_uid(), order.get_open_price(), order.get_open_price(), order.get_open_qty(), 0, reason_});
     }
 }
@@ -719,6 +789,58 @@ void RatioLegStrategy::FlushOrderOuts() {
                  out._quantity, out._reason, LotsText(*out._pack), BookText());
     }
     _orderOutCount = 0;
+    for (Pack* pack : {&_longPack, &_shortPack}) {
+        if (pack->_holdLogDue) {
+            LogHold(*pack);
+        }
+    }
+}
+
+// Leg 0 holds its place for hold_ (empty: free to move). A change is logged with the gate's inputs, at most once per
+// GateLogNs per pack, with the changes skipped since; the line itself waits for FlushOrderOuts.
+void RatioLegStrategy::Hold(Pack& pack_, std::string_view hold_, size_t leg_) {
+    if (hold_ == pack_._hold) {
+        return;
+    }
+    pack_._hold = hold_;
+    ++pack_._holdChanges;
+    if (const uint64_t now = _hub->LatestExchangeNs(); now >= pack_._holdLogNs + GateLogNs) {
+        pack_._holdLogNs  = now;
+        pack_._holdLogLeg = leg_;
+        pack_._holdLogDue = true;
+    }
+}
+
+void RatioLegStrategy::LogHold(Pack& pack_) {
+    pack_._holdLogDue    = false;
+    const int      changes = std::exchange(pack_._holdChanges, 0);
+    const uint64_t now     = _hub->LatestExchangeNs();
+    const size_t   leg     = pack_._holdLogLeg;
+    if (pack_._hold.empty()) {
+        WriteLog("[GATE] {} leg 0 free ({} gate changes since the last line)\n", PackName(pack_), changes);
+    } else if (leg != NoLeg) {
+        const Touch& touch = _touch[leg][pack_._oppositeSide[leg] == BUY_SIDE ? 0 : 1];
+        WriteLog("[GATE] {} leg 0 holds: {} (leg {} touch {}x{}, new price {} us ago, last eaten {} us ago; {} gate changes since the last line) | book=[{}]\n",
+                 PackName(pack_), pack_._hold, leg, touch._price, touch._qty, (now - touch._movedNs) / 1000, (now - touch._shrunkNs) / 1000, changes, BookText());
+    } else {
+        WriteLog("[GATE] {} leg 0 holds: {} (sweep {} msgs/ms, exchange round trip {} us; {} gate changes since the last line) | book=[{}]\n", PackName(pack_),
+                 pack_._hold, _sweep, _hub->ExchangeLagNs() / 1000, changes, BookText());
+    }
+}
+
+void RatioLegStrategy::TrackTouch(size_t leg_, const Quote& quote_) {
+    const std::array<std::pair<int, int>, 2> tops{{{quote_.message.bid_levels[0].price, quote_.message.bid_levels[0].qty},
+                                                   {quote_.message.ask_levels[0].price, quote_.message.ask_levels[0].qty}}};
+    for (size_t side = 0; side < tops.size(); ++side) {
+        Touch& touch = _touch[leg_][side];
+        if (tops[side].first != touch._price) {
+            touch._movedNs = quote_.header.exchange_timestamp;
+        } else if (tops[side].second < touch._qty) {
+            touch._shrunkNs = quote_.header.exchange_timestamp;
+        }
+        touch._price = tops[side].first;
+        touch._qty   = tops[side].second;
+    }
 }
 
 // ═══ Logs ════════════════════════════════════════════════════════════════════

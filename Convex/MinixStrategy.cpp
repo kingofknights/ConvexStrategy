@@ -252,6 +252,7 @@ void MinixStrategy::RebuildTickRoutes() {
 }
 
 void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
+    NoteResponse(response_);
     if (_manualOrder.OnOrderResponse(response_) || _squareOff->OnOrderResponse(response_)) {
         return;
     }
@@ -309,7 +310,11 @@ auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t qu
             return 0;
         }
         order_.set_time_stamps(_eventTimestamp, _triggerTimestamp, aef::infra::get_realtime_in_nanos());
-        return order_.update_order(price_, quantity_) ? order_.get_uid() : 0;
+        if (!order_.update_order(price_, quantity_)) {
+            return 0;
+        }
+        NoteRequest(order_.get_uid());
+        return order_.get_uid();
     }
 
     // request_id is a 22-bit field: stop at the limit instead of wrapping and reusing ids.
@@ -322,7 +327,57 @@ auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t qu
         return 0;
     }
     order_.set_time_stamps(_eventTimestamp, _triggerTimestamp, aef::infra::get_realtime_in_nanos());
-    return order_.place_order(price_, quantity_, clientUid_.id_);
+    const uint32_t uid = order_.place_order(price_, quantity_, clientUid_.id_);
+    if (uid != 0) {
+        NoteRequest(uid);
+    }
+    return uid;
+}
+
+// Takes the request's own slot (a modify of a pending uid restarts it), else a free or expired one, else the oldest.
+void MinixStrategy::NoteRequest(const uint32_t uid_) {
+    PendingRequest* slot = &_pending[0];
+    for (PendingRequest& pending : _pending) {
+        if (pending._uid == uid_) {
+            slot = &pending;
+            break;
+        }
+        if (slot->_uid != 0 && (pending._uid == 0 || pending._sentNs + LagMemoryNs < _latestExchangeNs || pending._sentNs < slot->_sentNs)) {
+            slot = &pending;
+        }
+    }
+    *slot = {uid_, _latestExchangeNs};
+}
+
+// Only the exchange's own answers are a round trip: OMS acks and OMS rejects (throttle -9996) come back in µs.
+// A reject or a trade still ends the wait.
+void MinixStrategy::NoteResponse(const oms_transaction& response_) {
+    const int32_t code = response_.hdr_.transaction_code;
+    if (code != OMS_ORDER_CONFIRMED && code != OMS_ORDER_MODIFY_CONFIRMED && code != OMS_ORDER_CANCELLED && code != OMS_REQ_REJ && code != OMS_TRADE) {
+        return;
+    }
+    const auto uid = uint32_t{response_.hdr_.uid_.id_};
+    for (PendingRequest& pending : _pending) {
+        if (pending._uid != uid) {
+            continue;
+        }
+        if (code != OMS_REQ_REJ && code != OMS_TRADE) {
+            _lastLagNs   = _latestExchangeNs - pending._sentNs;
+            _lastLagAtNs = _latestExchangeNs;
+        }
+        pending = {};
+        return;
+    }
+}
+
+auto MinixStrategy::ExchangeLagNs() const -> uint64_t {
+    uint64_t lag = _lastLagAtNs + LagMemoryNs >= _latestExchangeNs ? _lastLagNs : 0;
+    for (const PendingRequest& pending : _pending) {
+        if (pending._uid != 0 && pending._sentNs + LagMemoryNs >= _latestExchangeNs) {
+            lag = std::max(lag, _latestExchangeNs - pending._sentNs);
+        }
+    }
+    return lag;
 }
 
 // ═══ UI echo ═════════════════════════════════════════════════════════════════

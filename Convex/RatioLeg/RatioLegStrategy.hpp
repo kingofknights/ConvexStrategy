@@ -53,6 +53,20 @@ class RatioLegStrategy {
 
         double   _cushion   = 0.0;  // hedge legs' level 0 to level 2 loss, refreshed every CushionRefreshNs
         uint64_t _cushionNs = 0;
+
+        std::string_view _hold;               // why leg 0 may not move toward the market now
+        uint64_t         _holdLogNs   = 0;    // last [GATE] line (market clock): changes log at most once per GateLogNs
+        int              _holdChanges = 0;
+        size_t           _holdLogLeg  = 0;    // hedge leg the next [GATE] line describes, NoLeg for none
+        bool             _holdLogDue  = false;  // FlushOrderOuts writes the [GATE] line after the event's orders
+    };
+
+    // Top of one side of a leg's book: exchange time of its last new price, and of its last quantity drop at that price.
+    struct Touch {
+        int      _price    = 0;
+        int      _qty      = 0;
+        uint64_t _movedNs  = 0;
+        uint64_t _shrunkNs = 0;
     };
 
     // One order sent this event. FlushOrderOuts writes its [ORDER-OUT] line once every order of the event is out.
@@ -123,6 +137,8 @@ class RatioLegStrategy {
     static constexpr size_t   BiddingLeg     = 0;
     static constexpr uint64_t SpreadResendNs   = 60'000'000'000;
     static constexpr uint64_t CushionRefreshNs = 1'000'000'000;
+    // The sweep score crosses its levels many times a second in a busy market: [SWEEP] and [GATE] lines are rate-limited.
+    static constexpr uint64_t GateLogNs = 1'000'000'000;
 
     void EvaluateBidding(Pack& pack_);
     void EvaluateHedgeMode(Pack& pack_);
@@ -136,6 +152,9 @@ class RatioLegStrategy {
     void ReportPacks(Pack& pack_, const oms_transaction& response_);
     void SendTracer(const Pack& pack_, const oms_transaction& response_, float price_, float ltp_, int ltq_, float slippage_, std::string_view message_);
     void Pull(Pack& pack_, size_t leg_, std::string_view reason_);
+    void Hold(Pack& pack_, std::string_view hold_, size_t leg_ = NoLeg);
+    void LogHold(Pack& pack_);
+    void TrackTouch(size_t leg_, const Quote& quote_);
     void UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
     void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_);
     void RecordOrderOut(const OrderOut& out_);
@@ -147,6 +166,8 @@ class RatioLegStrategy {
     [[nodiscard]] auto AdjustGap(double spread_) const -> double;
     [[nodiscard]] auto FindLegIndex(int token_) const -> size_t;
     [[nodiscard]] auto LegSweep() const -> int;
+    [[nodiscard]] auto Crosses(const Pack& pack_, int price_) const -> bool;
+    [[nodiscard]] auto FreshHedge(const Pack& pack_, int quantity_) const -> size_t;
     [[nodiscard]] auto PackName(const Pack& pack_) const -> std::string_view { return &pack_ == &_longPack ? "LONG" : "SHORT"; }
     [[nodiscard]] auto BookText() const -> std::string;
     [[nodiscard]] auto LotsText(const Pack& pack_) const -> std::string;
@@ -176,11 +197,23 @@ class RatioLegStrategy {
     int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away, or a fill would miss the target
     int _eventCount    = 0;
 
-    // Sweep gate on leg 0: worst sweep score (msgs/ms) over the streams of all legs, worked out once per tick.
-    int   _sweepBufferLevel = 150;  // above: leg 0 bids _sweepBuffer more passive
-    int   _sweepStopLevel   = 200;  // above: no leg 0 bid
-    float _sweepBuffer      = 25;   // paise of spread
-    int   _sweepBand        = 0;    // 0 normal, 1 buffer, 2 stop; logged when it changes
+    // Entry gate on leg 0. Sweep score: worst msgs/ms over the streams of all legs, worked out once per tick.
+    // It only holds back a new bid or a move toward the market; a resting bid keeps its queue place unless a sweep
+    // finds its spread below target. A level of 0 turns that band off.
+    int      _sweepBufferLevel = 150;  // above: a new or toward-market leg 0 price is _sweepBuffer more passive
+    int      _sweepStopLevel   = 200;  // above: no new or toward-market leg 0 price; a resting bid below target is pulled
+    float    _sweepBuffer      = 25;   // paise of spread
+    int      _sweep            = 0;
+    int      _sweepBand        = 0;    // 0 normal, 1 buffer, 2 stop
+    uint64_t _sweepLogNs       = 0;    // last [SWEEP] line (market clock)
+    int      _sweepChanges     = 0;    // band changes since it
+    // No crossing leg 0 price while a hedge leg's touch is being eaten (quantity dropped within _hedgeHoldNs), or is a
+    // new price within _hedgeHoldNs showing less than _hedgeHoldCover times the hedge quantity. 0 ns turns it off.
+    uint64_t _hedgeHoldNs    = 300'000;
+    int      _hedgeHoldCover = 5;
+    // No new or toward-market leg 0 price while the exchange round trip (MinixStrategy::ExchangeLagNs) is above this. 0 turns it off.
+    uint64_t _maxConfirmNs = 5'000'000;
+    LegArrayT<std::array<Touch, 2>> _touch{};  // [leg][0 bid, 1 ask]
 
     LegArrayT<Quote> _quote{};
     LegArrayT<int>   _tokens{};
