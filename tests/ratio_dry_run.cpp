@@ -830,10 +830,13 @@ void UnhandledRejectRetries() {
     exchange::Tick(LEG0, 540, 550, false);  // one pack: the bid crosses, leg2's first hedge is rejected
     SendConfig(RatioConfig(ID, "Stop"));
     exchange::Tick(LEG2, 315, 325);
+    CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 1);  // within RejectWaitNs of the reject: not resent
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    exchange::Tick(LEG2, 315, 325);
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
     CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
     exchange::rejectCode = EXCHG_ERROR;
-    std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried on the next tick, pack whole\n");
+    std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried 10 ms later, pack whole\n");
 }
 
 // DELETE while the bid is in flight: the strategy lives on until its pack is hedged, then the hub erases it.
@@ -1016,6 +1019,29 @@ void HedgesSentWhileThrottled() {
     SendConfig(RatioConfig(ID, "Stop"));
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));  // later scenarios start unthrottled
     std::printf("  throttled: the fill's hedges went out, no new bid\n");
+}
+
+// RMS rejects every bid (-9994/-91000 on sandbox10 2026-11-03: 3.4M bids a session, one per tick): one bid a second.
+void RejectedBidWaitsASecond() {
+    constexpr int ID = 68;
+    exchange::rejectToken   = LEG0;
+    exchange::rejectCode    = RMS_ERROR;
+    exchange::rejectForever = true;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    for (int tick = 0; tick < 50; ++tick) {
+        exchange::Tick(LEG0, 505, 515);
+    }
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    exchange::Tick(LEG0, 505, 515);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::rejectForever = false;
+    exchange::rejectToken   = 0;
+    exchange::rejectCode    = EXCHG_ERROR;
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  RMS rejects every bid: 1 bid over 50 ticks, the next 1 s later\n");
 }
 
 // Level 2 of a hedge leg jumps: the cushion stays as it was for a second, so the bid does not move; after a second it does.
@@ -1373,6 +1399,7 @@ int main() {
     EarlyHedgeSkippedWhenSpreadGone();
     ThrottledStopCancelRetried();
     HedgesSentWhileThrottled();
+    RejectedBidWaitsASecond();
     CushionRefreshedEverySecond();
     HedgeIgnoresZeroSlice();
     SpreadSentOnlyOnChange();
