@@ -1014,6 +1014,24 @@ void ThrottledStopCancelRetried() {
     std::printf("  throttled cancel at STOP: silent for 1 s, then doWork cancels the bid without a tick\n");
 }
 
+// The bid fills while the OMS throttles: its hedges still go out, the next bid waits out the second.
+void HedgesSentWhileThrottled() {
+    constexpr int ID = 67;
+    RestBidAt535(ID);
+    oms_transaction throttle{};
+    throttle.hdr_.transaction_code = OMS_REQ_REJ;
+    throttle.hdr_.error_code       = THROTTLE_LIMIT;
+    throttle.packet_.product_id_   = MISSING_TOKEN;
+    exchange::hub->OnOrderResponse(throttle);  // another strategy's request throttled
+    exchange::FillPassive(ID, LEG0, 3 * LOT);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    TickAllLegs();
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1);  // no new bid while throttled
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));  // later scenarios start unthrottled
+    std::printf("  throttled: the fill's hedges went out, no new bid\n");
+}
+
 // Level 2 of a hedge leg jumps: the cushion stays as it was for a second, so the bid does not move; after a second it does.
 void CushionRefreshedEverySecond() {
     constexpr int ID = 93;
@@ -1546,6 +1564,7 @@ int main() {
     ReversePartialCancelsRest();
     EarlyHedgeSkippedWhenSpreadGone();
     ThrottledStopCancelRetried();
+    HedgesSentWhileThrottled();
     CushionRefreshedEverySecond();
     HedgeIgnoresZeroSlice();
     IocFiresAtTarget();

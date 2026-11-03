@@ -309,9 +309,9 @@ auto MinixStrategy::doWork() -> int {
 
 // ═══ Orders ══════════════════════════════════════════════════════════════════
 
-auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t {
+auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_, bool hedge_) -> uint32_t {
     // Checked here, once, for every caller: the vendor refuses these too, but logs each refusal.
-    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending() || Throttled()) {
+    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending() || (!hedge_ && Throttled())) {
         return 0;
     }
 

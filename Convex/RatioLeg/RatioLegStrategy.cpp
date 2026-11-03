@@ -557,7 +557,7 @@ void RatioLegStrategy::HedgeEarly(Pack& pack_) {
     SendHedges(pack_, missingLots, "EARLY-HEDGE");
 }
 
-// Sends every leg with missing lots at the opposite side's index 2, highest price first.
+// Sends every leg with missing lots at the opposite side's index 2, highest price first, throttle or not.
 void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots_, std::string_view reason_) {
     LegArrayT<int>    prices{};
     LegArrayT<size_t> order{};
@@ -569,7 +569,7 @@ void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots
     std::ranges::stable_sort(legs, std::ranges::greater{}, [&](size_t leg_) { return prices[leg_]; });
     for (const size_t leg : legs) {
         if (missingLots_[leg] > 0) {
-            UpdateOrder(pack_, leg, prices[leg], missingLots_[leg] * _lotSize, reason_);
+            Send(pack_, *pack_._orders[leg], leg, pack_._sides[leg], prices[leg], missingLots_[leg] * _lotSize, reason_, true);
         }
     }
 }
@@ -855,9 +855,9 @@ void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int qua
     Send(pack_, *pack_._orders[leg_], leg_, pack_._sides[leg_], price_, quantity_, reason_);
 }
 
-void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_) {
+void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_) {
     OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};
-    out._uid = _hub->UpdateOrder(order_, price_, quantity_, _clientUid);
+    out._uid = _hub->UpdateOrder(order_, price_, quantity_, _clientUid, hedge_);
     RecordOrderOut(out);
 }
 
