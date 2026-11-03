@@ -163,6 +163,18 @@ void RatioLegStrategy::Stop(std::string_view reason_) {
     FlushOrderOuts();  // reason_ is only borrowed: write the cancel lines before returning
 }
 
+// From doWork, once a second while the OMS is not throttling: a stopped strategy's leg 0 order whose cancel at Stop
+// was throttled, or could not go yet (order still in flight), is cancelled now, with no tick needed.
+void RatioLegStrategy::CancelIfStopped() {
+    if (IsActive()) {
+        return;
+    }
+    for (Pack* pack : {&_longPack, &_shortPack}) {
+        Pull(*pack, BiddingLeg, "stopped: cancel retry");
+    }
+    FlushOrderOuts();
+}
+
 void RatioLegStrategy::Forget(std::string_view reason_) {
     WriteLog("[RatioLeg:Forget] strat={} reason='{}' dropping long_lots=[{}] short_lots=[{}]\n", _strategyId, reason_, LotsText(_longPack), LotsText(_shortPack));
     for (Pack* pack : {&_longPack, &_shortPack}) {
@@ -764,7 +776,7 @@ void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDE
 
 void RatioLegStrategy::Pull(Pack& pack_, size_t leg_, std::string_view reason_) {
     OrderObjectT& order = *pack_._orders[leg_];
-    if (order.is_order_confirmed() && !order.is_response_pending() && order.cancel_order()) {
+    if (!_hub->Throttled() && order.is_order_confirmed() && !order.is_response_pending() && order.cancel_order()) {
         _hub->NoteRequest(order.get_uid());
         RecordOrderOut({&pack_, leg_, pack_._sides[leg_], "CANCEL", order.get_uid(), order.get_open_price(), order.get_open_price(), order.get_open_qty(), 0, reason_});
     }
