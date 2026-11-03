@@ -53,6 +53,9 @@ class RatioLegStrategy {
         int32_t         _reverseLots  = 0;  // leg 0 lots still to send back; not in _tradedLots
         uint64_t        _reverseValue = 0;  // what those lots traded at, for the unwind P&L
 
+        LegArrayT<uint64_t> _rejectedNs{};           // monotonic ns of each leg order's last reject, 0 for none
+        uint64_t            _reverseRejectedNs = 0;  // same for _reverse
+
         double   _cushion   = 0.0;  // hedge legs' level 0 to level 2 loss, refreshed every CushionRefreshNs
         uint64_t _cushionNs = 0;
 
@@ -142,6 +145,10 @@ class RatioLegStrategy {
     static constexpr uint64_t CushionRefreshNs = 1'000'000'000;
     // The sweep score crosses its levels many times a second in a busy market: [SWEEP] and [GATE] lines are rate-limited.
     static constexpr uint64_t GateLogNs = 1'000'000'000;
+    // Wait after a reject before an order is sent again (see RejectedNs). RejectWaitNs keeps one order at about the
+    // OMS line rate (nse_line_rate 95/s on sandbox10).
+    static constexpr uint64_t EntryRejectWaitNs = 1'000'000'000;
+    static constexpr uint64_t RejectWaitNs      = 10'000'000;
 
     void EvaluateBidding(Pack& pack_);
     void FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float market_, int quantity_);
@@ -162,7 +169,9 @@ class RatioLegStrategy {
     void Hold(Pack& pack_, std::string_view hold_, size_t leg_ = NoLeg);
     void LogHold(Pack& pack_);
     void TrackTouch(size_t leg_, const Quote& quote_);
-    void UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
+    static auto RejectedNs(Pack& pack_, const OrderObjectT& order_, size_t leg_) -> uint64_t&;
+    static auto RejectedWithin(uint64_t rejectedNs_, uint64_t waitNs_) -> bool;
+    void        UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
     void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_ = false);
     void RecordOrderOut(const OrderOut& out_);
     void FlushOrderOuts();

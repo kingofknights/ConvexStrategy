@@ -278,6 +278,9 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         OrderObjectT& reverse = *reversing->_reverse;
         if (leg == BiddingLeg && reverse.get_uid() == uid) {
             reverse.handle_confirmation(response_);
+            if (code == OMS_REQ_REJ) {
+                reversing->_reverseRejectedNs = aef::infra::get_time_in_nanos();
+            }
             LogResponse(*reversing, leg, OrderSnapshot{reverse}, response_, true);
             if (code == OMS_TRADE) {
                 OnReverseTrade(*reversing, response_);
@@ -290,6 +293,9 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     OrderObjectT& order = *pack._orders[leg];
     if (order.get_uid() == uid) {
         order.handle_confirmation(response_);
+        if (code == OMS_REQ_REJ) {
+            pack._rejectedNs[leg] = aef::infra::get_time_in_nanos();
+        }
     }
     // Hedges for a fill go out before the [ORDER-IN] line; a hedge may reuse this order, so its state is taken now.
     const OrderSnapshot state{order};
@@ -851,11 +857,29 @@ auto RatioLegStrategy::FindLegIndex(int token_) const -> size_t {
 
 // ═══ Orders ══════════════════════════════════════════════════════════════════
 
+// A rejected order is reset to idle by the vendor, so the next tick sent it again: millions of RMS -91000 rejects a day
+// on sandbox10. Each order waits after a reject: an entry (bid or IOC) EntryRejectWaitNs, anything closing a position
+// (hedge, reverse, cancel) RejectWaitNs, since an RMS reject can clear within the millisecond.
+auto RatioLegStrategy::RejectedNs(Pack& pack_, const OrderObjectT& order_, size_t leg_) -> uint64_t& {
+    return &order_ == pack_._reverse.get() ? pack_._reverseRejectedNs : pack_._rejectedNs[leg_];
+}
+
+auto RatioLegStrategy::RejectedWithin(uint64_t rejectedNs_, uint64_t waitNs_) -> bool {
+    return rejectedNs_ != 0 && aef::infra::get_time_in_nanos() - rejectedNs_ < waitNs_;
+}
+
+// Entry orders only: the bid (and the IOC on the IOC branch).
 void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_) {
+    if (RejectedWithin(pack_._rejectedNs[leg_], EntryRejectWaitNs)) {
+        return;
+    }
     Send(pack_, *pack_._orders[leg_], leg_, pack_._sides[leg_], price_, quantity_, reason_);
 }
 
 void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_) {
+    if (RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
+        return;
+    }
     OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};
     out._uid = _hub->UpdateOrder(order_, price_, quantity_, _clientUid, hedge_);
     RecordOrderOut(out);
@@ -863,7 +887,8 @@ void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDE
 
 void RatioLegStrategy::Pull(Pack& pack_, size_t leg_, std::string_view reason_) {
     OrderObjectT& order = *pack_._orders[leg_];
-    if (!_hub->Throttled() && order.is_order_confirmed() && !order.is_response_pending() && order.cancel_order()) {
+    if (!_hub->Throttled() && !RejectedWithin(pack_._rejectedNs[leg_], RejectWaitNs) && order.is_order_confirmed() && !order.is_response_pending() &&
+        order.cancel_order()) {
         _hub->NoteRequest(order.get_uid());
         RecordOrderOut({&pack_, leg_, pack_._sides[leg_], "CANCEL", order.get_uid(), order.get_open_price(), order.get_open_price(), order.get_open_qty(), 0, reason_});
     }
