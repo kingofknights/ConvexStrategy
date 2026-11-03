@@ -1245,8 +1245,8 @@ void IocReverseWhenSpreadGone() {
     std::printf("  IOC fill with the spread gone: SELL 525 bought back, no hedge\n");
 }
 
-// GUI square-off with 2 IOC lots of a pack open: the strategy stops and forgets them; no IOC or hedge afterwards.
-void IocSquareOffForgets() {
+// GUI square-off with 2 IOC lots of a pack open: the strategy stops and keeps them, but sends no IOC, hedge or part-pack reverse afterwards.
+void IocSquareOffKeepsLots() {
     constexpr int ID = 77;
     SendConfig(IocConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
@@ -1265,9 +1265,9 @@ void IocSquareOffForgets() {
     TickAllLegs();
     CHECK(Position(ID, LEG0) + Position(0, LEG0) - squareOffBefore == 0);
     CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 0 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
-    CHECK(exchange::LiveOrdersOf(ID) == 0);  // forgotten, so not reversed: square-off owns them
+    CHECK(exchange::LiveOrdersOf(ID) == 0);  // kept, not reversed: square-off owns them
     SendConfig(IocConfig(ID, "Stop"));
-    std::printf("  IOC square-off: 2 open lots flattened by square-off, strategy forgot them, no IOC or hedge after\n");
+    std::printf("  IOC square-off: 2 open lots flattened by square-off, strategy kept them, no IOC, hedge or reverse after\n");
 }
 
 auto SpreadRows(int strategy_) -> std::vector<StrategySpreadUpdate> {
@@ -1641,6 +1641,6 @@ int main() {
     SquareOffKeepsLots();
     SquareOffOneToken();
     SquareOffFromTicksAndCancel();
-    IocSquareOffForgets();
+    IocSquareOffKeepsLots();
     std::printf("all scenarios passed\n");
 }
