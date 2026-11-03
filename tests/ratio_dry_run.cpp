@@ -1308,7 +1308,38 @@ void SquareOffStopsStrategies() {
     const auto net = [&](int token_) { return Position(ID, token_) + Position(0, token_) - squareOffBefore[token_]; };
     CHECK(net(LEG0) == 0 && net(LEG1) == 0 && net(LEG2) == 0);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
-    std::printf("  square-off mid-hedge: strategy stopped and forgot its lots, account flat, leg2 never bought\n");
+    const size_t sent = exchange::sent.size();
+    SendConfig(RatioConfig(ID, "Applied"));  // the pack it kept is still open: re-applying sends nothing
+    TickAllLegs();
+    CHECK(exchange::sent.size() == sent && net(LEG2) == 0);
+    SendConfig(RatioConfig(ID, "Delete"));
+    exchange::hub->doWork();  // no order live: erased although its pack is open
+    CHECK(LastStatusEcho()._strategyId == ID && LastStatusEcho()._status == StrategyStatus_INACTIVE);
+    std::printf("  square-off mid-hedge: strategy stopped, lots kept, no orders even re-applied, account flat, leg2 never bought, DELETE erases it\n");
+}
+
+// Square-off after a whole pack: the lots stay (B-TrQ 1), and re-applied the strategy bids on from them.
+void SquareOffKeepsLots() {
+    constexpr int ID = 33;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 540, 550);  // one pack, hedged
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    exchange::dbPositions = {};
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF;
+    packet.header.interface_id = 7;
+    exchange::hub->onUIRequest(packet);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));  // the GUI row goes out at most once a second
+    exchange::hub->doWork();
+    CHECK(!SpreadRows(ID).empty() && SpreadRows(ID).back()._bTrQ == 1);
+    const int placed = PlacesOf(ID, LEG0, SELL_SIDE);
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG0, 540, 550);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == placed + 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  square-off after a whole pack: B-TrQ 1 kept, re-applied it bids again\n");
 }
 
 // A tick prices square-off too: on 2026-10-14 15:04 no broadcast came and 7 tokens were never sent. An order the
@@ -1407,6 +1438,7 @@ int main() {
     ManualOrders();
     SquareOffFlattens();
     SquareOffStopsStrategies();
+    SquareOffKeepsLots();
     SquareOffOneToken();
     SquareOffFromTicksAndCancel();
     std::printf("all scenarios passed\n");

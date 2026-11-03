@@ -87,7 +87,7 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
         }
         const auto holdsToken = [token](const RatioLegStrategy& strategy_) { return token == 0 || std::ranges::find(strategy_.GetTokens(), token) != strategy_.GetTokens().end(); };
         // Strategies stop first, so none opens or hedges against the flatten. Once the square-off owns the
-        // positions they drop theirs, else a pending hedge or cut would re-open a leg it just closed.
+        // positions they keep their lots but send nothing, else a pending hedge or cut would re-open a leg it just closed.
         for (const auto& [strategyId, strategy] : _strategies) {
             if (holdsToken(*strategy)) {
                 strategy->Stop("GUI square-off");
@@ -96,7 +96,7 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
         if (_squareOff->Start(request_.header.interface_id, token)) {
             for (const auto& [strategyId, strategy] : _strategies) {
                 if (holdsToken(*strategy)) {
-                    strategy->Forget("GUI square-off");
+                    strategy->SquaredOff("GUI square-off");
                 }
             }
         }
