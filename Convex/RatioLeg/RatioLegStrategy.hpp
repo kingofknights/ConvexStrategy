@@ -121,6 +121,7 @@ class RatioLegStrategy {
     void SetStatus(StrategyStatus status_);
     void Stop(std::string_view reason_);
     void Forget(std::string_view reason_);
+    void CancelIfStopped();
     void MarkDeleted() { _deleted = true; }
 
     [[nodiscard]] auto IsDeleted() const -> bool { return _deleted; }

@@ -57,6 +57,10 @@ class MinixStrategy final : public AlgoBase {
     [[nodiscard]] auto ExchangeLagNs() const -> uint64_t;
     [[nodiscard]] auto LatestExchangeNs() const -> uint64_t { return _latestExchangeNs; }
 
+    // OMS throttle (-9996, nse_line_rate msgs/s on the line, shared by every strategy): after a throttle reject
+    // nothing is sent for ThrottleBackoffNs. Resending on every tick kept the line throttled, so cancels never got out.
+    [[nodiscard]] auto Throttled() const -> bool { return aef::infra::get_time_in_nanos() < _throttledUntilNs; }
+
   private:
     void NoteResponse(const oms_transaction& response_);
     void ApplyLegStrategyJson(int32_t interface_, const std::string& jsonText_);
@@ -122,6 +126,13 @@ class MinixStrategy final : public AlgoBase {
     std::array<PendingRequest, MaxPending> _pending{};
     uint64_t                               _lastLagNs   = 0;
     uint64_t                               _lastLagAtNs = 0;
+
+    // The exchange throttle counts messages per second: a full second clears it. Cancels it held back are
+    // retried from doWork at most once per CancelRetryNs, ticks or not.
+    static constexpr uint64_t ThrottleBackoffNs  = 1'000'000'000;
+    static constexpr uint64_t CancelRetryNs      = 1'000'000'000;
+    uint64_t                  _throttledUntilNs  = 0;  // monotonic ns
+    uint64_t                  _lastCancelRetryNs = 0;  // monotonic ns
 
     uint16_t _feedFlags = 0;                          // market-data event flags requested per token
     int32_t  _clientId = 0, _algoId = 0, _omsId = 0;  // ids from config (order routing)

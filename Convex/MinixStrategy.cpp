@@ -253,6 +253,12 @@ void MinixStrategy::RebuildTickRoutes() {
 
 void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
     NoteResponse(response_);
+    if (response_.hdr_.transaction_code == OMS_REQ_REJ && response_.hdr_.error_code == THROTTLE_LIMIT) {
+        if (!Throttled()) {
+            std::cout << "[THROTTLE] -9996 on uid " << uint32_t{response_.hdr_.uid_.id_} << ": no orders for " << ThrottleBackoffNs / 1'000'000 << " ms" << std::endl;
+        }
+        _throttledUntilNs = aef::infra::get_time_in_nanos() + ThrottleBackoffNs;
+    }
     if (_manualOrder.OnOrderResponse(response_) || _squareOff->OnOrderResponse(response_)) {
         return;
     }
@@ -287,6 +293,12 @@ auto MinixStrategy::doWork() -> int {
     if (erased) {
         RebuildTickRoutes();
     }
+    if (!Throttled() && now - _lastCancelRetryNs >= CancelRetryNs) {
+        _lastCancelRetryNs = now;
+        for (const auto& [strategyId, strategy] : _strategies) {
+            strategy->CancelIfStopped();
+        }
+    }
 
     if (now - _lastSpreadSendNs >= 1'000'000'000) {
         _lastSpreadSendNs = now;
@@ -299,7 +311,7 @@ auto MinixStrategy::doWork() -> int {
 
 auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t {
     // Checked here, once, for every caller: the vendor refuses these too, but logs each refusal.
-    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending()) {
+    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending() || Throttled()) {
         return 0;
     }
 

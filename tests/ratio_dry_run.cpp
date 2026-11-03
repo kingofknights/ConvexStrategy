@@ -989,6 +989,31 @@ void EarlyHedgeSkippedWhenSpreadGone() {
     std::printf("  'S' with the spread gone: no early hedge, the fill is bought back\n");
 }
 
+// The cancel at STOP is throttled (-9996): for a second nothing goes out, ticks or not (sandbox10 2026-11-03 14:27:45
+// resent on every tick and stayed throttled). After it doWork cancels the bid with no tick.
+void ThrottledStopCancelRetried() {
+    constexpr int ID = 66;
+    RestBidAt535(ID);
+    exchange::rejectToken   = LEG0;
+    exchange::rejectCode    = THROTTLE_LIMIT;
+    exchange::rejectChanges = true;
+    SendConfig(RatioConfig(ID, "Stop"));  // cancel refused by the throttle
+    exchange::rejectChanges = false;
+    exchange::rejectToken   = 0;
+    exchange::rejectCode    = EXCHG_ERROR;
+    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1 && exchange::LiveOrdersOf(ID) == 1);
+    const size_t sent = exchange::sent.size();
+    TickAllLegs();
+    exchange::hub->doWork();
+    exchange::Pump();
+    CHECK(exchange::sent.size() == sent);  // throttled: nothing at all
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    exchange::hub->doWork();  // no tick
+    exchange::Pump();
+    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 2 && exchange::LiveOrdersOf(ID) == 0);
+    std::printf("  throttled cancel at STOP: silent for 1 s, then doWork cancels the bid without a tick\n");
+}
+
 // Level 2 of a hedge leg jumps: the cushion stays as it was for a second, so the bid does not move; after a second it does.
 void CushionRefreshedEverySecond() {
     constexpr int ID = 93;
@@ -1520,6 +1545,7 @@ int main() {
     ReverseWhenSpreadGone();
     ReversePartialCancelsRest();
     EarlyHedgeSkippedWhenSpreadGone();
+    ThrottledStopCancelRetried();
     CushionRefreshedEverySecond();
     HedgeIgnoresZeroSlice();
     IocFiresAtTarget();
