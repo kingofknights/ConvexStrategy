@@ -42,7 +42,8 @@ class MinixStrategy final : public AlgoBase {
 
     // Places or modifies order_ so it rests quantity_ open at price_.
     // Returns the order uid when a request was sent, 0 when nothing was sent.
-    auto UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t;
+    // A hedge_ goes out while Throttled(): a pack left open is worse than one more throttle reject.
+    auto UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_, bool hedge_ = false) -> uint32_t;
 
     auto subscribeProduct(int32_t product_id_, uint16_t flags_) -> bool;
 
@@ -58,7 +59,7 @@ class MinixStrategy final : public AlgoBase {
     [[nodiscard]] auto LatestExchangeNs() const -> uint64_t { return _latestExchangeNs; }
 
     // OMS throttle (-9996, nse_line_rate msgs/s on the line, shared by every strategy): after a throttle reject
-    // nothing is sent for ThrottleBackoffNs. Resending on every tick kept the line throttled, so cancels never got out.
+    // nothing but hedges is sent for ThrottleBackoffNs. Resending on every tick kept the line throttled, so cancels never got out.
     [[nodiscard]] auto Throttled() const -> bool { return aef::infra::get_time_in_nanos() < _throttledUntilNs; }
 
   private:

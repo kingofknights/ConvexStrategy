@@ -157,7 +157,7 @@ class RatioLegStrategy {
     void LogHold(Pack& pack_);
     void TrackTouch(size_t leg_, const Quote& quote_);
     void UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
-    void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_);
+    void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_ = false);
     void RecordOrderOut(const OrderOut& out_);
     void FlushOrderOuts();
     void LogResponse(const Pack& pack_, size_t leg_, const OrderSnapshot& order_, const oms_transaction& response_, bool isCut_);
