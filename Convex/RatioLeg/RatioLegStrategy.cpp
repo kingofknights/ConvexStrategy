@@ -154,7 +154,11 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
     }
     _status  = status_;
     _deleted = false;
-    WriteLog("[RatioLeg:SetStatus] strat={} _status={} ({})\n", _strategyId, static_cast<int>(_status), StrategyStatusToString(_status));
+    if (_squaredOff && PacksWhole()) {
+        _squaredOff = false;  // re-applied after a square-off with nothing left open: trades on from the kept lots
+    }
+    WriteLog("[RatioLeg:SetStatus] strat={} _status={} ({}){}\n", _strategyId, static_cast<int>(_status), StrategyStatusToString(_status),
+             _squaredOff ? " squared off with an open pack: still no orders" : "");
 }
 
 void RatioLegStrategy::Stop(std::string_view reason_) {
@@ -173,44 +177,68 @@ void RatioLegStrategy::CancelIfStopped() {
     if (IsActive()) {
         return;
     }
-    for (Pack* pack : {&_longPack, &_shortPack}) {
-        Pull(*pack, BiddingLeg, "stopped: cancel retry");
+    if (_squaredOff) {
+        PullAll("squared off: cancel retry");
+    } else {
+        for (Pack* pack : {&_longPack, &_shortPack}) {
+            Pull(*pack, BiddingLeg, "stopped: cancel retry");
+        }
     }
     FlushOrderOuts();
 }
 
-void RatioLegStrategy::Forget(std::string_view reason_) {
-    WriteLog("[RatioLeg:Forget] strat={} reason='{}' dropping long_lots=[{}] short_lots=[{}]\n", _strategyId, reason_, LotsText(_longPack), LotsText(_shortPack));
-    for (Pack* pack : {&_longPack, &_shortPack}) {
-        pack->_tradedLots.fill(0);
-        pack->_tradedValue.fill(0);
-        pack->_reportedLots.fill(0);
-        pack->_reportedValue.fill(0);
-        pack->_tradedSpread = 0.0;
-        pack->_tradedPack   = 0;
-        pack->_hedgeMode    = false;
-        pack->_earlyHedgeUid = 0;
-        pack->_reverseLots   = 0;
-        pack->_reverseValue  = 0;
-        if (pack->_reverse->is_order_confirmed() && !pack->_reverse->is_response_pending()) {
-            pack->_reverse->cancel_order();
-        }
-    }
+// GUI square-off took the positions. Lots, values and P&L stay as traded, so the GUI keeps showing them, but the
+// strategy sends nothing more: a hedge or reverse would re-open a leg square-off just closed. Live orders are cancelled.
+void RatioLegStrategy::SquaredOff(std::string_view reason_) {
+    _squaredOff = true;
+    PullAll(reason_);
     Stop(reason_);
+    WriteLog("[RatioLeg:SquaredOff] strat={} reason='{}' lots kept, no orders until re-applied with every pack whole\n", _strategyId, reason_);
 }
 
-auto RatioLegStrategy::IsIdle() const -> bool {
+// Every live order of the strategy, the reverse included.
+void RatioLegStrategy::PullAll(std::string_view reason_) {
+    for (Pack* pack : {&_longPack, &_shortPack}) {
+        for (size_t leg = 0; leg < _legCount; ++leg) {
+            Pull(*pack, leg, reason_);
+        }
+        OrderObjectT& reverse = *pack->_reverse;
+        if (!_hub->Throttled() && reverse.is_order_confirmed() && !reverse.is_response_pending() && reverse.cancel_order()) {
+            _hub->NoteRequest(reverse.get_uid());
+            RecordOrderOut({pack, BiddingLeg, Opposite(pack->_sides[BiddingLeg]), "CANCEL", reverse.get_uid(), reverse.get_open_price(), reverse.get_open_price(),
+                            reverse.get_open_qty(), 0, reason_});
+        }
+    }
+}
+
+// Every leg holds whole packs and nothing waits to be sent back.
+auto RatioLegStrategy::PacksWhole() const -> bool {
     for (const Pack* pack : {&_longPack, &_shortPack}) {
-        if (pack->_reverseLots != 0 || pack->_reverse->get_current_state() != IDLE) {
+        if (pack->_reverseLots != 0) {
             return false;
         }
         for (size_t leg = 0; leg < _legCount; ++leg) {
-            if (pack->_orders[leg]->get_current_state() != IDLE || pack->_tradedLots[leg] != pack->_tradedPack * _ratios[leg]) {
+            if (pack->_tradedLots[leg] != pack->_tradedPack * _ratios[leg]) {
                 return false;
             }
         }
     }
     return true;
+}
+
+// No order live, and every pack whole; after a square-off an open pack is square-off's, not ours.
+auto RatioLegStrategy::IsIdle() const -> bool {
+    for (const Pack* pack : {&_longPack, &_shortPack}) {
+        if (pack->_reverse->get_current_state() != IDLE) {
+            return false;
+        }
+        for (size_t leg = 0; leg < _legCount; ++leg) {
+            if (pack->_orders[leg]->get_current_state() != IDLE) {
+                return false;
+            }
+        }
+    }
+    return _squaredOff || PacksWhole();
 }
 
 // ═══ Events ══════════════════════════════════════════════════════════════════
@@ -236,6 +264,11 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
             _sweepLogNs   = now;
             logSweep      = true;
         }
+    }
+    if (_squaredOff) {
+        PullAll("squared off");
+        FlushOrderOuts();
+        return;
     }
     if (leg == BiddingLeg && quote_.message.updatetype_.update_type == 'S') {
         TryEarlyHedge(_longPack, quote_.message.updatetype_.update_side);
@@ -877,7 +910,7 @@ void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int qua
 }
 
 void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_) {
-    if (RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
+    if (_squaredOff || RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
         return;
     }
     OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};

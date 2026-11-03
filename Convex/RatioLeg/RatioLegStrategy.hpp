@@ -123,7 +123,7 @@ class RatioLegStrategy {
     void ParamUpdate(const nlohmann::json& json_);
     void SetStatus(StrategyStatus status_);
     void Stop(std::string_view reason_);
-    void Forget(std::string_view reason_);
+    void SquaredOff(std::string_view reason_);
     void CancelIfStopped();
     void MarkDeleted() { _deleted = true; }
 
@@ -172,6 +172,8 @@ class RatioLegStrategy {
     static auto RejectedNs(Pack& pack_, const OrderObjectT& order_, size_t leg_) -> uint64_t&;
     static auto RejectedWithin(uint64_t rejectedNs_, uint64_t waitNs_) -> bool;
     void        UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
+    void        PullAll(std::string_view reason_);
+    [[nodiscard]] auto PacksWhole() const -> bool;
     void Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_ = false);
     void RecordOrderOut(const OrderOut& out_);
     void FlushOrderOuts();
@@ -206,6 +208,7 @@ class RatioLegStrategy {
     StrategyStatus _status           = StrategyStatus_INACTIVE;
     long           _utcOffsetSeconds = UtcOffsetSeconds();
     bool           _deleted          = false;
+    bool           _squaredOff       = false;  // GUI square-off took the positions: lots kept, no orders (SquaredOff)
 
     int _strikeGap     = 0;
     int _lotSize       = 0;
