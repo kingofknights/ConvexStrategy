@@ -41,6 +41,7 @@ namespace exchange {
 
     struct Book {
         int bid = 0, ask = 0;
+        int bidQty = 0, askQty = 0;  // touch quantity: what an IOC can take on arrival
     };
 
     struct LiveOrder {
@@ -96,11 +97,22 @@ namespace exchange {
         Respond(order.request, OMS_TRADE, price_, quantity_);
     }
 
-    // A resting order that crosses the touch trades in full at the touch.
+    // An IOC trades on arrival against the touch, up to the touch quantity; CancelUnfilledIoc cancels the rest.
+    auto MatchIoc(uint32_t uid_) -> void {
+        const LiveOrder& order = live.at(uid_);
+        const Book&      book  = books[order.request.packet_.product_id_];
+        const bool       isBuy = order.request.packet_.flags_.order_side == BUY_SIDE;
+        if (isBuy ? (book.ask > 0 && order.price >= book.ask) : (book.bid > 0 && order.price <= book.bid)) {
+            Trade(uid_, isBuy ? book.ask : book.bid, std::min(order.openQty, isBuy ? book.askQty : book.bidQty));
+        }
+    }
+
+    // A resting order that crosses the touch trades in full at the touch. IOCs are matched once, on arrival.
     auto MatchCrossing() -> void {
         for (bool traded = true; traded;) {
             traded = false;
             for (auto& [uid, order] : live) {
+                if (order.request.packet_.flags_.order_type == IOC_ORDER_TYPE) continue;
                 const Book& book  = books[order.request.packet_.product_id_];
                 const bool  isBuy = order.request.packet_.flags_.order_side == BUY_SIDE;
                 if (isBuy ? (book.ask > 0 && order.price >= book.ask) : (book.bid > 0 && order.price <= book.bid)) {
@@ -153,6 +165,7 @@ namespace exchange {
                     live[uid] = LiveOrder{request, request.packet_.price_, request.packet_.quantity_, 0, static_cast<int>(request.hdr_.uid_.composite_id_.strategy_id)};
                     Respond(request, OMS_ORDER_PLACED, request.packet_.price_, request.packet_.quantity_);
                     Respond(request, OMS_ORDER_CONFIRMED, request.packet_.price_, request.packet_.quantity_);
+                    if (request.packet_.flags_.order_type == IOC_ORDER_TYPE && live.count(uid)) MatchIoc(uid);
                     break;
                 case OMS_REPLACE_REQ: {
                     if (!live.count(uid)) {  // filled while the modify was in flight
@@ -187,7 +200,8 @@ namespace exchange {
     // pump_ = false leaves the strategy's requests unanswered, as if the exchange were slow.
     // bidLevels_ / askLevels_ price levels, each with 3 orders and levelQty_; level n is n ticks away from the touch.
     auto Publish(const Quote& quote_, bool pump_) -> void {
-        books[quote_.header.product_id] = Book{quote_.message.bid_levels[0].price, quote_.message.ask_levels[0].price};
+        books[quote_.header.product_id] = Book{quote_.message.bid_levels[0].price, quote_.message.ask_levels[0].price,
+                                               quote_.message.bid_levels[0].qty, quote_.message.ask_levels[0].qty};
         hub->OnTick(quote_);
         if (pump_) {
             MatchCrossing();
@@ -1009,6 +1023,184 @@ void HedgeIgnoresZeroSlice() {
     std::printf("  SoQ 0 while unhedged: leg2 hedge still sent for the whole pack\n");
 }
 
+// ═══ IOC entry (Strategy.IsBidding false) ════════════════════════════════════
+
+// RatioConfig with leg 0 firing IOCs instead of resting a bid.
+auto IocConfig(int strategyId_, const std::string& status_) -> nlohmann::json {
+    nlohmann::json config            = RatioConfig(strategyId_, status_);
+    config["Strategy"]["IsBidding"] = false;
+    return config;
+}
+
+// No order while the market misses the target; once 3 x bid - 780 - 2 x 325 >= 140, one IOC SELL at the 525 bid per pack.
+void IocFiresAtTarget() {
+    constexpr int ID = 70;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 515, 525);  // market 1545 - 1430 = 115 < 140: no order, nothing rests
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 0 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::Tick(LEG0, 525, 535);  // market 145 >= 140: IOC SELL 195 @525, filled, hedged at index 2
+    const oms_transaction ioc = NthPlace(ID, LEG0, 1);
+    CHECK(ioc.packet_.flags_.order_type == IOC_ORDER_TYPE && ioc.packet_.flags_.order_side == SELL_SIDE && ioc.packet_.price_ == 525 && ioc.packet_.quantity_ == 3 * LOT);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    CHECK(NthPlace(ID, LEG1, 1).packet_.flags_.order_type == LIMIT_ORDER_TYPE && NthPlacePrice(ID, LEG1, 1) == 790);
+    exchange::Tick(LEG0, 525, 535);  // pack 2
+    CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
+    exchange::Tick(LEG0, 525, 535);  // LongBuyQty 2 reached
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0 && TracerRows(ID, "").size() == 2);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC: nothing at market 115, IOC SELL 195 @525 at market 145, 2 packs hedged\n");
+}
+
+// Leg2's ask shows 100 when the hedge needs 130: no IOC until it shows 130.
+void IocNeedsHedgeDepth() {
+    constexpr int ID = 71;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325, true, 100);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 0);
+    exchange::Tick(LEG2, 315, 325, true, 130);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC hedge depth: held while leg2's ask shows 100 < 130, fired once it shows 130\n");
+}
+
+// Leg 0's bid thins to 2 lots before the IOC lands: it takes 2 of 3, the rest is cancelled, no pack yet so no hedge.
+// The next tick fires the last lot.
+void IocPartialFill() {
+    constexpr int ID = 72;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::books[LEG0].bidQty = 2 * LOT;
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -2 * LOT && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(NthPlace(ID, LEG0, 2).packet_.quantity_ == LOT);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC partial: 2 of 3 lots, rest cancelled, last lot on the next tick, then hedged\n");
+}
+
+// 2 of 3 lots fill, then leg1's ask jumps to 820 (market 3 x 525 - 820 - 650 = 105 < 140): the 2 lots are bought back at
+// the ask's index 2, a Reverse row goes out. Once the spread is back a full IOC fires. A part pack left at STOP is bought back too.
+void IocPartPackReversed() {
+    constexpr int ID = 78;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::books[LEG0].bidQty = 2 * LOT;
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -2 * LOT);
+    exchange::Tick(LEG1, 800, 820);
+    CHECK(Position(ID, LEG0) == 0 && NthPlace(ID, LEG0, 2).packet_.flags_.order_side == BUY_SIDE && NthPlacePrice(ID, LEG0, 2) == 545);
+    CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 0 && TracerRows(ID, "Reverse").size() == 1 && TracerRows(ID, "Reverse")[0]._ltq == 2);
+    exchange::books[LEG0].bidQty = 300;
+    exchange::Tick(LEG1, 770, 780);  // spread back, the bid deep again: a full 3-lot IOC
+    CHECK(NthPlace(ID, LEG0, 3).packet_.quantity_ == 3 * LOT && Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT);
+
+    exchange::Tick(LEG0, 525, 535, false);  // pack 2: 1 of 3 lots, then STOP
+    exchange::books[LEG0].bidQty = LOT;
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -4 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    exchange::Tick(LEG0, 525, 535);  // spread still there, but stopped: the lot is bought back
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT && exchange::LiveOrdersOf(ID) == 0);
+    CHECK(TracerRows(ID, "Reverse").size() == 2);
+    std::printf("  IOC part pack: 2 lots bought back once the spread went, full IOC after; 1 lot left at STOP bought back\n");
+}
+
+// The bid drops to 515 before the IOC lands: cancelled unfilled, no position, no hedge.
+void IocMissLeavesFlat() {
+    constexpr int ID = 73;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::books[LEG0].bid = 515;
+    exchange::Pump();
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && Position(ID, LEG0) == 0 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && exchange::LiveOrdersOf(ID) == 0);
+    exchange::Tick(LEG0, 515, 525);  // market 115: no re-fire
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC miss: bid gone before arrival, cancelled, flat, no re-fire below target\n");
+}
+
+// IsBidding true -> false with a bid resting at 535: the bid is cancelled, the next order is an IOC. Back to true: a LIMIT rests again.
+void IocModeSwitch() {
+    constexpr int ID = 74;
+    RestBidAt535(ID);
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG0, 505, 515);  // market 85: the resting bid is cancelled, no IOC
+    CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1 && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG0, SELL_SIDE) == 1);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(NthPlace(ID, LEG0, 2).packet_.flags_.order_type == IOC_ORDER_TYPE && Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG0, 505, 515);
+    CHECK(NthPlace(ID, LEG0, 3).packet_.flags_.order_type == LIMIT_ORDER_TYPE && LivePrice(ID, LEG0) == 535);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  IOC mode switch: resting bid cancelled, IOC filled, back to a LIMIT bid @535\n");
+}
+
+// Sweep above SweepStopLevel on a hedge leg's stream: no IOC while it lasts, fired once the stream is quiet.
+void IocSweepStopHolds() {
+    constexpr int      ID = 75;
+    constexpr uint64_t T0 = 5'000'000'000;
+    SendConfig(IocConfig(ID, "Applied"));
+    SweepTick(LEG1, 770, 780, 17, 60, T0);
+    SweepTick(LEG2, 315, 325, 18, 230, T0);
+    SweepTick(LEG0, 525, 535, 16, 40, T0);
+    CHECK(NthPlacePrice(ID, LEG0, 1) == 0);
+    SweepTick(LEG0, 525, 535, 16, 40, T0 + 2'400'000);  // streams 17 and 18 quiet for 2 ms
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC sweep stop: held at sweep 230, fired once the stream went quiet\n");
+}
+
+// The IOC fills after leg1's ask jumped to 820: 3 x 525 - 820 - 650 = 105 misses the target, so leg 0 is bought back, not hedged.
+void IocReverseWhenSpreadGone() {
+    constexpr int ID = 76;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::Tick(LEG1, 800, 820, false);
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == 0 && PlacesOf(ID, LEG0, BUY_SIDE) == 1 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
+    CHECK(TracerRows(ID, "Reverse").size() == 1);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC fill with the spread gone: SELL 525 bought back, no hedge\n");
+}
+
+// GUI square-off with 2 IOC lots of a pack open: the strategy stops and forgets them; no IOC or hedge afterwards.
+void IocSquareOffForgets() {
+    constexpr int ID = 77;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::books[LEG0].bidQty = 2 * LOT;  // thins before the IOC lands: 2 of 3 lots
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -2 * LOT);
+    const long squareOffBefore = Position(0, LEG0);
+    exchange::dbPositions      = {{LEG0, -2 * LOT}};
+    aef::infra::ui_cmd::UIStruct packet{};
+    packet.header.message_code = UiMessageCode_SQUARE_OFF;
+    packet.header.interface_id = 7;
+    exchange::hub->onUIRequest(packet);
+    exchange::Tick(LEG0, 525, 535);  // prices the square-off BUY; the stopped strategy fires nothing
+    TickAllLegs();
+    CHECK(Position(ID, LEG0) + Position(0, LEG0) - squareOffBefore == 0);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 0 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
+    CHECK(exchange::LiveOrdersOf(ID) == 0);  // forgotten, so not reversed: square-off owns them
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC square-off: 2 open lots flattened by square-off, strategy forgot them, no IOC or hedge after\n");
+}
+
 auto SpreadRows(int strategy_) -> std::vector<StrategySpreadUpdate> {
     std::vector<StrategySpreadUpdate> rows;
     for (const auto& packet : exchange::uiPackets) {
@@ -1330,6 +1522,14 @@ int main() {
     EarlyHedgeSkippedWhenSpreadGone();
     CushionRefreshedEverySecond();
     HedgeIgnoresZeroSlice();
+    IocFiresAtTarget();
+    IocNeedsHedgeDepth();
+    IocPartPackReversed();
+    IocPartialFill();
+    IocMissLeavesFlat();
+    IocModeSwitch();
+    IocSweepStopHolds();
+    IocReverseWhenSpreadGone();
     SpreadSentOnlyOnChange();
     QuietTicks();
     ManualOrders();
@@ -1337,5 +1537,6 @@ int main() {
     SquareOffStopsStrategies();
     SquareOffOneToken();
     SquareOffFromTicksAndCancel();
+    IocSquareOffForgets();
     std::printf("all scenarios passed\n");
 }

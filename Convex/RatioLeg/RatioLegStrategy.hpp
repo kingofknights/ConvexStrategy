@@ -47,6 +47,8 @@ class RatioLegStrategy {
         ORDER_SIDE _packSide     = BUY_SIDE;
         uint32_t   _earlyHedgeUid = 0;  // leg 0 uid an 'S' tick hedged early; leg 0 is left alone while that order lives
 
+        ORDER_TYPE _entryType = LIMIT_ORDER_TYPE;  // what leg 0's order object was built as: LIMIT bids, IOC fires
+
         OrderObjectPtrT _reverse;           // leg 0 on the opposite side: sends back lots filled after the spread went away
         int32_t         _reverseLots  = 0;  // leg 0 lots still to send back; not in _tradedLots
         uint64_t        _reverseValue = 0;  // what those lots traded at, for the unwind P&L
@@ -141,6 +143,10 @@ class RatioLegStrategy {
     static constexpr uint64_t GateLogNs = 1'000'000'000;
 
     void EvaluateBidding(Pack& pack_);
+    void FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float market_, int quantity_);
+    [[nodiscard]] auto EntryTypeReady(Pack& pack_) -> bool;
+    [[nodiscard]] auto ReversePartPack(Pack& pack_) -> bool;
+    [[nodiscard]] auto MakeOrder(const Pack& pack_, size_t leg_) const -> OrderObjectPtrT;
     void EvaluateHedgeMode(Pack& pack_);
     void TryEarlyHedge(Pack& pack_, int updateSide_);
     void HedgeEarly(Pack& pack_);
@@ -196,6 +202,7 @@ class RatioLegStrategy {
     int _tickSize      = 0;
     int _minChangeTick = 2;  // GUI TickSize (min 2): a resting bid is repriced only when the new price is this many ticks away, or a fill would miss the target
     int _eventCount    = 0;
+    bool _isBidding    = true;  // GUI Strategy.IsBidding: true rests a LIMIT bid on leg 0, false fires IOCs at its opposite touch
 
     // Entry gate on leg 0. Sweep score: worst msgs/ms over the streams of all legs, worked out once per tick.
     // It only holds back a new bid or a move toward the market; a resting bid keeps its queue place unless a sweep
