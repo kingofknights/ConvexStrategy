@@ -5,6 +5,7 @@
 #include "MinixStrategy.hpp"
 
 #include "RatioLegStrategy.hpp"
+#include "Utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -74,6 +75,10 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
               << " iface=" << request_.header.interface_id
               << " comp=" << request_.header.component_id << std::endl;
 
+    if (request_.header.message_code == UiMessageCode_HEARTBEAT) {
+        sentoUI(request_);
+        return;
+    }
     if (request_.header.message_code == UiMessageCode_MANUAL_ORDER) {
         _manualOrder.OnRequest(request_);
         return;
