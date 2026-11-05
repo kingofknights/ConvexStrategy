@@ -106,6 +106,7 @@ enum UiMessageCode : int32_t {
     UiMessageCode_STRATEGY_SPREAD = 100002,
     UiMessageCode_ORDER_RESPONSE  = 100003,
     UiMessageCode_TRADE_TRACER    = 100004,
+    UiMessageCode_HEARTBEAT       = 1432,  // GUI heartbeat, echoed back as is
 };
 
 struct UserPortfolio {
