@@ -88,10 +88,14 @@ enum StrategyStatus : int32_t {
 
 inline auto StrategyStatusToString(StrategyStatus status_) -> std::string_view {
     switch (status_) {
-        case StrategyStatus_ACTIVE:   return "ACTIVE";
-        case StrategyStatus_APPLIED:  return "APPLIED";
-        case StrategyStatus_INACTIVE: return "INACTIVE";
-        default:                      return "UNKNOWN";
+        case StrategyStatus_ACTIVE:
+            return "ACTIVE";
+        case StrategyStatus_APPLIED:
+            return "APPLIED";
+        case StrategyStatus_INACTIVE:
+            return "INACTIVE";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -117,19 +121,19 @@ inline auto StringToStrategyStatus(std::string_view status_) -> StrategyStatus {
 // ponytail: packed POD struct replaces JSON for spread, PnL, and status updates to UI (code 100002)
 struct StrategySpreadUpdate {
     uint32_t       _strategyId;
-    StrategyStatus _status;     // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
+    StrategyStatus _status;  // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
     float          _bcmp;
     float          _scmp;
     float          _cost;
     float          _flp;
     float          _gap;
-    int32_t        _bTrQ;       // buy traded lots
-    int32_t        _sTrQ;       // sell traded lots
+    int32_t        _bTrQ;  // buy traded lots
+    int32_t        _sTrQ;  // sell traded lots
     float          _m2m;
-    float          _netPL;      // NLP
+    float          _netPL;  // NLP
     float          _rlp;
-    float          _cutPL;      // CLP
-    float          _reserved;   // was _trSpread; always 0, kept so B-ATP/S-ATP offsets do not move
+    float          _cutPL;     // CLP
+    float          _reserved;  // was _trSpread; always 0, kept so B-ATP/S-ATP offsets do not move
     float          _bATP;
     float          _sATP;
 
@@ -139,7 +143,7 @@ struct StrategySpreadUpdate {
 // ponytail: packed POD struct replaces JSON for strategy lifecycle updates to UI (code 100001)
 struct StrategyStatusUpdate {
     uint32_t       _strategyId;
-    StrategyStatus _status;     // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
+    StrategyStatus _status;  // 4-byte enum: INACTIVE (0), ACTIVE (1), APPLIED (2)
 };
 
 // UI wire codes. Inbound strategy config shares 100001 with the outbound status update.
@@ -151,6 +155,7 @@ enum UiMessageCode : int32_t {
     UiMessageCode_TRADE_TRACER    = 100004,
     // Manual orders: the GUI sends oms_transaction3l on 9911, responses echo back on 5001.
     UiMessageCode_MANUAL_ORDER          = 9911,
+    UiMessageCode_HEARTBEAT             = 1432,
     UiMessageCode_MANUAL_ORDER_RESPONSE = 5001,
     UiMessageCode_SQUARE_OFF            = 1331,  // square off every position the trader holds today
     UiMessageCode_SQUARE_OFF_TOKEN      = 1332,  // square off one token: oms_transaction3l, token in packet_.product_id_[0]

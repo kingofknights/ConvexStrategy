@@ -253,7 +253,8 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     _eventCount += 1;
     _sweep             = LegSweep();
     const int lastBand = _sweepBand;
-    _sweepBand         = (_sweepStopLevel > 0 && _sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && _sweep > _sweepBufferLevel) ? 1 : 0;
+    _sweepBand         = (_sweepStopLevel > 0 && _sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && _sweep > _sweepBufferLevel) ? 1
+                                                                                                                                       : 0;
     // A band change is logged at most once per GateLogNs, after this tick's orders.
     uint64_t sweepLogGapNs = 0;
     bool     logSweep      = false;
@@ -292,7 +293,8 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     FlushOrderOuts();
     if (logSweep) {
         WriteLog("[SWEEP] strat={} sweep={} msgs/ms band {} -> {} ({}), {} band changes since the last line ({} ms)\n", _strategyId, _sweep, lastBand,
-                 _sweepBand, _sweepBand == 2 ? "leg 0 holds, pulled below target" : _sweepBand == 1 ? "leg 0 buffer" : "normal",
+                 _sweepBand, _sweepBand == 2 ? "leg 0 holds, pulled below target" : _sweepBand == 1 ? "leg 0 buffer"
+                                                                                                    : "normal",
                  std::exchange(_sweepChanges, 0), sweepLogGapNs / 1'000'000);
     }
 }
@@ -399,7 +401,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
             }
         }
     }
-    const double cushion = pack_._cushion;
+    const double cushion = *market >= pack_._targetSpread ? 0 : pack_._cushion;
 
     // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
     const bool   buy     = pack_._sides[BiddingLeg] == BUY_SIDE;
@@ -588,7 +590,7 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
 // Hedges for leg 0's traded plus open lots, at the opposite side's index 2 like any hedge.
 // Leg 0 itself is not chased here: EvaluateHedgeMode does that once a hedge fill puts the hedge legs ahead.
 void RatioLegStrategy::HedgeEarly(Pack& pack_) {
-    const int packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
+    const int      packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
     LegArrayT<int> missingLots{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
         missingLots[leg] = leg == BiddingLeg ? 0 : (packs * _ratios[leg]) - pack_._tradedLots[leg];
@@ -969,7 +971,7 @@ void RatioLegStrategy::Hold(Pack& pack_, std::string_view hold_, size_t leg_) {
 }
 
 void RatioLegStrategy::LogHold(Pack& pack_) {
-    pack_._holdLogDue    = false;
+    pack_._holdLogDue      = false;
     const int      changes = std::exchange(pack_._holdChanges, 0);
     const uint64_t now     = _hub->LatestExchangeNs();
     const size_t   leg     = pack_._holdLogLeg;
