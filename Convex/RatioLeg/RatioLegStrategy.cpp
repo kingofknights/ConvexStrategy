@@ -647,19 +647,23 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
     const int32_t  lots     = quantity / _lotSize;
     const uint64_t value    = static_cast<uint64_t>(price) * static_cast<uint64_t>(quantity);
 
+    std::optional<ExitChoice> exit;
     if (leg_ == BiddingLeg) {
         // Hedges already out for this fill (early on an 'S' tick, or leg 0 chased behind hedge fills): reversing would leave them naked.
         bool hedged = uint32_t{response_.hdr_.uid_.id_} == pack_._earlyHedgeUid;
         for (size_t leg = 0; leg < _legCount; ++leg) {
             hedged = hedged || pack_._tradedLots[leg] * _ratios[BiddingLeg] > pack_._tradedLots[BiddingLeg] * _ratios[leg];
         }
-        if (!hedged && !SpreadPresent(pack_, price)) {
+        if (!hedged) {
+            exit = ChooseExit(pack_, price);
+        }
+        if (exit && exit->_reverse) {
             pack_._reverseLots += lots;
             pack_._reverseValue += static_cast<uint64_t>(price) * static_cast<uint64_t>(lots * _lotSize);
-            Pull(pack_, BiddingLeg, "spread gone, reversing leg 0");
+            Pull(pack_, BiddingLeg, "reverse cheaper than slippage, reversing leg 0");
             Reverse(pack_);
-            WriteLog("[TRADE EVENT] index: 0, token: {}, {} {}@{}: spread gone at the hedge legs' top, reversing {} lots, book=[{}]\n",
-                     _tokens[BiddingLeg], PackName(pack_), quantity, price, pack_._reverseLots, BookText());
+            WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} > reverse loss {:.2f} per pack: REVERSE {} lots, book=[{}]\n",
+                     PackName(pack_), quantity, price, exit->_slippage, exit->_reverseLoss, pack_._reverseLots, BookText());
             return;
         }
     }
@@ -673,6 +677,10 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
     const ORDER_SIDE side = pack_._sides[leg_];
     WriteLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, quantity: {}, pack: {}, lots: [{}]\n",
              leg_, _tokens[leg_], SideName(side), static_cast<int>(side), price, quantity, PackName(pack_), LotsText(pack_));
+    if (exit && exit->_slippage > 0) {
+        WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} <= reverse loss {:.2f} per pack: COMPLETE\n",
+                 PackName(pack_), quantity, price, exit->_slippage, exit->_reverseLoss);
+    }
     if (quantity % _lotSize != 0) {
         WriteLog("[TRADE EVENT] WARNING quantity {} is not a multiple of lot size {}; {} units not counted\n", quantity, _lotSize, quantity % _lotSize);
     }
@@ -836,6 +844,37 @@ auto RatioLegStrategy::SpreadPresent(const Pack& pack_, int price_) const -> boo
         }
     }
     return AdjustGap(raw) >= pack_._targetSpread;
+}
+
+// Complete: the hedge legs at the opposite side's index 2, where SendHedges sends them. A hedge leg without that price cannot be
+// counted on, so leg 0 is reversed. Reverse: leg 0 at its own side's index 2, where Reverse() sends, plus both leg 0 trades' charges.
+// Reversed only when the slippage is above 0 and above the reverse loss. Leg 0 with no price to reverse into is completed. No AllowedSlippage cap: ReportPacks stops the strategy after the pack.
+auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_) const -> ExitChoice {
+    constexpr double Unknown = std::numeric_limits<double>::infinity();
+
+    double reverse = Unknown;
+    if (const int back = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2); back > 0) {
+        const bool   bought   = pack_._sides[BiddingLeg] == BUY_SIDE;
+        const double buyRate  = _isOption[BiddingLeg] ? OptionBuyCost : FutureBuyCost;
+        const double sellRate = _isOption[BiddingLeg] ? OptionSellCost : FutureSellCost;
+        const double buy      = bought ? fill_ : back;
+        const double sell     = bought ? back : fill_;
+        reverse               = _ratios[BiddingLeg] * ((buy - sell) + (buy * buyRate) + (sell * sellRate));
+    }
+
+    double raw = static_cast<double>(fill_) * pack_._signedRatio[BiddingLeg];
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BiddingLeg) {
+            const int price = Price(_quote[leg], pack_._oppositeSide[leg], 2);
+            if (price <= 0) {
+                return {Unknown, reverse, true};
+            }
+            raw += static_cast<double>(price) * pack_._signedRatio[leg];
+        }
+    }
+    const double slippage = pack_._targetSpread - AdjustGap(raw);
+    // Target met even at index 2: the pack is completed, even when a buy-back would now be in profit.
+    return {slippage, reverse, slippage > 0 && slippage > reverse};
 }
 
 auto RatioLegStrategy::AdjustGap(double spread_) const -> double {
