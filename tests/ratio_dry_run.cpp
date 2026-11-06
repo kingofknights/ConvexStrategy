@@ -430,7 +430,9 @@ void BidHoldsWithinBand() {
     nlohmann::json config       = RatioConfig(ID, "Applied");
     config["Params"]["TickSize"] = 1;  // clamped to the minimum of 2
     SendConfig(config);
-    TickAllLegs();
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 520, 535);  // market 130 < 140: the cushion applies; asks 535..555 leave room for the bid to move
     int price = LivePrice(ID, LEG0);
     CHECK(price > 0);
     int modifies = 0;
@@ -459,13 +461,14 @@ void BidHoldsWithinBand() {
 void BidCrossesWhenMarketBeatsTarget() {
     constexpr int ID = 91;
     SendConfig(RatioConfig(ID, "Applied"));
-    TickAllLegs();
-    // market 3*545 - 780 - 2*325 = 205 > 140, cushion (790-780) + 2*(335-325) = 30: P1 = 545 + (170 - 205) / 3 = 533.33 -> 535
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    // market 3*545 - 780 - 2*325 = 205 > 140: no cushion, P1 = 545 + (140 - 205) / 3 = 523.33 -> 525
     exchange::Tick(LEG0, 545, 555);
-    CHECK(NthPlace(ID, LEG0, 1).packet_.price_ == 535);
+    CHECK(NthPlace(ID, LEG0, 1).packet_.price_ == 525);
     CHECK(Position(ID, LEG0) == -3 * LOT);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  spare edge: SELL bid at 535 under the 545 bid, filled at once\n");
+    std::printf("  spare edge: market beats the target, no cushion, SELL bid at 525 under the 545 bid, filled at once\n");
 }
 
 // The bid never rests deeper than AllowedBidDepth levels on its own side: not placed, pulled once the book moves away.
@@ -510,14 +513,14 @@ void SweepGatesBid() {
     CHECK(normal == 535);
     SweepTick(LEG1, 770, 780, 17, 170, T0 + 100'000);  // buffer band, nothing to move: the resting SELL keeps 535
     CHECK(LivePrice(ID, LEG0) == normal);
-    // leg 1 ask 720: market 175, P1 513.33 -> 515 would cross the 515 bid; the buffer adds 25/3 paise: 521.67 -> 525
-    SweepTick(LEG1, 710, 720, 17, 200, T0 + 200'000);  // 200 is still the buffer band
-    CHECK(LivePrice(ID, LEG0) == 525);
-    SweepTick(LEG2, 315, 325, 18, 230, T0 + 300'000);  // stop band, 525 still makes 3*525 - 720 - 650 = 205 >= 140: stays
-    CHECK(LivePrice(ID, LEG0) == 525 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);
-    SweepTick(LEG1, 690, 700, 17, 230, T0 + 350'000);  // P1 506.67 -> 510 is toward the market: held at 525
-    CHECK(LivePrice(ID, LEG0) == 525);
-    SweepTick(LEG1, 890, 900, 17, 230, T0 + 400'000);  // hedge ask 900: 3*525 - 900 - 650 = 25 < 140, pulled
+    // leg 1 ask 735: market 160 beats the target, so no cushion: P1 508.33 -> 510 would cross the 515 bid; the buffer adds 25/3 paise: 516.67 -> 520
+    SweepTick(LEG1, 725, 735, 17, 200, T0 + 200'000);  // 200 is still the buffer band
+    CHECK(LivePrice(ID, LEG0) == 520);
+    SweepTick(LEG2, 315, 325, 18, 230, T0 + 300'000);  // stop band, 520 still makes 3*520 - 735 - 650 = 175 >= 140: stays
+    CHECK(LivePrice(ID, LEG0) == 520 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 0);
+    SweepTick(LEG1, 690, 700, 17, 230, T0 + 350'000);  // P1 496.67 -> 500 is toward the market: held at 520
+    CHECK(LivePrice(ID, LEG0) == 520);
+    SweepTick(LEG1, 890, 900, 17, 230, T0 + 400'000);  // hedge ask 900: 3*520 - 900 - 650 = 10 < 140, pulled
     CHECK(exchange::LiveOrdersOf(ID) == 0 && RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1);
     SweepTick(LEG1, 770, 780, 17, 230, T0 + 450'000);  // back to 780 but still a sweep: no new bid
     CHECK(exchange::LiveOrdersOf(ID) == 0);
@@ -525,7 +528,7 @@ void SweepGatesBid() {
     SweepTick(LEG0, 515, 525, 16, 40, T0 + 2'400'000);
     CHECK(LivePrice(ID, LEG0) == normal && Position(ID, LEG0) == 0);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  sweep gate: rests %d and keeps it in the buffer band, 525 on a buffered move, held at 525 above 200, pulled once below target, %d once quiet\n",
+    std::printf("  sweep gate: rests %d and keeps it in the buffer band, 520 on a buffered move, held at 520 above 200, pulled once below target, %d once quiet\n",
                 normal, normal);
 }
 
@@ -573,13 +576,13 @@ void SlowExchangeHoldsEntry() {
     SendConfig(config);
     SweepTick(LEG1, 770, 780, 17, 0, T0);
     SweepTick(LEG2, 315, 325, 18, 0, T0);
-    SweepTick(LEG0, 515, 525, 16, 0, T0, false);  // SELL 535 sent, the exchange does not answer yet
+    SweepTick(LEG0, 500, 525, 16, 0, T0, false);  // market 70, P1 533.33: SELL 535 sent, the exchange does not answer yet
     SweepTick(LEG1, 770, 780, 17, 0, T0 + 6'000'000, false);
     exchange::Pump();  // confirmed 6 ms after it was sent
     CHECK(LivePrice(ID, LEG0) == 535);
-    SweepTick(LEG1, 730, 740, 17, 0, T0 + 6'100'000);  // market 155, P1 520 is toward the market: held
+    SweepTick(LEG1, 720, 730, 17, 0, T0 + 6'100'000);  // market 120 < 140, cushion kept: P1 516.67 -> 520 is toward the market: held
     CHECK(LivePrice(ID, LEG0) == 535);
-    SweepTick(LEG1, 730, 740, 17, 0, T0 + 1'007'000'000);  // the slow confirm is 1 s old: moves to 520
+    SweepTick(LEG1, 720, 730, 17, 0, T0 + 1'007'000'000);  // the slow confirm is 1 s old: moves to 520
     CHECK(LivePrice(ID, LEG0) == 520);
     SendConfig(RatioConfig(ID, "Stop"));
     std::printf("  slow exchange: a 6 ms confirm holds the move to 520 at 535; 1 s later it goes\n");
@@ -797,12 +800,12 @@ void BidFollowsP1() {
     CHECK(LivePrice(ID, LEG0) == 525);
     exchange::Tick(LEG2, 320, 330);  // P1 536.67 -> 540: overpaying, moves
     CHECK(LivePrice(ID, LEG0) == 540);
-    exchange::Tick(LEG2, 290, 300);  // P1 516.67 -> 520: passive by 4 ticks, moves
-    CHECK(LivePrice(ID, LEG0) == 520 && RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 3);
-    exchange::Tick(LEG0, 520, 530);  // bid reaches 520: pack 1 fills, traded 1560 - 780 - 600 = 180 >= 140
-    exchange::Tick(LEG0, 520, 530);  // pack 2: P1 = 520 + (170 - 180) / 3 = 516.67 -> 520 crosses at once
+    // market 3*510 - 780 - 600 = 150 beats the target: no cushion, P1 = 510 + (140 - 150) / 3 = 506.67 -> 510 crosses the 510 bid
+    exchange::Tick(LEG2, 290, 300);  // pack 1 fills, traded 150 >= 140
+    CHECK(RequestsOf(ID, LEG0, OMS_REPLACE_REQ) == 3 && Position(ID, LEG0) == -3 * LOT);
+    exchange::Tick(LEG0, 510, 520);  // pack 2: P1 510 crosses at once
     CHECK(Position(ID, LEG0) == -6 * LOT && Position(ID, LEG1) == 2 * LOT && Position(ID, LEG2) == 4 * LOT);
-    std::printf("  bid follows P1: 535 -> 525 -> 540 -> 520 on each hedge move, filled\n");
+    std::printf("  bid follows P1: 535 -> 525 -> 540 on each hedge move, then the market beats the target: 510 crosses, filled\n");
 }
 
 // A target no positive leg 0 price can reach sends nothing.
