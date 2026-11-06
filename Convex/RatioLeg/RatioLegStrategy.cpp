@@ -85,8 +85,9 @@ RatioLegStrategy::RatioLegStrategy(MinixStrategy* hub_, uint32_t strategyId_, in
     _clientUid.composite_id_.strategy_id = _strategyId;
 
     for (Pack* pack : {&_longPack, &_shortPack}) {
+        pack->_entryType = _isBidding ? LIMIT_ORDER_TYPE : IOC_ORDER_TYPE;
         for (size_t leg = 0; leg < _legCount; ++leg) {
-            pack->_orders[leg] = std::make_unique<OrderObjectT>(_tokens[leg], pack->_sides[leg], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
+            pack->_orders[leg] = MakeOrder(*pack, leg);
         }
         pack->_reverse = std::make_unique<OrderObjectT>(_tokens[BiddingLeg], Opposite(pack->_sides[BiddingLeg]), _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, ORDER_TYPE::LIMIT_ORDER_TYPE, _hub);
     }
@@ -103,6 +104,9 @@ RatioLegStrategy::~RatioLegStrategy() {
 }
 
 void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
+    if (const auto found = json_.find("Strategy"); found != json_.end()) {
+        _isBidding = found->value("IsBidding", true);
+    }
     if (const auto found = json_.find("Params"); found != json_.end()) {
         const auto& params = *found;
 
@@ -134,11 +138,11 @@ void RatioLegStrategy::ParamUpdate(const nlohmann::json& json_) {
             "\nOrderDepth: {}, \nPriceDepth: {}, "
             "\nThresholdQty: {}, \nAllowedSlippage: {}, \nAllowedBidDepth: {}, \nTickSize: {}, \n_biddingLeg: {}, "
             "\nSweepBufferLevel: {}, \nSweepStopLevel: {}, \nSweepBuffer: {}, "
-            "\nHedgeHoldUs: {}, \nHedgeHoldCover: {}, \nMaxConfirmUs: {}\n",
+            "\nHedgeHoldUs: {}, \nHedgeHoldCover: {}, \nMaxConfirmUs: {}, \nIsBidding: {}\n",
             _strategyId, _longPack._singleOrderPacks, _longPack._totalAllowedPacks, _longPack._targetSpread,
             _shortPack._singleOrderPacks, _shortPack._totalAllowedPacks, _shortPack._targetSpread, _orderDepth, _priceDepth,
             _hedgeDepthPercent, _allowedSlippage, _allowedBidDepth, _minChangeTick, BiddingLeg,
-            _sweepBufferLevel, _sweepStopLevel, _sweepBuffer, _hedgeHoldNs / 1000, _hedgeHoldCover, _maxConfirmNs / 1000);
+            _sweepBufferLevel, _sweepStopLevel, _sweepBuffer, _hedgeHoldNs / 1000, _hedgeHoldCover, _maxConfirmNs / 1000, _isBidding);
     }
     _depthCheckedNs = 0;
 }
@@ -249,7 +253,8 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     _eventCount += 1;
     _sweep             = LegSweep();
     const int lastBand = _sweepBand;
-    _sweepBand         = (_sweepStopLevel > 0 && _sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && _sweep > _sweepBufferLevel) ? 1 : 0;
+    _sweepBand         = (_sweepStopLevel > 0 && _sweep > _sweepStopLevel) ? 2 : (_sweepBufferLevel > 0 && _sweep > _sweepBufferLevel) ? 1
+                                                                                                                                       : 0;
     // A band change is logged at most once per GateLogNs, after this tick's orders.
     uint64_t sweepLogGapNs = 0;
     bool     logSweep      = false;
@@ -288,7 +293,8 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
     FlushOrderOuts();
     if (logSweep) {
         WriteLog("[SWEEP] strat={} sweep={} msgs/ms band {} -> {} ({}), {} band changes since the last line ({} ms)\n", _strategyId, _sweep, lastBand,
-                 _sweepBand, _sweepBand == 2 ? "leg 0 holds, pulled below target" : _sweepBand == 1 ? "leg 0 buffer" : "normal",
+                 _sweepBand, _sweepBand == 2 ? "leg 0 holds, pulled below target" : _sweepBand == 1 ? "leg 0 buffer"
+                                                                                                    : "normal",
                  std::exchange(_sweepChanges, 0), sweepLogGapNs / 1'000'000);
     }
 }
@@ -354,6 +360,9 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
             Pull(pack_, leg, "early hedge without a leg 0 fill");
         }
     }
+    if (!EntryTypeReady(pack_) || ReversePartPack(pack_)) {
+        return;
+    }
     if (not IsActive()) {
         Pull(pack_, BiddingLeg, "Strategy is not active");
         return;
@@ -363,6 +372,21 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const std::optional<float> market = MarketSpread(pack_, &prices, 0);
     if (!market or !MarketSpread(pack_, &deeper, 2)) {
         Pull(pack_, BiddingLeg, "no price on a leg");
+        return;
+    }
+
+    const int trade    = pack_._tradedLots[0];
+    const int quantity = std::min({
+                             (pack_._totalAllowedPacks * _ratios[0]) - trade,                       // lots left overall
+                             ((pack_._tradedPack + pack_._singleOrderPacks) * _ratios[0]) - trade,  // lots left in this slice
+                         }) *
+                         _lotSize;
+    if (quantity <= 0) {
+        Pull(pack_, BiddingLeg, "nothing left to bid");
+        return;
+    }
+    if (!_isBidding) {
+        FireIoc(pack_, prices, *market, quantity);
         return;
     }
 
@@ -377,7 +401,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
             }
         }
     }
-    const double cushion = pack_._cushion;
+    const double cushion = *market >= pack_._targetSpread ? 0 : pack_._cushion;
 
     // P1 = p0 + (target + cushion - market) / signedRatio0, rounded to the tick away from the market (BUY down, SELL up).
     const bool   buy     = pack_._sides[BiddingLeg] == BUY_SIDE;
@@ -386,19 +410,6 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     int          price   = rounded(p1);
     if (price <= 0) {
         Pull(pack_, BiddingLeg, "target needs a price <= 0");
-        return;
-    }
-
-    int trade     = pack_._tradedLots[0];
-    int tradePack = pack_._tradedPack;
-
-    int quantity = std::min({
-                       (pack_._totalAllowedPacks * _ratios[0]) - trade,               // lots left overall
-                       ((tradePack + pack_._singleOrderPacks) * _ratios[0]) - trade,  // lots left in this slice
-                   }) *
-                   _lotSize;
-    if (quantity <= 0) {
-        Pull(pack_, BiddingLeg, "nothing left to bid");
         return;
     }
 
@@ -453,6 +464,84 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");
 }
 
+// IOC entry: leg 0 takes its opposite touch once every leg's opposite touch makes the target and every hedge touch
+// holds what the fill would need. Nothing rests, so there is no cushion, no TickSize band and no AllowedBidDepth.
+void RatioLegStrategy::FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float market_, int quantity_) {
+    if (pack_._orders[BiddingLeg]->get_current_state() != IDLE) {
+        return;  // one IOC at a time: UpdateOrder would modify the live one
+    }
+    if (_sweepBand == 2) {
+        Hold(pack_, "sweep above SweepStopLevel");
+        return;
+    }
+    if (_maxConfirmNs > 0 && _hub->ExchangeLagNs() > _maxConfirmNs) {
+        Hold(pack_, "exchange round trip above MaxConfirmUs");
+        return;
+    }
+    if (market_ < pack_._targetSpread + (_sweepBand == 1 ? _sweepBuffer : 0.0F)) {
+        Hold(pack_, "IOC: market spread below target");
+        return;
+    }
+    // Packs the fill would complete, counting leg 0 lots already traded: each hedge touch must hold its share of them.
+    const int packs = (pack_._tradedLots[BiddingLeg] + (quantity_ / _lotSize)) / _ratios[BiddingLeg];
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        const int needed = ((packs * _ratios[leg]) - pack_._tradedLots[leg]) * _lotSize;
+        if (leg != BiddingLeg && QuantityUpTo(_quote[leg], pack_._oppositeSide[leg], 1) < needed) {
+            Hold(pack_, "IOC: hedge touch thinner than its hedge", leg);
+            return;
+        }
+    }
+    if (const size_t leg = FreshHedge(pack_, quantity_); leg != NoLeg) {
+        Hold(pack_, "hedge touch younger than HedgeHoldUs", leg);
+        return;
+    }
+    Hold(pack_, {});
+    UpdateOrder(pack_, BiddingLeg, prices_[BiddingLeg], quantity_, "IOC");
+}
+
+// IOC mode: leg 0 lots short of a whole pack (an IOC part fill) wait for the next IOC to complete the pack while the
+// spread holds. Once it is gone, or the strategy is stopped, they are sent back like a reverse at the fill.
+auto RatioLegStrategy::ReversePartPack(Pack& pack_) -> bool {
+    const int lots = pack_._tradedLots[BiddingLeg] - (pack_._tradedPack * _ratios[BiddingLeg]);
+    if (_isBidding || lots <= 0 || pack_._orders[BiddingLeg]->get_current_state() != IDLE) {
+        return false;
+    }
+    const std::optional<float> market = MarketSpread(pack_);
+    if (IsActive() && market && *market >= pack_._targetSpread) {
+        return false;
+    }
+    // Packs already traded are reported, so the unreported value belongs to these lots.
+    const int      unreported = pack_._tradedLots[BiddingLeg] - pack_._reportedLots[BiddingLeg];
+    const uint64_t value      = (pack_._tradedValue[BiddingLeg] - pack_._reportedValue[BiddingLeg]) * static_cast<uint64_t>(lots) / static_cast<uint64_t>(std::max(unreported, lots));
+    pack_._tradedLots[BiddingLeg] -= lots;
+    pack_._tradedValue[BiddingLeg] -= value;
+    pack_._reverseLots += lots;
+    pack_._reverseValue += value;
+    Reverse(pack_);
+    WriteLog("[PART-PACK] {} leg 0 {} lots short of a pack, {}: reversing\n", PackName(pack_), lots, IsActive() ? "spread gone" : "strategy stopped");
+    return true;
+}
+
+// An order object keeps the type it was built with, so an IsBidding change rebuilds leg 0's: once idle, after a cancel if live.
+auto RatioLegStrategy::EntryTypeReady(Pack& pack_) -> bool {
+    const ORDER_TYPE wanted = _isBidding ? LIMIT_ORDER_TYPE : IOC_ORDER_TYPE;
+    if (pack_._entryType == wanted) {
+        return true;
+    }
+    if (pack_._orders[BiddingLeg]->get_current_state() != IDLE) {
+        Pull(pack_, BiddingLeg, "IsBidding changed");
+        return false;
+    }
+    pack_._entryType          = wanted;
+    pack_._orders[BiddingLeg] = MakeOrder(pack_, BiddingLeg);
+    return true;
+}
+
+auto RatioLegStrategy::MakeOrder(const Pack& pack_, size_t leg_) const -> OrderObjectPtrT {
+    const ORDER_TYPE type = leg_ == BiddingLeg ? pack_._entryType : LIMIT_ORDER_TYPE;
+    return std::make_unique<OrderObjectT>(_tokens[leg_], pack_._sides[leg_], _lotSize, _hub->_clientId, _hub->_algoId, _hub->_omsId, type, _hub);
+}
+
 void RatioLegStrategy::EvaluateHedgeMode(Pack& pack_) {
     LegArrayT<int> tradedPacks{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
@@ -479,7 +568,7 @@ void RatioLegStrategy::EvaluateHedgeMode(Pack& pack_) {
 void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
     const OrderObjectT& order = *pack_._orders[BiddingLeg];
     const ORDER_SIDE    side  = pack_._sides[BiddingLeg];
-    if (not IsActive() || pack_._hedgeMode || updateSide_ != side || !order.is_order_confirmed() || order.is_response_pending() || order.get_uid() == pack_._earlyHedgeUid) {
+    if (not IsActive() || !_isBidding || pack_._hedgeMode || updateSide_ != side || !order.is_order_confirmed() || order.is_response_pending() || order.get_uid() == pack_._earlyHedgeUid) {
         return;
     }
     const int top  = Price(_quote[BiddingLeg], side, 0);
@@ -501,7 +590,7 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
 // Hedges for leg 0's traded plus open lots, at the opposite side's index 2 like any hedge.
 // Leg 0 itself is not chased here: EvaluateHedgeMode does that once a hedge fill puts the hedge legs ahead.
 void RatioLegStrategy::HedgeEarly(Pack& pack_) {
-    const int packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
+    const int      packs = (pack_._tradedLots[BiddingLeg] + (pack_._orders[BiddingLeg]->get_open_qty() / _lotSize)) / _ratios[BiddingLeg];
     LegArrayT<int> missingLots{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
         missingLots[leg] = leg == BiddingLeg ? 0 : (packs * _ratios[leg]) - pack_._tradedLots[leg];
@@ -882,7 +971,7 @@ void RatioLegStrategy::Hold(Pack& pack_, std::string_view hold_, size_t leg_) {
 }
 
 void RatioLegStrategy::LogHold(Pack& pack_) {
-    pack_._holdLogDue    = false;
+    pack_._holdLogDue      = false;
     const int      changes = std::exchange(pack_._holdChanges, 0);
     const uint64_t now     = _hub->LatestExchangeNs();
     const size_t   leg     = pack_._holdLogLeg;
