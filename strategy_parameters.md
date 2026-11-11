@@ -14,22 +14,22 @@ This document outlines the usage and logic behind the key execution parameters d
 ### 2. Order Depth (`OrderDepth` / `_orderDepth`)
 * **Description:** The minimum count of active orders (bids/asks) that must be present in the book for the market leg (hedge leg) from the top level downwards.
 * **Details:** For example, setting `OrderDepth = 4` means there must be at least 4 distinct orders active in the top levels of the order book for the market leg.
-* **Engine Behavior:** Gated by `CheckOrderDepth` on the side each hedge will take (BUY hedge -> asks): each of the first `OrderDepth` levels must have at least one order. The same levels supply the quantity checked by `ThresholdQty`. If the condition fails, the bid is not placed (or is cancelled). Capped at 5.
+* **Engine Behavior:** On the side each hedge will take (BUY hedge -> asks), the order counts of all 5 quote levels are summed (`CountOrders`); the sum must be at least `OrderDepth`. If not, the bid is not placed (or is cancelled). Not capped: it is an order count, not a level count.
 
 ### 3. Price Depth (`PriceDepth` / `_priceDepth`)
 * **Description:** The minimum number of valid price levels (levels with a price > 0) that must be present in the market leg (hedge leg) depth.
 * **Details:** For example, `PriceDepth = 2` means there must be active orders populated across at least 2 distinct price levels in the market leg's order book.
-* **Engine Behavior:** Gated by `CheckPriceDepth` on the side each hedge will take. If the hedge leg depth is insufficient, bidding on the main leg will not start (or will be immediately cancelled). Capped at 5.
+* **Engine Behavior:** Gated by `CheckPriceDepth` on the side each hedge will take: each of the first `PriceDepth` levels must have a price. The same levels supply the quantity checked by `ThresholdQty`. If the hedge leg depth is insufficient, bidding on the main leg will not start (or will be immediately cancelled). Capped at 5.
 
-### 4. Allowed Bid Depth (`AllowedBidDepth`)
+### 4. Allowed Bid Depth (`AllowedBidDepth` / `_allowedBidDepth`)
 * **Description:** The minimum number of valid price levels that must be present in the order book of the primary **bidding leg** itself.
-* **Engine Behavior:** Ignored. Leg 0 bids at the target price with no depth gate and no price bound (see `project_flow_documentation.md` §6).
+* **Engine Behavior:** Gated by `CheckPriceDepth` on leg 0's own side, where the bid rests (SELL bid -> asks, BUY bid -> bids): each of the first `AllowedBidDepth` levels must have a price, else gate `BID_DEPTH` and no bid. How far the bid sits from the touch is not limited. `0` disables the check. Capped at 5.
 
 ### 5. Threshold Qty (`ThresholdQty` / `_hedgeDepthPercent`)
 * **Description:** An extra safety buffer quantity (expressed as a percentage) that must be available in the hedge leg's order book.
 * **Details:** After meeting the `OrderDepth` and `PriceDepth` checks, the order book must also have this percentage-based volume buffer to absorb the hedge order.
-* **Engine Behavior:** Stored as `_hedgeDepthPercent`; `0` or less means 100%. Required quantity per hedge leg = slice quantity of that leg × percent / 100 (`_requiredHedgeDepth`).
-* **Example:** For a Butterfly Strategy (2-1-1, `SoQ = 1`), one slice is 2 lots on the bid leg and 1 lot on each hedge leg. With `ThresholdQty = 200` (200%), each hedge leg needs at least $1 \times 200\% = 2$ lots in its first `OrderDepth` levels before the bid is sent.
+* **Engine Behavior:** Stored as `_hedgeDepthPercent`; `0` or less means 100%. Required quantity per hedge leg = slice quantity of that leg × percent / 100 (`_requiredHedgeDepth`), summed over the first `PriceDepth` levels of the side the hedge takes.
+* **Example:** For a Butterfly Strategy (2-1-1, `SoQ = 1`), one slice is 2 lots on the bid leg and 1 lot on each hedge leg. With `ThresholdQty = 200` (200%), each hedge leg needs at least $1 \times 200\% = 2$ lots in its first `PriceDepth` levels before the bid is sent.
 
 ### 6. Allowed Slippage (`AllowedSlippage` / `_allowedSlippage`)
 * **Description:** The maximum execution slippage tolerated after a trade executes.
@@ -45,3 +45,17 @@ This document outlines the usage and logic behind the key execution parameters d
 * **Details:** Configured as an integer tick count. Converted internally to `_tradeGearOffset = _tradeGear * _tickSize`.
 * **Engine Behavior:** When a fill occurs on the primary bidding leg and hedge legs must execute, the target limit price is offset by `_tradeGear` ticks in the aggressive direction (BUY: $\text{Ask} + \text{TradeGear} \times \text{TickSize}$; SELL: $\text{Bid} - \text{TradeGear} \times \text{TickSize}$). This accelerates fill latency and improves order queue priority. Each subsequent retry step adds one additional tick on top of this aggressive offset.
 
+
+### 9. Passive Bid Ticks (`PassiveBidTicks` / `_passiveBidTicks`)
+* **Description:** How many ticks leg 0 bids away from the exact target price P1. This is the "constant" in `Flow.md`'s reverse formula.
+* **Engine Behavior:** `RateBid` moves P1 this many ticks further from the market: SELL up, BUY down. The level 3 (index 2) too-deep rule checks the moved price. The GUI does not send this key yet, so it defaults to `DEFAULT_PASSIVE_BID_TICKS = 5`. Negative values are read as 0.
+
+### 10. Entry Gate (`SweepBufferLevel`, `SweepStopLevel`, `SweepBuffer`, `HedgeHoldUs`, `HedgeHoldCover`, `MaxConfirmUs`)
+* **Purpose:** Keeps leg 0 from walking into a sweep, a stale hedge price or a slow exchange, without costing the resting bid its queue place.
+* **Details:** The sweep feed publisher (`tsNseTBT_exanic_sweep`) sends in `Quote.header.feed_status` the messages the exchange put on that quote's stream in the last 1 ms, and the stream in `header.stream_id`. The hub keeps the last score per stream; a stream that has not ticked within 1 ms of the newest tick counts as 0. The strategy takes the worst score over its legs' streams on every tick. The hub also times every order request on the market clock (newest tick's exchange time) until the exchange confirms it; the exchange lag is the worst of the last round trip (counted for 1 s) and the age of any request still unanswered.
+* **Engine Behavior:** Only a new leg 0 price or a move toward the market is gated; moves away, size changes and hedges always go through.
+  * score > `SweepStopLevel` (default 200): no new or toward-market leg 0 price. A resting bid stays, and is cancelled only when its own price no longer makes the target at the hedge legs' live touch.
+  * `SweepBufferLevel` < score <= `SweepStopLevel` (default 150): a new or toward-market leg 0 price moves `SweepBuffer` rupees of spread (default 0.25) further from the market (SELL up, BUY down; divided by leg 0's ratio, then rounded to the tick as usual). A resting bid is not moved for the buffer.
+  * `HedgeHoldUs` (default 300 µs), `HedgeHoldCover` (default 5): no crossing leg 0 price while a hedge leg's touch (the side its hedge takes) is being eaten (quantity dropped within `HedgeHoldUs`), or is a new price younger than `HedgeHoldUs` showing less than `HedgeHoldCover` times the hedge quantity.
+  * `MaxConfirmUs` (default 5000 µs): no new or toward-market leg 0 price while the exchange lag is above it.
+  * A level, `HedgeHoldUs` or `MaxConfirmUs` of 0 turns that rule off. Band changes are logged as `[SWEEP]`, holds as `[GATE]` when the reason changes. With the old publisher `feed_status` is the stream status (1), so the sweep bands never trigger; the hedge-touch and exchange-lag rules do not need the sweep feed and are on by default.

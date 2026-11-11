@@ -40,7 +40,11 @@ ConvexStrategy/
     ├── MinixStrategy.hpp/.cpp      # Central orchestrator & entry points (create/destroy hooks)
     ├── RatioLeg/                   # Ratio leg strategy implementation (2-Leg to 6-Leg)
     │   ├── RatioLegStrategy.hpp
-    │   └── RatioLegStrategy.cpp
+    │   ├── RatioLegStrategy.cpp    # lifecycle, params, events, per-pack state machine
+    │   ├── RatioLegEntry.cpp       # leg 0 bid pricing and bid gate
+    │   ├── RatioLegHedge.cpp       # hedging, slippage / Trade Tracer, reverse cut
+    │   ├── RatioLegReport.cpp      # spread pricing, PnL for the UI, logging, order book helpers
+    │   └── RatioLegHelpers.hpp     # small helpers shared by the files above
     └── Utils.hpp                   # Shared helpers & binary protocol structs
 ```
 

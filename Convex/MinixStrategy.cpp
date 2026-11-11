@@ -5,8 +5,11 @@
 #include "MinixStrategy.hpp"
 
 #include "RatioLegStrategy.hpp"
+#include "Utils.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -37,6 +40,7 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
     // Deployments write algoid as a number or as a quoted string; accept both.
     const auto& algoId = root.at("algoid");
     _algoId            = algoId.is_string() ? std::stoi(algoId.get<std::string>()) : algoId.get<int32_t>();
+    _squareOff         = std::make_unique<SquareOff>(this, root);
 
     // Market-data event flags requested per token: TER + MBP depth + OI + TBT.
     _feedFlags = static_cast<uint16_t>(aef::infra::product::SNAPSHOT_FLAGS::TER_UPDATE_EVENT) |
@@ -48,6 +52,15 @@ MinixStrategy::MinixStrategy(AlgoBase::ContextHandle context_)
 }
 
 MinixStrategy::~MinixStrategy() { log_info("Convex : destructor"); }
+
+auto MinixStrategy::StreamSweep(const int16_t streamId_) const -> int32_t {
+    const auto stream = static_cast<size_t>(streamId_);
+    if (stream >= MaxStreams) {
+        return 0;
+    }
+    const StreamLoad& load = _streamLoad[stream];
+    return load._exchangeNs + SweepWindowNs >= _latestExchangeNs ? load._sweep : 0;
+}
 
 auto MinixStrategy::subscribeProduct(const int32_t product_id_, const uint16_t flags_) -> bool {
     LOG_DEBUG("[SUB] subscribeProduct product_id=%d flags=%d", product_id_, flags_);
@@ -64,6 +77,34 @@ void MinixStrategy::onUIRequest(const aef::infra::ui_cmd::UIStruct& request_) {
 
     if (request_.header.message_code == UiMessageCode_HEARTBEAT) {
         sentoUI(request_);
+        return;
+    }
+    if (request_.header.message_code == UiMessageCode_MANUAL_ORDER) {
+        _manualOrder.OnRequest(request_);
+        return;
+    }
+    if (request_.header.message_code == UiMessageCode_SQUARE_OFF || request_.header.message_code == UiMessageCode_SQUARE_OFF_TOKEN) {
+        int32_t token = 0;  // 0: every token
+        if (request_.header.message_code == UiMessageCode_SQUARE_OFF_TOKEN) {
+            oms_transaction3l request;  // copied out: the packed struct is not aligned inside UIStruct::message
+            std::memcpy(&request, request_.message, sizeof(request));
+            token = static_cast<int32_t>(request.packet_.product_id_[0] & 0xFFFFFFFFU);
+        }
+        const auto holdsToken = [token](const RatioLegStrategy& strategy_) { return token == 0 || std::ranges::find(strategy_.GetTokens(), token) != strategy_.GetTokens().end(); };
+        // Strategies stop first, so none opens or hedges against the flatten. Once the square-off owns the
+        // positions they keep their lots but send nothing, else a pending hedge or cut would re-open a leg it just closed.
+        for (const auto& [strategyId, strategy] : _strategies) {
+            if (holdsToken(*strategy)) {
+                strategy->Stop("GUI square-off");
+            }
+        }
+        if (_squareOff->Start(request_.header.interface_id, token)) {
+            for (const auto& [strategyId, strategy] : _strategies) {
+                if (holdsToken(*strategy)) {
+                    strategy->SquaredOff("GUI square-off");
+                }
+            }
+        }
         return;
     }
     if (request_.header.message_code != UiMessageCode_STRATEGY_CONFIG) {
@@ -164,6 +205,7 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
             if (iterator == _strategies.end()) {
                 std::cout << "[handleRatioLegStrategy] Creating new RatioLegStrategy for strat=" << strategyId << " with status=" << status << std::endl;
                 iterator = _strategies.emplace(strategyId, std::make_unique<RatioLegStrategy>(this, strategyId, interface_, root_, legCount_, hasStrikeGap_)).first;
+                RebuildTickRoutes();
             } else {
                 std::cout << "[handleRatioLegStrategy] Updating existing RatioLegStrategy for strat=" << strategyId << " with status=" << status << std::endl;
                 iterator->second->ParamUpdate(root_);
@@ -173,11 +215,12 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
             return;
         } else if (status == "UNSUBSCRIBED" || status == "UNSUBSCRIBE" || status == "STOP") {
             std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyId << std::endl;
-            iterator->second->Stop("GUI STOP");
+            iterator->second->UserStopped("GUI STOP");
         } else if (status == "DELETED" || status == "DELETE") {
-            std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << std::endl;
+            // Erased by doWork once every pack is whole and no order is live: a bid in flight may still fill.
+            std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << " once idle" << std::endl;
             iterator->second->Stop("GUI DELETE");
-            _strategies.erase(iterator);
+            iterator->second->MarkDeleted();
         }
     } catch (const std::exception& e) {
         std::cout << "[handleRatioLegStrategy] failed: " << e.what() << std::endl;
@@ -189,13 +232,42 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
 void MinixStrategy::OnTick(const Quote& quote_) {
     _eventTimestamp   = quote_.header.event_timestamp;
     _triggerTimestamp = quote_.header.trigger_timestamp;
-    _eventCount       = 0;
+    if (const auto stream = static_cast<size_t>(quote_.header.stream_id); stream < MaxStreams) {
+        _streamLoad[stream] = {quote_.header.feed_status, quote_.header.exchange_timestamp};
+    }
+    _latestExchangeNs = std::max(_latestExchangeNs, quote_.header.exchange_timestamp);
+    _squareOff->OnQuote(quote_);
+    // Only the strategies trading this token: a tick no longer walks every strategy.
+    if (const auto routes = _tickRoutes.find(quote_.header.product_id); routes != _tickRoutes.end()) {
+        for (RatioLegStrategy* strategy : routes->second) {
+            strategy->OnTick(quote_);
+        }
+    }
+}
+
+// Strategy id order within a token, as the map walk had. Rebuilt only when a strategy is created or erased.
+void MinixStrategy::RebuildTickRoutes() {
+    _tickRoutes.clear();
     for (const auto& [strategyId, strategy] : _strategies) {
-        strategy->OnTick(quote_);
+        for (const int token : strategy->GetTokens()) {
+            auto& route = _tickRoutes[token];
+            if (route.empty() || route.back() != strategy.get()) route.push_back(strategy.get());
+        }
     }
 }
 
 void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
+    NoteResponse(response_);
+    if (response_.hdr_.transaction_code == OMS_REQ_REJ && response_.hdr_.error_code == THROTTLE_LIMIT) {
+        if (!Throttled()) {
+            std::cout << "[THROTTLE] -9996 on uid " << uint32_t{response_.hdr_.uid_.id_} << ": no orders for " << ThrottleBackoffNs / 1'000'000 << " ms" << std::endl;
+        }
+        _throttledUntilNs = aef::infra::get_time_in_nanos() + ThrottleBackoffNs;
+    }
+    if (_manualOrder.OnOrderResponse(response_) || _squareOff->OnOrderResponse(response_)) {
+        return;
+    }
+
     const uint32_t strategyId = response_.hdr_.uid_.composite_id_.strategy_id;
     if (const auto iterator = _strategies.find(strategyId); iterator != _strategies.end()) {
         iterator->second->OnOrderResponse(response_);
@@ -206,25 +278,45 @@ void MinixStrategy::OnOrderResponse(const oms_transaction& response_) {
     }
 }
 
-void MinixStrategy::onBcastData([[maybe_unused]] const aef::infra::product::product_data& product_details_) {}
+void MinixStrategy::onBcastData(const aef::infra::product::product_data& product_details_) { _squareOff->OnBcast(product_details_); }
 
 auto MinixStrategy::doWork() -> int {
-    // steady_clock: a wall-clock step (NTP) must not stall or burst the UI echo.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - _lastSpreadSend >= std::chrono::seconds(1)) {
-        _lastSpreadSend = now;
-        SendStrategySpreadsToUi();
-        std::cout << "[doWork] event_timestamp=" << _eventTimestamp << " _eventCount=" << _eventCount << std::endl;
-        _eventCount = 0;
+    const uint64_t now    = aef::infra::get_time_in_nanos();
+    bool           erased = false;
+    for (auto iterator = _strategies.begin(); iterator != _strategies.end();) {
+        RatioLegStrategy& strategy = *iterator->second;
+        strategy.FlushLog();  // off the event path: logs buffer while ticks and responses are handled
+        if (!strategy.IsDeleted() || !strategy.IsIdle()) {
+            ++iterator;
+            continue;
+        }
+        std::cout << "[doWork] strat=" << iterator->first << " deleted: flat and idle" << std::endl;
+        SendToUi(UiMessageCode_STRATEGY_STATUS, strategy.GetInterface(), StrategyStatusUpdate{iterator->first, StrategyStatus_INACTIVE});
+        iterator = _strategies.erase(iterator);
+        erased   = true;
+    }
+    if (erased) {
+        RebuildTickRoutes();
+    }
+    if (!Throttled() && now - _lastCancelRetryNs >= CancelRetryNs) {
+        _lastCancelRetryNs = now;
+        for (const auto& [strategyId, strategy] : _strategies) {
+            strategy->CancelIfStopped();
+        }
+    }
+
+    if (now - _lastSpreadSendNs >= 1'000'000'000) {
+        _lastSpreadSendNs = now;
+        SendStrategySpreadsToUi(now);
     }
     return 0;
 }
 
 // ═══ Orders ══════════════════════════════════════════════════════════════════
 
-auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_) -> uint32_t {
+auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t quantity_, client_uid& clientUid_, bool hedge_) -> uint32_t {
     // Checked here, once, for every caller: the vendor refuses these too, but logs each refusal.
-    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending()) {
+    if (quantity_ <= 0 || price_ <= 0 || order_.is_response_pending() || (!hedge_ && Throttled())) {
         return 0;
     }
 
@@ -235,7 +327,11 @@ auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t qu
             return 0;
         }
         order_.set_time_stamps(_eventTimestamp, _triggerTimestamp, aef::infra::get_realtime_in_nanos());
-        return order_.update_order(price_, quantity_) ? order_.get_uid() : 0;
+        if (!order_.update_order(price_, quantity_)) {
+            return 0;
+        }
+        NoteRequest(order_.get_uid());
+        return order_.get_uid();
     }
 
     // request_id is a 22-bit field: stop at the limit instead of wrapping and reusing ids.
@@ -248,31 +344,66 @@ auto MinixStrategy::UpdateOrder(OrderObjectT& order_, int32_t price_, int32_t qu
         return 0;
     }
     order_.set_time_stamps(_eventTimestamp, _triggerTimestamp, aef::infra::get_realtime_in_nanos());
-    return order_.place_order(price_, quantity_, clientUid_.id_);
+    const uint32_t uid = order_.place_order(price_, quantity_, clientUid_.id_);
+    if (uid != 0) {
+        NoteRequest(uid);
+    }
+    return uid;
+}
+
+// Takes the request's own slot (a modify of a pending uid restarts it), else a free or expired one, else the oldest.
+void MinixStrategy::NoteRequest(const uint32_t uid_) {
+    PendingRequest* slot = &_pending[0];
+    for (PendingRequest& pending : _pending) {
+        if (pending._uid == uid_) {
+            slot = &pending;
+            break;
+        }
+        if (slot->_uid != 0 && (pending._uid == 0 || pending._sentNs + LagMemoryNs < _latestExchangeNs || pending._sentNs < slot->_sentNs)) {
+            slot = &pending;
+        }
+    }
+    *slot = {uid_, _latestExchangeNs};
+}
+
+// Only the exchange's own answers are a round trip: OMS acks and OMS rejects (throttle -9996) come back in µs.
+// A reject or a trade still ends the wait.
+void MinixStrategy::NoteResponse(const oms_transaction& response_) {
+    const int32_t code = response_.hdr_.transaction_code;
+    if (code != OMS_ORDER_CONFIRMED && code != OMS_ORDER_MODIFY_CONFIRMED && code != OMS_ORDER_CANCELLED && code != OMS_REQ_REJ && code != OMS_TRADE) {
+        return;
+    }
+    const auto uid = uint32_t{response_.hdr_.uid_.id_};
+    for (PendingRequest& pending : _pending) {
+        if (pending._uid != uid) {
+            continue;
+        }
+        if (code != OMS_REQ_REJ && code != OMS_TRADE) {
+            _lastLagNs   = _latestExchangeNs - pending._sentNs;
+            _lastLagAtNs = _latestExchangeNs;
+        }
+        pending = {};
+        return;
+    }
+}
+
+auto MinixStrategy::ExchangeLagNs() const -> uint64_t {
+    uint64_t lag = _lastLagAtNs + LagMemoryNs >= _latestExchangeNs ? _lastLagNs : 0;
+    for (const PendingRequest& pending : _pending) {
+        if (pending._uid != 0 && pending._sentNs + LagMemoryNs >= _latestExchangeNs) {
+            lag = std::max(lag, _latestExchangeNs - pending._sentNs);
+        }
+    }
+    return lag;
 }
 
 // ═══ UI echo ═════════════════════════════════════════════════════════════════
 
-void MinixStrategy::SendStrategySpreadsToUi() {
+void MinixStrategy::SendStrategySpreadsToUi(uint64_t nowNs_) {
     for (const auto& [strategyId, strategy] : _strategies) {
-        StrategySpreadUpdate update{};
-        update._strategyId = strategy->GetStrategyID();
-        update._status     = strategy->GetStatus();
-        update._bcmp       = strategy->GetBCmp()._spread / 100.0F;
-        update._scmp       = strategy->GetSCmp()._spread / 100.0F;
-        update._cost       = static_cast<float>(strategy->GetCost()) / 100.0F;
-        update._flp        = static_cast<float>(strategy->GetFLP()) / 100.0F;
-        update._gap        = static_cast<float>(strategy->GetGap());
-        update._bTrQ       = strategy->GetLongTradedPacks();
-        update._sTrQ       = strategy->GetShortTradedPacks();
-        update._m2m        = static_cast<float>(strategy->GetM2M()) / 100.0F;
-        update._netPL      = static_cast<float>(strategy->GetNetPL()) / 100.0F;
-        update._rlp        = static_cast<float>(strategy->GetRLP()) / 100.0F;
-        update._cutPL      = static_cast<float>(strategy->GetCutPL()) / 100.0F;
-        update._bATP       = static_cast<float>(strategy->GetBATP()) / 100.0F;
-        update._sATP       = static_cast<float>(strategy->GetSATP()) / 100.0F;
-        update._reserved   = static_cast<float>(strategy->GetEventCount());
-        SendToUi(UiMessageCode_STRATEGY_SPREAD, strategy->GetInterface(), update);
+        if (const auto update = strategy->SpreadUpdate(nowNs_)) {
+            SendToUi(UiMessageCode_STRATEGY_SPREAD, strategy->GetInterface(), *update);
+        }
     }
 }
 
@@ -307,7 +438,12 @@ void MinixStrategy::SendOrderResponse(const oms_transaction& response_, int32_t 
             }
         }
     }
+    if (errorCode == -9996) {
+        return;
+    }
+
     OrderResponseInfoT& info = response._response;
+    info._remainingQuantity  = 0;
     info._response           = responseType;
     info._timestamp          = response_.hdr_.exchange_timestamp;
     info._orderId            = response_.packet_.exchange_order_id;

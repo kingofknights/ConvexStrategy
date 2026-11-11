@@ -11,7 +11,7 @@ All prices and values are **paise**. The engine is single-threaded: `OnTick`, `O
 | Component | Purpose |
 | :--- | :--- |
 | [`Convex/MinixStrategy.hpp/.cpp`](Convex/MinixStrategy.cpp) | Entry point (`create` / `destroy`) and hub. Reassembles GUI config, owns the strategies (`std::map<uint32_t, std::unique_ptr<RatioLegStrategy>>`), fans out ticks and order responses, places/modifies orders (`UpdateOrder`), and echoes state to the UI (`SendToUi`). |
-| [`Convex/RatioLeg/RatioLegStrategy.hpp/.cpp`](Convex/RatioLeg/RatioLegStrategy.cpp) | One N-leg ratio spread (2..6 legs). Leg 0 bids passively; the other legs hedge. Runs a long pack and a short pack independently. |
+| [`Convex/RatioLeg/RatioLegStrategy.hpp`](Convex/RatioLeg/RatioLegStrategy.hpp) + `RatioLeg*.cpp` | One N-leg ratio spread (2..6 legs). Leg 0 bids passively; the other legs hedge. Runs a long pack and a short pack independently. |
 | [`Convex/Utils.hpp`](Convex/Utils.hpp) | Cost constants, `StrategyStatus`, `UiMessageCode`, packed UI wire structs (size-checked with `static_assert`). |
 | [`vendor/minix/.../order_instance`](vendor/minix/src/order_instance.cpp) | Vendor wrapper of one order's OMS lifecycle. Read-only. |
 | [`vendor/minix/include/AlgoBase.hpp`](vendor/minix/include/AlgoBase.hpp) | Platform base class (feeds, product details, `send_order`, `sentoUI`, logging). Implemented in `lib/libAlgoBase.so`. |
@@ -70,7 +70,7 @@ No tokens are subscribed at start-up. Each strategy subscribes its own legs when
 | `100001` | `StrategyStatusUpdate` (8 B) | After each config request. |
 | `100002` | `StrategySpreadUpdate` (64 B) | Every ~1 s from `doWork` (`steady_clock`): BCmp, SCmp, cost, FLP, gap, traded packs, M2M, NLP, RLP, CLP, B-ATP, S-ATP, and ticks processed since the last send (in `_reserved`, reset on read). |
 | `100003` | `ExternalOrderResponse` | Each placed / modified / cancelled / traded / rejected response. `_errorCode`: OMS `reason_code` when the header error is -9994, exchange error code when -9995, else the header error code; the exchange error code when the header error is not negative. |
-| `100004` | `TradeTracer` (55 B) | Each time whole packs complete (slippage report). |
+| `100004` | `TradeTracer` (71 B) | Each time whole packs complete (slippage report), and on each reverted bid (`_message` = `PartialFill`). |
 
 ---
 
@@ -139,7 +139,8 @@ $$\text{Spread} = \text{AdjustGap}\Big(\sum_{i=0}^{N-1} \text{SideSign}_i \times
 | :--- | :--- |
 | `DONE` | Lots left: $\text{remaining} = \text{\_totalPacks} \times \text{Ratio}_0 - \text{tradedLots}_0 > 0$. |
 | `NO_PRICE` | Every leg has a price on its crossing side (valid spread). |
-| `HEDGE_DEPTH` | Each hedge leg, on the side it takes: `OrderDepth` levels with orders, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `OrderDepth` levels. |
+| `HEDGE_DEPTH` | Each hedge leg, on the side it takes: at least `OrderDepth` orders summed over all 5 levels, `PriceDepth` levels with prices, and at least `_requiredHedgeDepth` quantity in the first `PriceDepth` levels. |
+| `BID_DEPTH` | Leg 0, on its own side (where the bid rests): `AllowedBidDepth` levels with prices (0 = no check). |
 | `UNREACHABLE` | The target price of leg 0 (below) is > 0. |
 
 All gates pass → `BID`: **one LIMIT order on leg 0 at the target price** (`TargetBidPrice`, "reverse bid"). It is the leg 0 price that makes the spread exactly the target, with every hedge leg at its crossing touch:
