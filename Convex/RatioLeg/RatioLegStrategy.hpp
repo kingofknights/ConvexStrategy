@@ -55,6 +55,8 @@ class RatioLegStrategy {
 
         LegArrayT<uint64_t> _rejectedNs{};           // monotonic ns of each leg order's last reject, 0 for none
         uint64_t            _reverseRejectedNs = 0;  // same for _reverse
+        LegArrayT<bool>     _exchangeRejected{};     // that reject came from the exchange (EXCHG_ERROR): it waits ExchangeRejectWaitNs
+        bool                _reverseExchangeRejected = false;
 
         double   _cushion   = 0.0;  // hedge legs' level 0 to level 2 loss, refreshed every CushionRefreshNs
         uint64_t _cushionNs = 0;
@@ -155,8 +157,12 @@ class RatioLegStrategy {
     static constexpr uint64_t GateLogNs = 1'000'000'000;
     // Wait after a reject before an order is sent again (see RejectedNs). RejectWaitNs keeps one order at about the
     // OMS line rate (nse_line_rate 95/s on sandbox10).
-    static constexpr uint64_t EntryRejectWaitNs = 1'000'000'000;
-    static constexpr uint64_t RejectWaitNs      = 10'000'000;
+    static constexpr uint64_t EntryRejectWaitNs    = 1'000'000'000;
+    static constexpr uint64_t RejectWaitNs         = 10'000'000;
+    static constexpr uint64_t ExchangeRejectWaitNs = 1'000'000'000;  // an exchange reject (16643 sell limit) does not clear in ms
+    // MaxReverses reverses within ReverseWindowNs stop the strategy's entries: each one costs the spread.
+    static constexpr size_t   MaxReverses     = 3;
+    static constexpr uint64_t ReverseWindowNs = 60'000'000'000;
 
     void EvaluateBidding(Pack& pack_);
     void FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float market_, int quantity_);
@@ -177,7 +183,8 @@ class RatioLegStrategy {
     void Hold(Pack& pack_, std::string_view hold_, size_t leg_ = NoLeg);
     void LogHold(Pack& pack_);
     void TrackTouch(size_t leg_, const Quote& quote_);
-    static auto RejectedNs(Pack& pack_, const OrderObjectT& order_, size_t leg_) -> uint64_t&;
+    [[nodiscard]] static auto CloseBlocked(const Pack& pack_, const OrderObjectT& order_, size_t leg_) -> bool;
+    void NoteReverse();
     static auto RejectedWithin(uint64_t rejectedNs_, uint64_t waitNs_) -> bool;
     void        UpdateOrder(Pack& pack_, size_t leg_, int price_, int quantity_, std::string_view reason_);
     void        PullAll(std::string_view reason_);
@@ -202,6 +209,7 @@ class RatioLegStrategy {
     void               WriteTimestamp() const;
 
     [[nodiscard]] static auto Price(const Quote& quote_, ORDER_SIDE side_, size_t level_) -> int;
+    [[nodiscard]] static auto DeepPrice(const Quote& quote_, ORDER_SIDE side_) -> int;
     [[nodiscard]] static auto FillPrice(const Quote& quote_, ORDER_SIDE side_, int quantity_) -> double;
     [[nodiscard]] static auto HasLevels(const Quote& quote_, ORDER_SIDE side_, size_t depth_) -> bool;
     [[nodiscard]] static auto QuantityUpTo(const Quote& quote_, ORDER_SIDE side_, size_t depth_) -> int;
@@ -266,6 +274,8 @@ class RatioLegStrategy {
     size_t _allowedBidDepth   = 0;
 
     double   _unwindPnL      = 0.0;
+    std::array<uint64_t, MaxReverses> _reverseNs{};  // monotonic ns of the last MaxReverses reverses, a ring
+    size_t                            _reverseCount = 0;  // reverses since the last apply
     uint64_t _depthCheckedNs = 0;
 
     StrategySpreadUpdate _spread{};

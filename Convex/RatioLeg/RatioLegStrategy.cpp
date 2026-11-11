@@ -155,6 +155,7 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
     _status      = status_;
     _deleted     = false;
     _userStopped = false;  // re-applied after a GUI STOP: open packs are hedged or reversed again
+    _reverseCount = 0;     // the reverse breaker starts over
     if (_squaredOff && PacksWhole()) {
         _squaredOff = false;  // re-applied after a square-off with nothing left open: trades on from the kept lots
     }
@@ -323,7 +324,8 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
         if (leg == BiddingLeg && reverse.get_uid() == uid) {
             reverse.handle_confirmation(response_);
             if (code == OMS_REQ_REJ) {
-                reversing->_reverseRejectedNs = aef::infra::get_time_in_nanos();
+                reversing->_reverseRejectedNs       = aef::infra::get_time_in_nanos();
+                reversing->_reverseExchangeRejected = response_.hdr_.error_code == EXCHG_ERROR;
             }
             LogResponse(*reversing, leg, OrderSnapshot{reverse}, response_, true);
             if (code == OMS_TRADE) {
@@ -338,7 +340,8 @@ void RatioLegStrategy::OnOrderResponse(const oms_transaction& response_) {
     if (order.get_uid() == uid) {
         order.handle_confirmation(response_);
         if (code == OMS_REQ_REJ) {
-            pack._rejectedNs[leg] = aef::infra::get_time_in_nanos();
+            pack._rejectedNs[leg]       = aef::infra::get_time_in_nanos();
+            pack._exchangeRejected[leg] = response_.hdr_.error_code == EXCHG_ERROR;
         }
     }
     // Hedges for a fill go out before the [ORDER-IN] line; a hedge may reuse this order, so its state is taken now.
@@ -383,9 +386,8 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
                          }) *
                          _lotSize;
     LegArrayT<int>             prices{};
-    LegArrayT<int>             deeper{};
     const std::optional<float> market = MarketSpread(pack_, &prices, 0, quantity);
-    if (!market or !MarketSpread(pack_, &deeper, 2)) {
+    if (!market) {
         Pull(pack_, BiddingLeg, "no price on a leg, or a hedge book thinner than its hedge");
         return;
     }
@@ -398,16 +400,18 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         return;
     }
 
-    // Cushion: what the hedge legs lose two levels deeper, the level they are hedged at. The bidding leg's own depth is ours to set, so it is left out.
-    // Refreshed at most once a second, so level-2 noise alone does not move the bid.
+    // Cushion: what the hedge legs lose from what their hedges would pay walking the book (already in market) down to the
+    // level they are sent at (DeepPrice), so the book walk is not counted twice. 0 once the walk reaches that level.
+    // The bidding leg's own depth is ours to set, so it is left out. Refreshed at most once a second, so level-2 noise alone does not move the bid.
     if (const uint64_t now = aef::infra::get_time_in_nanos(); now - pack_._cushionNs >= CushionRefreshNs) {
-        pack_._cushion   = 0.0;
-        pack_._cushionNs = now;
+        double deeper = 0.0;
         for (size_t leg = 0; leg < _legCount; ++leg) {
             if (leg != BiddingLeg) {
-                pack_._cushion += static_cast<double>(prices[leg] - deeper[leg]) * pack_._signedRatio[leg];
+                deeper += static_cast<double>(DeepPrice(_quote[leg], pack_._oppositeSide[leg])) * pack_._signedRatio[leg];
             }
         }
+        pack_._cushion   = std::max(0.0, HedgeSum(pack_, quantity).value_or(deeper) - deeper);
+        pack_._cushionNs = now;
     }
     const double cushion = *market >= pack_._targetSpread ? 0 : pack_._cushion;
 
@@ -507,14 +511,15 @@ void RatioLegStrategy::FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float
     UpdateOrder(pack_, BiddingLeg, prices_[BiddingLeg], quantity_, "IOC");
 }
 
-// IOC mode: leg 0 lots short of a whole pack (an IOC part fill) wait for the next IOC to complete the pack while the
-// spread holds. Once it is gone, or the strategy is stopped, they are sent back like a reverse at the fill.
+// Leg 0 lots short of a whole pack (an IOC part fill, or a bid part fill when leg 0's ratio is above 1) have no hedge:
+// the hedge legs only trade whole packs. They wait for leg 0's order to complete the pack while it works, or while the
+// spread for a whole pack holds. Once it is gone, or the strategy is stopped, they are sent back like a reverse at the fill.
 auto RatioLegStrategy::ReversePartPack(Pack& pack_) -> bool {
     const int lots = pack_._tradedLots[BiddingLeg] - (pack_._tradedPack * _ratios[BiddingLeg]);
-    if (_isBidding || lots <= 0 || pack_._orders[BiddingLeg]->get_current_state() != IDLE) {
+    if (lots <= 0 || pack_._orders[BiddingLeg]->get_current_state() != IDLE) {
         return false;
     }
-    const std::optional<float> market = MarketSpread(pack_);
+    const std::optional<float> market = MarketSpread(pack_, nullptr, 0, _ratios[BiddingLeg] * _lotSize);
     if (IsActive() && market && *market >= pack_._targetSpread) {
         return false;
     }
@@ -526,6 +531,9 @@ auto RatioLegStrategy::ReversePartPack(Pack& pack_) -> bool {
     pack_._reverseLots += lots;
     pack_._reverseValue += value;
     Reverse(pack_);
+    if (IsActive()) {
+        NoteReverse();
+    }
     WriteLog("[PART-PACK] {} leg 0 {} lots short of a pack, {}: reversing\n", PackName(pack_), lots, IsActive() ? "spread gone" : "strategy stopped");
     return true;
 }
@@ -606,12 +614,12 @@ void RatioLegStrategy::HedgeEarly(Pack& pack_) {
     SendHedges(pack_, missingLots, "EARLY-HEDGE");
 }
 
-// Sends every leg with missing lots at the opposite side's index 2, highest price first, throttle or not.
+// Sends every leg with missing lots at the opposite side's DeepPrice (index 2, or the deepest shown), highest price first, throttle or not.
 void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots_, std::string_view reason_) {
     LegArrayT<int>    prices{};
     LegArrayT<size_t> order{};
     for (size_t leg = 0; leg < _legCount; ++leg) {
-        prices[leg] = Price(_quote[leg], pack_._oppositeSide[leg], 2);
+        prices[leg] = DeepPrice(_quote[leg], pack_._oppositeSide[leg]);
         order[leg]  = leg;
     }
     const std::span legs = std::span{order}.first(_legCount);
@@ -623,9 +631,9 @@ void RatioLegStrategy::SendHedges(Pack& pack_, const LegArrayT<int>& missingLots
     }
 }
 
-// Sends leg 0's unwanted lots back at its own side's index 2 (a BUY sells into the bids), repriced every tick until filled.
+// Sends leg 0's unwanted lots back at its own side's DeepPrice (a BUY sells into the bids), repriced every tick until filled.
 void RatioLegStrategy::Reverse(Pack& pack_) {
-    const int price = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2);
+    const int price = DeepPrice(_quote[BiddingLeg], pack_._sides[BiddingLeg]);
     Send(pack_, *pack_._reverse, BiddingLeg, Opposite(pack_._sides[BiddingLeg]), price, pack_._reverseLots * _lotSize, "REVERSE");
 }
 
@@ -670,6 +678,7 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
             pack_._reverseValue += static_cast<uint64_t>(price) * static_cast<uint64_t>(lots * _lotSize);
             Pull(pack_, BiddingLeg, "reverse cheaper than slippage, reversing leg 0");
             Reverse(pack_);
+            NoteReverse();
             WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} > reverse loss {:.2f} per pack: REVERSE {} lots, book=[{}]\n",
                      PackName(pack_), quantity, price, exit->_slippage, exit->_reverseLoss, pack_._reverseLots, BookText());
             return;
@@ -881,7 +890,7 @@ auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_, int quantity_) c
     constexpr double Unknown = std::numeric_limits<double>::infinity();
 
     double reverse = Unknown;
-    if (const int back = Price(_quote[BiddingLeg], pack_._sides[BiddingLeg], 2); back > 0) {
+    if (const int back = DeepPrice(_quote[BiddingLeg], pack_._sides[BiddingLeg]); back > 0) {
         const bool   bought   = pack_._sides[BiddingLeg] == BUY_SIDE;
         const double buyRate  = _isOption[BiddingLeg] ? OptionBuyCost : FutureBuyCost;
         const double sellRate = _isOption[BiddingLeg] ? OptionSellCost : FutureSellCost;
@@ -956,8 +965,24 @@ auto RatioLegStrategy::FindLegIndex(int token_) const -> size_t {
 // A rejected order is reset to idle by the vendor, so the next tick sent it again: millions of RMS -91000 rejects a day
 // on sandbox10. Each order waits after a reject: an entry (bid or IOC) EntryRejectWaitNs, anything closing a position
 // (hedge, reverse, cancel) RejectWaitNs, since an RMS reject can clear within the millisecond.
-auto RatioLegStrategy::RejectedNs(Pack& pack_, const OrderObjectT& order_, size_t leg_) -> uint64_t& {
-    return &order_ == pack_._reverse.get() ? pack_._reverseRejectedNs : pack_._rejectedNs[leg_];
+// A hedge, reverse or cancel after a reject: RejectWaitNs after an RMS reject, which can clear within the millisecond,
+// ExchangeRejectWaitNs after an exchange one (sandbox10 2026-11-11: 16643 sell limit rejects every 10 ms, ~20k of them).
+auto RatioLegStrategy::CloseBlocked(const Pack& pack_, const OrderObjectT& order_, size_t leg_) -> bool {
+    const bool reverse  = &order_ == pack_._reverse.get();
+    const bool exchange = reverse ? pack_._reverseExchangeRejected : pack_._exchangeRejected[leg_];
+    return RejectedWithin(reverse ? pack_._reverseRejectedNs : pack_._rejectedNs[leg_], exchange ? ExchangeRejectWaitNs : RejectWaitNs);
+}
+
+// MaxReverses reverses within ReverseWindowNs: the fills keep costing the spread (sandbox10 2026-11-11: 281 reverses, ~₹1650),
+// so entries stop. Stop() keeps sending back the lots already open. Re-applying starts the count over.
+void RatioLegStrategy::NoteReverse() {
+    const uint64_t now                       = aef::infra::get_time_in_nanos();
+    _reverseNs[_reverseCount % MaxReverses] = now;
+    ++_reverseCount;
+    if (_reverseCount >= MaxReverses && now - _reverseNs[_reverseCount % MaxReverses] < ReverseWindowNs && IsActive()) {
+        Stop("reverse breaker: 3 reverses within 60 s");
+        WriteLog("[BREAKER] strat={} {} reverses within {} s: entries stopped, re-apply to trade again\n", _strategyId, MaxReverses, ReverseWindowNs / 1'000'000'000);
+    }
 }
 
 auto RatioLegStrategy::RejectedWithin(uint64_t rejectedNs_, uint64_t waitNs_) -> bool {
@@ -973,7 +998,7 @@ void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int qua
 }
 
 void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_) {
-    if (Silent() || RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
+    if (Silent() || CloseBlocked(pack_, order_, leg_)) {
         return;
     }
     OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};
@@ -983,7 +1008,7 @@ void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDE
 
 void RatioLegStrategy::Pull(Pack& pack_, size_t leg_, std::string_view reason_) {
     OrderObjectT& order = *pack_._orders[leg_];
-    if (!_hub->Throttled() && !RejectedWithin(pack_._rejectedNs[leg_], RejectWaitNs) && order.is_order_confirmed() && !order.is_response_pending() &&
+    if (!_hub->Throttled() && !CloseBlocked(pack_, order, leg_) && order.is_order_confirmed() && !order.is_response_pending() &&
         order.cancel_order()) {
         _hub->NoteRequest(order.get_uid());
         RecordOrderOut({&pack_, leg_, pack_._sides[leg_], "CANCEL", order.get_uid(), order.get_open_price(), order.get_open_price(), order.get_open_qty(), 0, reason_});
@@ -1105,6 +1130,16 @@ auto RatioLegStrategy::LotsText(const Pack& pack_) const -> std::string {
 
 auto RatioLegStrategy::Price(const Quote& quote_, ORDER_SIDE side_, size_t level_) -> int {
     return side_ == BUY_SIDE ? quote_.message.bid_levels[level_].price : quote_.message.ask_levels[level_].price;
+}
+
+// Level 2 of side_, or the deepest shown when the book has fewer levels: where hedges and reverses are sent. 0 for an empty side.
+auto RatioLegStrategy::DeepPrice(const Quote& quote_, ORDER_SIDE side_) -> int {
+    for (size_t level = 3; level-- > 0;) {
+        if (const int price = Price(quote_, side_, level); price > 0) {
+            return price;
+        }
+    }
+    return 0;
 }
 
 // Average price of taking quantity_ from side_'s levels, best first; 0 when the shown levels hold less than quantity_.

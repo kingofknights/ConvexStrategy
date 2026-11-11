@@ -1016,6 +1016,50 @@ void ReverseWhenHedgeBookTooThin() {
     std::printf("  leg2 book thinner than its hedge at the fill: no hedge, SELL 535 bought back @515\n");
 }
 
+// Leg2 shows only 2 asks (325, 330): the hedge goes at the deepest shown, 330, instead of no price at index 2 (never sent).
+void HedgeAtDeepestShownLevel() {
+    constexpr int ID = 82;
+    RestBidAt535(ID);
+    exchange::Tick(LEG2, 315, 325, false, 300, aef::infra::quote::QUOTE_LEVELS, 2);
+    exchange::FillPassive(ID, LEG0, 3 * LOT);
+    CHECK(NthPlacePrice(ID, LEG2, 1) == 330 && Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  2-level hedge book: leg2 hedge sent at 330, the deepest shown, filled\n");
+}
+
+// The leg2 hedge is rejected by the exchange: it is not resent for a second (an RMS reject waits 10 ms).
+void ExchangeRejectWaitsASecond() {
+    constexpr int ID = 83;
+    SendConfig(RatioConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::rejectToken = LEG2;
+    exchange::rejectCode  = EXCHG_ERROR;
+    exchange::Tick(LEG0, 540, 550);  // one pack: the bid crosses, leg2's hedge is rejected by the exchange
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    exchange::Tick(LEG2, 315, 325);
+    CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 1 && Position(ID, LEG2) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    exchange::Tick(LEG2, 315, 325);
+    CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  exchange reject: leg2 hedge held 1 s, not every 10 ms, then filled\n");
+}
+
+// Bid mode, leg 0 ratio 3: 1 of 3 lots fills, then leg1's ask runs to 870. The bid is pulled and the lot, which no hedge
+// covers, is bought back instead of left open.
+void BidPartPackReversed() {
+    constexpr int ID = 84;
+    RestBidAt535(ID);
+    exchange::FillPassive(ID, LEG0, LOT);  // 3 x 535 - 780 - 650 = 175: kept, waiting for the rest of the pack
+    CHECK(Position(ID, LEG0) == -LOT && Position(ID, LEG1) == 0);
+    exchange::Tick(LEG1, 800, 870);  // the bid is pulled
+    exchange::Tick(LEG0, 505, 515);  // 3 x 505 - 870 - 650 = -5: the lot is bought back
+    CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0 && TracerRows(ID, "Reverse").size() == 1);
+    SendConfig(RatioConfig(ID, "Stop"));
+    std::printf("  bid part pack: 1 of 3 lots, spread gone, bid pulled, lot bought back\n");
+}
+
 // The cancel at STOP is throttled (-9996): for a second nothing goes out, ticks or not (sandbox10 2026-11-03 14:27:45
 // resent on every tick and stayed throttled). After it doWork cancels the bid with no tick.
 void ThrottledStopCancelRetried() {
@@ -1302,6 +1346,28 @@ void IocThinTopPricedByQuantity() {
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT && TracerRows(ID, "Reverse").empty());
     SendConfig(IocConfig(ID, "Stop"));
     std::printf("  IOC thin top: 50 @325 cannot carry the 130 hedge, priced 346.54 by quantity, no IOC; fired once the top held it\n");
+}
+
+// Every IOC fill is reversed (leg1's ask runs to 870 before it lands): the third reverse within 60 s stops entries.
+void ReverseBreakerStopsEntries() {
+    constexpr int ID = 81;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG2, 315, 325);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        exchange::Tick(LEG0, 515, 525);         // market 115: nothing fires while leg1 comes back
+        exchange::Tick(LEG1, 770, 780);
+        exchange::Tick(LEG0, 525, 535, false);  // market 145: IOC SELL 525 sent
+        exchange::Tick(LEG1, 800, 870, false);  // the spread goes before it lands
+        exchange::Pump();                       // filled, slippage 85 > reverse loss: bought back
+    }
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 3 && Position(ID, LEG0) == 0 && TracerRows(ID, "Reverse").size() == 3);
+    SendConfig(IocConfig(ID, "Applied"));  // re-applied: trades again
+    exchange::Tick(LEG0, 515, 525);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 4 && Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  reverse breaker: 3 IOCs reversed within 60 s, the 4th held back; re-apply trades again\n");
 }
 
 // GUI square-off with 2 IOC lots of a pack open: the strategy stops and keeps them, but sends no IOC, hedge or part-pack reverse afterwards.
@@ -1680,6 +1746,9 @@ int main() {
     ReversePartialCancelsRest();
     EarlyHedgeSkippedThenCompleted();
     ReverseWhenHedgeBookTooThin();
+    HedgeAtDeepestShownLevel();
+    ExchangeRejectWaitsASecond();
+    BidPartPackReversed();
     ThrottledStopCancelRetried();
     HedgesSentWhileThrottled();
     RejectedBidWaitsASecond();
@@ -1695,6 +1764,7 @@ int main() {
     IocReverseWhenSpreadGone();
     IocGappedHedgeCompletes();
     IocThinTopPricedByQuantity();
+    ReverseBreakerStopsEntries();
     SpreadSentOnlyOnChange();
     QuietTicks();
     ManualOrders();
