@@ -520,7 +520,7 @@ auto RatioLegStrategy::ReversePartPack(Pack& pack_) -> bool {
         return false;
     }
     const std::optional<float> market = MarketSpread(pack_, nullptr, 0, _ratios[BiddingLeg] * _lotSize);
-    if (IsActive() && market && *market >= pack_._targetSpread) {
+    if (IsActive() && market && *market >= pack_._targetSpread - static_cast<float>(std::max(_allowedSlippage, 0))) {  // within AllowedSlippage: keep
         return false;
     }
     // Packs already traded are reported, so the unreported value belongs to these lots.
@@ -679,8 +679,8 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
             Pull(pack_, BiddingLeg, "reverse cheaper than slippage, reversing leg 0");
             Reverse(pack_);
             NoteReverse();
-            WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} > reverse loss {:.2f} per pack: REVERSE {} lots, book=[{}]\n",
-                     PackName(pack_), quantity, price, exit->_slippage, exit->_reverseLoss, pack_._reverseLots, BookText());
+            WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} > AllowedSlippage {} and > reverse loss {:.2f} per pack: REVERSE {} lots, book=[{}]\n",
+                     PackName(pack_), quantity, price, exit->_slippage, _allowedSlippage, exit->_reverseLoss, pack_._reverseLots, BookText());
             return;
         }
     }
@@ -695,8 +695,8 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
     WriteLog("[TRADE EVENT] index: {}, token: {}, side: {} ({}), price: {}, quantity: {}, pack: {}, lots: [{}]\n",
              leg_, _tokens[leg_], SideName(side), static_cast<int>(side), price, quantity, PackName(pack_), LotsText(pack_));
     if (exit && exit->_slippage > 0) {
-        WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f} <= reverse loss {:.2f} per pack: COMPLETE\n",
-                 PackName(pack_), quantity, price, exit->_slippage, exit->_reverseLoss);
+        WriteLog("[EXIT-CHOICE] {} leg 0 {}@{}: slippage {:.2f}, AllowedSlippage {}, reverse loss {:.2f} per pack: COMPLETE\n",
+                 PackName(pack_), quantity, price, exit->_slippage, _allowedSlippage, exit->_reverseLoss);
     }
     if (quantity % _lotSize != 0) {
         WriteLog("[TRADE EVENT] WARNING quantity {} is not a multiple of lot size {}; {} units not counted\n", quantity, _lotSize, quantity % _lotSize);
@@ -885,7 +885,8 @@ auto RatioLegStrategy::SpreadPresent(const Pack& pack_, int price_, int quantity
 // Complete: the hedge legs at what their hedges for quantity_ would pay walking the book (HedgeSum), the same price the entry
 // (bid back-solve, IOC gate) used, so a fill the entry judged good is hedged, not reversed (sandbox10 2026-11-11: index 2
 // here reversed every crossing fill). A hedge leg whose book cannot fill its hedge cannot be counted on, so leg 0 is reversed. Reverse: leg 0 at its own side's index 2, where Reverse() sends, plus both leg 0 trades' charges.
-// Reversed only when the slippage is above 0 and above the reverse loss. Leg 0 with no price to reverse into is completed. No AllowedSlippage cap: ReportPacks stops the strategy after the pack.
+// Reversed only when the slippage is above AllowedSlippage (the user accepts that much) and above the reverse loss. Leg 0 with
+// no price to reverse into is completed. A completed pack slipped past AllowedSlippage still stops the strategy in ReportPacks.
 auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_, int quantity_) const -> ExitChoice {
     constexpr double Unknown = std::numeric_limits<double>::infinity();
 
@@ -905,7 +906,7 @@ auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_, int quantity_) c
     }
     const double slippage = pack_._targetSpread - AdjustGap((static_cast<double>(fill_) * pack_._signedRatio[BiddingLeg]) + *hedges);
     // Target met: the pack is completed, even when a buy-back would now be in profit.
-    return {slippage, reverse, slippage > 0 && slippage > reverse};
+    return {slippage, reverse, slippage > std::max(_allowedSlippage, 0) && slippage > reverse};
 }
 
 auto RatioLegStrategy::AdjustGap(double spread_) const -> double {

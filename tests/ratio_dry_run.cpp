@@ -945,12 +945,12 @@ void EarlyHedgePulledWithoutFill() {
     std::printf("  'S' guessed wrong, hedges unfilled: leg 0 held at 535, STOP cancels it, early hedges pulled, flat\n");
 }
 
-// Leg 0 fills after leg1's asks jumped to 820: 3 x 535 - 820 - 2 x 325 = 135 misses the 140 target, so no hedge.
+// Leg 0 fills after leg1's asks jumped to 830: 3 x 535 - 830 - 2 x 325 = 125, slippage 15 above AllowedSlippage 10, so no hedge.
 // Leg 0 is bought back at the ask's index 2, a "Reverse" row goes to the Trade Tracer, and bidding goes on.
 void ReverseWhenSpreadGone() {
     constexpr int ID = 63;
     RestBidAt535(ID);
-    exchange::Tick(LEG1, 800, 820, false);     // P1 550 is past 5 ask levels: the bid's cancel is still in flight
+    exchange::Tick(LEG1, 800, 830, false);     // P1 is past 5 ask levels: the bid's cancel is still in flight
     exchange::FillPassive(ID, LEG0, 3 * LOT);  // the SELL 535 fills first; BUY 525 takes the 515 ask
     CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
     CHECK(PlacesOf(ID, LEG0, BUY_SIDE) == 1 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
@@ -1311,6 +1311,22 @@ void IocReverseWhenSpreadGone() {
     CHECK(TracerRows(ID, "Reverse").size() == 1);
     SendConfig(IocConfig(ID, "Stop"));
     std::printf("  IOC fill with the spread gone: SELL 525 bought back, no hedge\n");
+}
+
+// Same fill as IocReverseWhenSpreadGone (slippage 85), but AllowedSlippage 100: the user accepts it, so the pack is hedged.
+void IocSlippageWithinAllowedCompletes() {
+    constexpr int  ID              = 85;
+    nlohmann::json config          = IocConfig(ID, "Applied");
+    config["Params"]["AllowedSlippage"] = 100;
+    SendConfig(config);
+    exchange::Tick(LEG1, 770, 780);
+    exchange::Tick(LEG2, 315, 325);
+    exchange::Tick(LEG0, 525, 535, false);
+    exchange::Tick(LEG1, 800, 870, false);
+    exchange::Pump();
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT && TracerRows(ID, "Reverse").empty());
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  slippage 85 within AllowedSlippage 100: hedged, not bought back\n");
 }
 
 // Leg2's asks gap after the touch (325, 360, 400). The touch holds 300, the hedge needs 130, so entry and exit both price leg2
@@ -1762,6 +1778,7 @@ int main() {
     IocModeSwitch();
     IocSweepStopHolds();
     IocReverseWhenSpreadGone();
+    IocSlippageWithinAllowedCompletes();
     IocGappedHedgeCompletes();
     IocThinTopPricedByQuantity();
     ReverseBreakerStopsEntries();
