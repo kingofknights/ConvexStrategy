@@ -1263,6 +1263,27 @@ void IocReverseWhenSpreadGone() {
     std::printf("  IOC fill with the spread gone: SELL 525 bought back, no hedge\n");
 }
 
+// Leg2's asks gap after the touch (325, 360, 400): the touch makes the target (145 >= 140) but a fill would be reversed at
+// once (index 2: 3 x 525 - 790 - 2 x 400 = -15, slippage 155 > reverse loss ~60). No IOC fires; once the gap closes, it does.
+void IocHeldWhenFillWouldReverse() {
+    constexpr int ID = 79;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    Quote gapped                       = exchange::BookQuote(LEG2, 315, 325);
+    gapped.message.ask_levels[1].price = 360;
+    gapped.message.ask_levels[2].price = 400;
+    exchange::Publish(gapped, true);
+    for (int tick = 0; tick < 5; ++tick) {
+        exchange::Tick(LEG0, 525, 535);
+    }
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0 && PlacesOf(ID, LEG0, BUY_SIDE) == 0 && Position(ID, LEG0) == 0);
+    exchange::Tick(LEG2, 315, 325);  // gap closed: index 2 at 335, slippage 25 < reverse loss
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 0);
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC gapped hedge: no IOC while a fill would be reversed, fired once the gap closed\n");
+}
+
 // GUI square-off with 2 IOC lots of a pack open: the strategy stops and keeps them, but sends no IOC, hedge or part-pack reverse afterwards.
 void IocSquareOffKeepsLots() {
     constexpr int ID = 77;
@@ -1652,6 +1673,7 @@ int main() {
     IocModeSwitch();
     IocSweepStopHolds();
     IocReverseWhenSpreadGone();
+    IocHeldWhenFillWouldReverse();
     SpreadSentOnlyOnChange();
     QuietTicks();
     ManualOrders();

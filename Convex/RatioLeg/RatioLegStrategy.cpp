@@ -495,6 +495,12 @@ void RatioLegStrategy::FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float
         Hold(pack_, "hedge touch younger than HedgeHoldUs", leg);
         return;
     }
+    // OnTrade would reverse this fill at once (hedges at index 2 miss the target by more than the reverse costs), and the
+    // unchanged book would fire the next IOC straight after: a buy-and-reverse loop (sandbox10 2026-11-11, strats 3/4).
+    if (ChooseExit(pack_, prices_[BiddingLeg])._reverse) {
+        Hold(pack_, "IOC: fill would be reversed, hedges at index 2 miss the target");
+        return;
+    }
     Hold(pack_, {});
     UpdateOrder(pack_, BiddingLeg, prices_[BiddingLeg], quantity_, "IOC");
 }
