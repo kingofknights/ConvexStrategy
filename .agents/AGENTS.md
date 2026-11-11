@@ -66,7 +66,7 @@ ConvexStrategy/
 | `SUBSCRIBED` / `SUBSCRIBE` / `ACTIVE` | Creates the strategy (or applies `Params` to an existing one) and sets `StrategyStatus_ACTIVE`: market data flows, no orders. Creation throws, and nothing is subscribed, when a leg has no product details. |
 | `APPLIED` / `APPLY` | Same create-or-update, then `StrategyStatus_APPLIED`: bidding and hedging run. |
 | `NEW` | Create-or-update, then `SetStatus(INACTIVE)`, which calls `Stop()`: status ACTIVE. |
-| `UNSUBSCRIBED` / `UNSUBSCRIBE` / `STOP` | `Stop()`: status ACTIVE (market data, UI reports, no new entries until re-APPLIED), bidding orders cancelled. An unhedged pack keeps hedging until flat. |
+| `UNSUBSCRIBED` / `UNSUBSCRIBE` / `STOP` | `UserStopped()`: status ACTIVE (market data, UI reports), every live order cancelled (bid, hedges, reverse). Lots stay as traded; no hedge, reverse or entry goes out until re-APPLIED, which hedges or reverses an open pack again. An open pack is the user's. |
 | `DELETED` / `DELETE` | `Stop()`, then the strategy is destroyed (`unique_ptr` erase). Products stay subscribed; an unhedged delete is the user's responsibility. |
 
 After every request the UI receives the strategy's actual status on code `100001`. `Stop()` leaves a strategy ACTIVE, so INACTIVE means it does not exist (creation failed or deleted).

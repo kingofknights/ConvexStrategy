@@ -630,7 +630,7 @@ void FullCycle() {
                 Position(ID, LEG0), Position(ID, LEG1), Position(ID, LEG2), spread._bTrQ, spread._bATP, spread._rlp);
 }
 
-// STOP while a crossing bid awaits the exchange: the bid still fills, and its hedges complete after STOP.
+// STOP while a crossing bid awaits the exchange: the bid still fills, but STOP hands the position to the user: no hedge.
 void StopRacesPendingBid() {
     constexpr int ID = 11;
     SendConfig(RatioConfig(ID, "Applied"));
@@ -642,16 +642,17 @@ void StopRacesPendingBid() {
     SendConfig(RatioConfig(ID, "Stop"), false);  // STOP arrives before the exchange answers
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);  // Stop() keeps the strategy ACTIVE: feed and UI on, no entries
 
-    exchange::Pump();  // bid fills -> hedges cross
-    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
+    exchange::Pump();  // bid fills, no hedge
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
     CHECK(exchange::LiveOrdersOf(ID) == 0);
     TickAllLegs();
-    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
-    std::printf("  stop race: in-flight bid filled, hedged after STOP, flat\n");
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && Position(ID, LEG1) == 0);  // stopped: no new bid, no hedge, no reverse
+    std::printf("  stop race: in-flight bid filled after STOP, left unhedged for the user\n");
 }
 
-// The bid fills, leg2's asks run away before its hedge arrives; then STOP. Hedging must continue after STOP until flat.
-void StopKeepsHedging() {
+// The bid fills, leg2's asks run away before its hedge arrives; then STOP. STOP cancels the resting leg2 hedge and sends
+// nothing more: the user owns the open pack.
+void StopDropsHedging() {
     constexpr int ID = 13;
     SendConfig(RatioConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
@@ -664,12 +665,17 @@ void StopKeepsHedging() {
 
     SendConfig(RatioConfig(ID, "Stop"));
     CHECK(LastStatusEcho()._status == StrategyStatus_ACTIVE);
-    exchange::Tick(LEG2, 315, 330);  // asks come back: the hedge is repriced to index 2 and fills
-    CHECK(Position(ID, LEG2) == 2 * LOT);
-    CHECK(exchange::LiveOrdersOf(ID) == 0);
+    CHECK(exchange::LiveOrdersOf(ID) == 0);  // resting leg2 hedge cancelled
+    exchange::Tick(LEG2, 315, 330);          // asks come back: no hedge
     TickAllLegs();
-    CHECK(exchange::LiveOrdersOf(ID) == 0);  // stopped: no new bid
-    std::printf("  stop keeps hedging: leg2 hedge repriced after STOP, filled, flat\n");
+    CHECK(Position(ID, LEG2) == 0 && exchange::LiveOrdersOf(ID) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 1);
+    SendConfig(RatioConfig(ID, "Applied"));  // re-applied: the open pack is hedged again
+    exchange::Tick(LEG2, 315, 325);
+    CHECK(Position(ID, LEG2) == 2 * LOT && PlacesOf(ID, LEG2, BUY_SIDE) == 2);
+    SendConfig(RatioConfig(ID, "Unsubscribed"));
+    exchange::Tick(LEG0, 540, 550);  // UNSUBSCRIBE is a STOP too: no new bid
+    CHECK(exchange::LiveOrdersOf(ID) == 0 && Position(ID, LEG0) == -3 * LOT);
+    std::printf("  stop drops hedging: resting leg2 hedge cancelled at STOP, nothing sent after; re-apply hedges it\n");
 }
 
 // A leg without product details: no strategy, no subscription, UI told INACTIVE.
@@ -845,8 +851,7 @@ void UnhandledRejectRetries() {
     exchange::Tick(LEG2, 315, 325);
     exchange::rejectToken = LEG2;
     exchange::rejectCode  = INVALID_PRICE;
-    exchange::Tick(LEG0, 540, 550, false);  // one pack: the bid crosses, leg2's first hedge is rejected
-    SendConfig(RatioConfig(ID, "Stop"));
+    exchange::Tick(LEG0, 540, 550);  // one pack: the bid crosses, leg2's first hedge is rejected
     exchange::Tick(LEG2, 315, 325);
     CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 1);  // within RejectWaitNs of the reject: not resent
     std::this_thread::sleep_for(std::chrono::milliseconds(15));
@@ -854,6 +859,7 @@ void UnhandledRejectRetries() {
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
     CHECK(PlacesOf(ID, LEG2, BUY_SIDE) == 2 && exchange::LiveOrdersOf(ID) == 0);
     exchange::rejectCode = EXCHG_ERROR;
+    SendConfig(RatioConfig(ID, "Stop"));
     std::printf("  unhandled reject: INVALID_PRICE on the leg2 hedge, retried 10 ms later, pack whole\n");
 }
 
@@ -1173,7 +1179,7 @@ void IocPartialFill() {
 }
 
 // 2 of 3 lots fill, then leg1's ask jumps to 820 (market 3 x 525 - 820 - 650 = 105 < 140): the 2 lots are bought back at
-// the ask's index 2, a Reverse row goes out. Once the spread is back a full IOC fires. A part pack left at STOP is bought back too.
+// the ask's index 2, a Reverse row goes out. Once the spread is back a full IOC fires. A part pack left at STOP stays with the user.
 void IocPartPackReversed() {
     constexpr int ID = 78;
     SendConfig(IocConfig(ID, "Applied"));
@@ -1195,10 +1201,10 @@ void IocPartPackReversed() {
     exchange::Pump();
     CHECK(Position(ID, LEG0) == -4 * LOT);
     SendConfig(IocConfig(ID, "Stop"));
-    exchange::Tick(LEG0, 525, 535);  // spread still there, but stopped: the lot is bought back
-    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT && exchange::LiveOrdersOf(ID) == 0);
-    CHECK(TracerRows(ID, "Reverse").size() == 2);
-    std::printf("  IOC part pack: 2 lots bought back once the spread went, full IOC after; 1 lot left at STOP bought back\n");
+    exchange::Tick(LEG0, 525, 535);  // stopped: the lot is kept, not bought back
+    CHECK(Position(ID, LEG0) == -4 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT && exchange::LiveOrdersOf(ID) == 0);
+    CHECK(TracerRows(ID, "Reverse").size() == 1);
+    std::printf("  IOC part pack: 2 lots bought back once the spread went, full IOC after; 1 lot left at STOP kept for the user\n");
 }
 
 // The bid drops to 515 before the IOC lands: cancelled unfilled, no position, no hedge.
@@ -1641,7 +1647,7 @@ int main() {
     SlowExchangeHoldsEntry();
     FullCycle();
     StopRacesPendingBid();
-    StopKeepsHedging();
+    StopDropsHedging();
     RejectsUnknownToken();
     HedgeTakesLevel3();
     HedgesHighestPriceFirst();

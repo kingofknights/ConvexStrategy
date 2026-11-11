@@ -152,8 +152,9 @@ void RatioLegStrategy::SetStatus(StrategyStatus status_) {
         Stop("status INACTIVE requested");
         return;
     }
-    _status  = status_;
-    _deleted = false;
+    _status      = status_;
+    _deleted     = false;
+    _userStopped = false;  // re-applied after a GUI STOP: open packs are hedged or reversed again
     if (_squaredOff && PacksWhole()) {
         _squaredOff = false;  // re-applied after a square-off with nothing left open: trades on from the kept lots
     }
@@ -177,8 +178,8 @@ void RatioLegStrategy::CancelIfStopped() {
     if (IsActive()) {
         return;
     }
-    if (_squaredOff) {
-        PullAll("squared off: cancel retry");
+    if (Silent()) {
+        PullAll("silent: cancel retry");
     } else {
         for (Pack* pack : {&_longPack, &_shortPack}) {
             Pull(*pack, BiddingLeg, "stopped: cancel retry");
@@ -194,6 +195,14 @@ void RatioLegStrategy::SquaredOff(std::string_view reason_) {
     PullAll(reason_);
     Stop(reason_);
     WriteLog("[RatioLeg:SquaredOff] strat={} reason='{}' lots kept, no orders until re-applied with every pack whole\n", _strategyId, reason_);
+}
+
+// GUI STOP or UNSUBSCRIBE: the user takes over. Lots stay as traded, live orders are cancelled, and no hedge, reverse or
+// entry goes out until the strategy is applied again.
+void RatioLegStrategy::UserStopped(std::string_view reason_) {
+    _userStopped = true;
+    PullAll(reason_);
+    Stop(reason_);
 }
 
 // Every live order of the strategy, the reverse included.
@@ -238,7 +247,7 @@ auto RatioLegStrategy::IsIdle() const -> bool {
             }
         }
     }
-    return _squaredOff || PacksWhole();
+    return Silent() || PacksWhole();
 }
 
 // ═══ Events ══════════════════════════════════════════════════════════════════
@@ -266,8 +275,8 @@ void RatioLegStrategy::OnTick(const Quote& quote_) {
             logSweep      = true;
         }
     }
-    if (_squaredOff) {
-        PullAll("squared off");
+    if (Silent()) {
+        PullAll("silent");
         FlushOrderOuts();
         return;
     }
@@ -957,7 +966,7 @@ void RatioLegStrategy::UpdateOrder(Pack& pack_, size_t leg_, int price_, int qua
 }
 
 void RatioLegStrategy::Send(Pack& pack_, OrderObjectT& order_, size_t leg_, ORDER_SIDE side_, int price_, int quantity_, std::string_view reason_, bool hedge_) {
-    if (_squaredOff || RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
+    if (Silent() || RejectedWithin(RejectedNs(pack_, order_, leg_), RejectWaitNs)) {
         return;
     }
     OrderOut out{&pack_, leg_, side_, OrderAction(order_), 0, order_.get_open_price(), price_, order_.get_open_qty(), quantity_, reason_};

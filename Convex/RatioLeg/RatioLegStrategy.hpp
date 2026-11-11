@@ -131,6 +131,7 @@ class RatioLegStrategy {
     void SetStatus(StrategyStatus status_);
     void Stop(std::string_view reason_);
     void SquaredOff(std::string_view reason_);
+    void UserStopped(std::string_view reason_);
     void CancelIfStopped();
     void MarkDeleted() { _deleted = true; }
 
@@ -217,6 +218,9 @@ class RatioLegStrategy {
     long           _utcOffsetSeconds = UtcOffsetSeconds();
     bool           _deleted          = false;
     bool           _squaredOff       = false;  // GUI square-off took the positions: lots kept, no orders (SquaredOff)
+    bool           _userStopped      = false;  // GUI STOP / UNSUBSCRIBE: lots kept, no hedge, reverse or entry until re-applied
+
+    [[nodiscard]] auto Silent() const -> bool { return _squaredOff || _userStopped; }  // live orders cancelled, nothing new sent
 
     int _strikeGap     = 0;
     int _lotSize       = 0;

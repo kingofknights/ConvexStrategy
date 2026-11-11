@@ -215,7 +215,7 @@ void MinixStrategy::HandleRatioLegStrategy(const nlohmann::json& root_, size_t l
             return;
         } else if (status == "UNSUBSCRIBED" || status == "UNSUBSCRIBE" || status == "STOP") {
             std::cout << "[handleRatioLegStrategy] Stopping strat=" << strategyId << std::endl;
-            iterator->second->Stop("GUI STOP");
+            iterator->second->UserStopped("GUI STOP");
         } else if (status == "DELETED" || status == "DELETE") {
             // Erased by doWork once every pack is whole and no order is live: a bid in flight may still fill.
             std::cout << "[handleRatioLegStrategy] Deleting strat=" << strategyId << " once idle" << std::endl;
