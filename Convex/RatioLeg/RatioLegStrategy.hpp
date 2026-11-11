@@ -91,7 +91,7 @@ class RatioLegStrategy {
     // An order's state right after a response, kept so the [ORDER-IN] line can be written after the orders that response caused.
     // Leg 0 filled with no hedges out: what completing and what reversing would lose, per pack, in the target's paise.
     struct ExitChoice {
-        double _slippage;     // target minus the spread with the hedge legs at the opposite side's index 2
+        double _slippage;     // target minus the spread with the hedge legs at what their hedges would pay walking the book (HedgeSum)
         double _reverseLoss;  // leg 0 bought or sold back at its own side's index 2, plus the charges on both leg 0 trades
         bool   _reverse;
     };
@@ -187,9 +187,10 @@ class RatioLegStrategy {
     void FlushOrderOuts();
     void LogResponse(const Pack& pack_, size_t leg_, const OrderSnapshot& order_, const oms_transaction& response_, bool isCut_);
 
-    [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArrayT<int>* prices_ = nullptr, size_t index_ = 0) const -> std::optional<float>;
-    [[nodiscard]] auto SpreadPresent(const Pack& pack_, int price_) const -> bool;
-    [[nodiscard]] auto ChooseExit(const Pack& pack_, int fill_) const -> ExitChoice;
+    [[nodiscard]] auto MarketSpread(const Pack& pack_, LegArrayT<int>* prices_ = nullptr, size_t index_ = 0, int quantity_ = 0) const -> std::optional<float>;
+    [[nodiscard]] auto HedgeSum(const Pack& pack_, int quantity_) const -> std::optional<double>;
+    [[nodiscard]] auto SpreadPresent(const Pack& pack_, int price_, int quantity_) const -> bool;
+    [[nodiscard]] auto ChooseExit(const Pack& pack_, int fill_, int quantity_) const -> ExitChoice;
     [[nodiscard]] auto AdjustGap(double spread_) const -> double;
     [[nodiscard]] auto FindLegIndex(int token_) const -> size_t;
     [[nodiscard]] auto LegSweep() const -> int;
@@ -201,6 +202,7 @@ class RatioLegStrategy {
     void               WriteTimestamp() const;
 
     [[nodiscard]] static auto Price(const Quote& quote_, ORDER_SIDE side_, size_t level_) -> int;
+    [[nodiscard]] static auto FillPrice(const Quote& quote_, ORDER_SIDE side_, int quantity_) -> double;
     [[nodiscard]] static auto HasLevels(const Quote& quote_, ORDER_SIDE side_, size_t depth_) -> bool;
     [[nodiscard]] static auto QuantityUpTo(const Quote& quote_, ORDER_SIDE side_, size_t depth_) -> int;
     [[nodiscard]] static auto OrderCount(const Quote& quote_, ORDER_SIDE side_) -> int;

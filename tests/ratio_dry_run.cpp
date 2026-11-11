@@ -967,24 +967,24 @@ void ReverseWhenSpreadGone() {
 void ReversePartialCancelsRest() {
     constexpr int ID = 64;
     RestBidAt535(ID);
-    exchange::Tick(LEG0, 520, 530);         // asks 530..550: room for P1 550
-    exchange::Tick(LEG1, 800, 820, false);  // the bid's modify to 550 is still in flight
+    exchange::Tick(LEG0, 520, 530);
+    exchange::Tick(LEG1, 800, 840, false);  // 3 x 535 - 840 - 650 = 115: slippage 25 > reverse loss ~19; P1 past the asks: cancel in flight
     exchange::books[LEG0].ask = 0;          // no sellers: the buy-back rests
-    exchange::FillPassive(ID, LEG0, LOT);   // 1 lot @535; the modify lands on the other 2
-    CHECK(Position(ID, LEG0) == -LOT && exchange::LiveOrdersOf(ID) == 2 && PlacesOf(ID, LEG0, BUY_SIDE) == 1);
-    exchange::Tick(LEG0, 520, 530);  // the rest of the bid is cancelled, the BUY 540 buy-back takes the 530 ask
+    exchange::FillPassive(ID, LEG0, LOT);   // 1 lot @535 before the cancel lands; the cancel takes the other 2
+    CHECK(Position(ID, LEG0) == -LOT && exchange::LiveOrdersOf(ID) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 1);
+    exchange::Tick(LEG0, 520, 530);  // the BUY 540 buy-back takes the 530 ask
     CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
     CHECK(RequestsOf(ID, LEG0, OMS_CANCEL_REQ) == 1 && exchange::LiveOrdersOf(ID) == 0);
     CHECK(TracerRows(ID, "Reverse").size() == 1 && TracerRows(ID, "Reverse")[0]._ltq == 1);
-    exchange::Tick(LEG0, 520, 530);  // reversed: bids again at 550
+    exchange::Tick(LEG1, 770, 780);  // spread back: bids again
     CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 2);
     SendConfig(RatioConfig(ID, "Stop"));
     std::printf("  partial fill after the spread went: 1 lot bought back, 2 lots cancelled, bid again\n");
 }
 
 // An 'S' tick while the bid is stuck at 535 (its modify refused) and leg1's asks are at 820: the spread is gone, so no early hedge.
-// The fill then decides. At the hedges' index 2, 3 x 535 - 830 - 2 x 335 = 105: slippage 35 per pack. Buying leg 0 back at the
-// 550 ask (index 2) loses 3 x (15 + charges) = 48.83. Completing is cheaper, so the pack is hedged.
+// The fill then decides. At what the hedges would pay (the 820 and 325 asks hold them), 3 x 535 - 820 - 2 x 325 = 135: slippage 5
+// per pack. Buying leg 0 back at the 550 ask (index 2) loses 3 x (15 + charges) = 48.83. Completing is cheaper, so the pack is hedged.
 void EarlyHedgeSkippedThenCompleted() {
     constexpr int ID = 65;
     RestBidAt535(ID);
@@ -1000,20 +1000,20 @@ void EarlyHedgeSkippedThenCompleted() {
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
     CHECK(TracerRows(ID, "Reverse").empty() && TracerRows(ID, "").size() == 1);  // traded 135: 5 paise slipped, under AllowedSlippage 10
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  'S' with the spread gone: no early hedge, slippage 35 < reverse loss 48.83 at the fill, pack completed\n");
+    std::printf("  'S' with the spread gone: no early hedge, slippage 5 < reverse loss 48.83 at the fill, pack completed\n");
 }
 
-// Leg2 thins to 2 asks before the fill: no index 2 to hedge at, so leg 0 is reversed whatever the slippage.
-void ReverseWhenHedgeLevel2Missing() {
+// Leg2 thins to 2 asks of 50 before the fill: its book cannot fill the 130 hedge, so leg 0 is reversed whatever the slippage.
+void ReverseWhenHedgeBookTooThin() {
     constexpr int ID = 69;
     RestBidAt535(ID);
-    exchange::Tick(LEG2, 315, 325, false, 300, aef::infra::quote::QUOTE_LEVELS, 2);  // the bid's cancel is still in flight
+    exchange::Tick(LEG2, 315, 325, false, 50, aef::infra::quote::QUOTE_LEVELS, 2);  // the bid's cancel is still in flight
     exchange::FillPassive(ID, LEG0, 3 * LOT);  // SELL 535 fills; BUY 525 takes the 515 ask
     CHECK(Position(ID, LEG0) == 0 && Position(ID, LEG1) == 0 && Position(ID, LEG2) == 0);
     CHECK(PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
     CHECK(TracerRows(ID, "Reverse").size() == 1);
     SendConfig(RatioConfig(ID, "Stop"));
-    std::printf("  leg2 index 2 missing at the fill: no hedge, SELL 535 bought back @515\n");
+    std::printf("  leg2 book thinner than its hedge at the fill: no hedge, SELL 535 bought back @515\n");
 }
 
 // The cancel at STOP is throttled (-9996): for a second nothing goes out, ticks or not (sandbox10 2026-11-03 14:27:45
@@ -1254,14 +1254,14 @@ void IocSweepStopHolds() {
     std::printf("  IOC sweep stop: held at sweep 230, fired once the stream went quiet\n");
 }
 
-// The IOC fills after leg1's ask jumped to 820: 3 x 525 - 820 - 650 = 105 misses the target, so leg 0 is bought back, not hedged.
+// The IOC fills after leg1's ask jumped to 870: 3 x 525 - 870 - 650 = 55, slippage 85 above the ~63 reverse loss, so leg 0 is bought back, not hedged.
 void IocReverseWhenSpreadGone() {
     constexpr int ID = 76;
     SendConfig(IocConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
     exchange::Tick(LEG2, 315, 325);
     exchange::Tick(LEG0, 525, 535, false);
-    exchange::Tick(LEG1, 800, 820, false);
+    exchange::Tick(LEG1, 800, 870, false);
     exchange::Pump();
     CHECK(Position(ID, LEG0) == 0 && PlacesOf(ID, LEG0, BUY_SIDE) == 1 && PlacesOf(ID, LEG1, BUY_SIDE) == 0 && PlacesOf(ID, LEG2, BUY_SIDE) == 0);
     CHECK(TracerRows(ID, "Reverse").size() == 1);
@@ -1269,9 +1269,9 @@ void IocReverseWhenSpreadGone() {
     std::printf("  IOC fill with the spread gone: SELL 525 bought back, no hedge\n");
 }
 
-// Leg2's asks gap after the touch (325, 360, 400): the touch makes the target (145 >= 140) but a fill would be reversed at
-// once (index 2: 3 x 525 - 790 - 2 x 400 = -15, slippage 155 > reverse loss ~60). No IOC fires; once the gap closes, it does.
-void IocHeldWhenFillWouldReverse() {
+// Leg2's asks gap after the touch (325, 360, 400). The touch holds 300, the hedge needs 130, so entry and exit both price leg2
+// at 325: market 145 >= 140, the IOC fires and the fill is hedged, not reversed (sandbox10 2026-11-11 reversed it in a loop).
+void IocGappedHedgeCompletes() {
     constexpr int ID = 79;
     SendConfig(IocConfig(ID, "Applied"));
     exchange::Tick(LEG1, 770, 780);
@@ -1279,15 +1279,29 @@ void IocHeldWhenFillWouldReverse() {
     gapped.message.ask_levels[1].price = 360;
     gapped.message.ask_levels[2].price = 400;
     exchange::Publish(gapped, true);
-    for (int tick = 0; tick < 5; ++tick) {
-        exchange::Tick(LEG0, 525, 535);
-    }
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0 && PlacesOf(ID, LEG0, BUY_SIDE) == 0 && Position(ID, LEG0) == 0);
-    exchange::Tick(LEG2, 315, 325);  // gap closed: index 2 at 335, slippage 25 < reverse loss
-    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 0);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 1 && PlacesOf(ID, LEG0, BUY_SIDE) == 0 && TracerRows(ID, "Reverse").empty());
     CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG1) == LOT && Position(ID, LEG2) == 2 * LOT);
     SendConfig(IocConfig(ID, "Stop"));
-    std::printf("  IOC gapped hedge: no IOC while a fill would be reversed, fired once the gap closed\n");
+    std::printf("  IOC gapped hedge: touch holds the hedge, IOC filled and hedged, no reverse\n");
+}
+
+// Leg2's top ask shows 50 at 325, then 300 at 360. The hedge needs 130: 50 @325 + 80 @360 = 346.54 average, so the
+// market is 3 x 525 - 780 - 2 x 346.54 = 101.9 < 140 although the touch says 145. No IOC until the top holds the hedge.
+void IocThinTopPricedByQuantity() {
+    constexpr int ID = 80;
+    SendConfig(IocConfig(ID, "Applied"));
+    exchange::Tick(LEG1, 770, 780);
+    Quote thin                         = exchange::BookQuote(LEG2, 315, 325);
+    thin.message.ask_levels[0].qty     = 50;
+    thin.message.ask_levels[1].price   = 360;
+    exchange::Publish(thin, true);
+    exchange::Tick(LEG0, 525, 535);
+    CHECK(PlacesOf(ID, LEG0, SELL_SIDE) == 0 && Position(ID, LEG0) == 0);
+    exchange::Tick(LEG2, 315, 325);  // top holds 300: fires
+    CHECK(Position(ID, LEG0) == -3 * LOT && Position(ID, LEG2) == 2 * LOT && TracerRows(ID, "Reverse").empty());
+    SendConfig(IocConfig(ID, "Stop"));
+    std::printf("  IOC thin top: 50 @325 cannot carry the 130 hedge, priced 346.54 by quantity, no IOC; fired once the top held it\n");
 }
 
 // GUI square-off with 2 IOC lots of a pack open: the strategy stops and keeps them, but sends no IOC, hedge or part-pack reverse afterwards.
@@ -1665,7 +1679,7 @@ int main() {
     ReverseWhenSpreadGone();
     ReversePartialCancelsRest();
     EarlyHedgeSkippedThenCompleted();
-    ReverseWhenHedgeLevel2Missing();
+    ReverseWhenHedgeBookTooThin();
     ThrottledStopCancelRetried();
     HedgesSentWhileThrottled();
     RejectedBidWaitsASecond();
@@ -1679,7 +1693,8 @@ int main() {
     IocModeSwitch();
     IocSweepStopHolds();
     IocReverseWhenSpreadGone();
-    IocHeldWhenFillWouldReverse();
+    IocGappedHedgeCompletes();
+    IocThinTopPricedByQuantity();
     SpreadSentOnlyOnChange();
     QuietTicks();
     ManualOrders();

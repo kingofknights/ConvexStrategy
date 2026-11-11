@@ -376,20 +376,19 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         Pull(pack_, BiddingLeg, "Strategy is not active");
         return;
     }
-    LegArrayT<int>             prices{};
-    LegArrayT<int>             deeper{};
-    const std::optional<float> market = MarketSpread(pack_, &prices, 0);
-    if (!market or !MarketSpread(pack_, &deeper, 2)) {
-        Pull(pack_, BiddingLeg, "no price on a leg");
-        return;
-    }
-
     const int trade    = pack_._tradedLots[0];
     const int quantity = std::min({
                              (pack_._totalAllowedPacks * _ratios[0]) - trade,                       // lots left overall
                              ((pack_._tradedPack + pack_._singleOrderPacks) * _ratios[0]) - trade,  // lots left in this slice
                          }) *
                          _lotSize;
+    LegArrayT<int>             prices{};
+    LegArrayT<int>             deeper{};
+    const std::optional<float> market = MarketSpread(pack_, &prices, 0, quantity);
+    if (!market or !MarketSpread(pack_, &deeper, 2)) {
+        Pull(pack_, BiddingLeg, "no price on a leg, or a hedge book thinner than its hedge");
+        return;
+    }
     if (quantity <= 0) {
         Pull(pack_, BiddingLeg, "nothing left to bid");
         return;
@@ -428,7 +427,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
     const bool          live   = order.get_current_state() != IDLE;
     const int           open   = order.get_open_price();
     const auto          toward = [&](int price_) { return !live || (buy ? price_ > open : price_ < open); };
-    if (_sweepBand == 2 && live && open > 0 && !SpreadPresent(pack_, open)) {
+    if (_sweepBand == 2 && live && open > 0 && !SpreadPresent(pack_, open, order.get_open_qty())) {
         Pull(pack_, BiddingLeg, "sweep above SweepStopLevel and the resting spread below target");
         return;
     }
@@ -467,7 +466,7 @@ void RatioLegStrategy::EvaluateBidding(Pack& pack_) {
         }
     }
     // A resting bid within _minChangeTick ticks of the new price stays, either way, while a fill at its price still makes the target.
-    if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - open) < _minChangeTick * _tickSize && SpreadPresent(pack_, open)) {
+    if (order.is_order_confirmed() && order.get_open_qty() == quantity && std::abs(price - open) < _minChangeTick * _tickSize && SpreadPresent(pack_, open, quantity)) {
         return;
     }
     UpdateOrder(pack_, BiddingLeg, price, quantity, "BID");
@@ -502,12 +501,6 @@ void RatioLegStrategy::FireIoc(Pack& pack_, const LegArrayT<int>& prices_, float
     }
     if (const size_t leg = FreshHedge(pack_, quantity_); leg != NoLeg) {
         Hold(pack_, "hedge touch younger than HedgeHoldUs", leg);
-        return;
-    }
-    // OnTrade would reverse this fill at once (hedges at index 2 miss the target by more than the reverse costs), and the
-    // unchanged book would fire the next IOC straight after: a buy-and-reverse loop (sandbox10 2026-11-11, strats 3/4).
-    if (ChooseExit(pack_, prices_[BiddingLeg])._reverse) {
-        Hold(pack_, "IOC: fill would be reversed, hedges at index 2 miss the target");
         return;
     }
     Hold(pack_, {});
@@ -591,7 +584,7 @@ void RatioLegStrategy::TryEarlyHedge(Pack& pack_, int updateSide_) {
     if (top > 0 && (side == BUY_SIDE ? open <= top : open >= top)) {
         return;
     }
-    if (!SpreadPresent(pack_, open)) {
+    if (!SpreadPresent(pack_, open, order.get_open_qty())) {
         WriteLog("[EARLY-HEDGE] {} 'S' tick: leg 0 {} uid={} open {}@{} beats top {}, spread gone: no hedge, the fill decides\n",
                  PackName(pack_), SideName(side), order.get_uid(), order.get_open_qty(), open, top);
         return;
@@ -670,7 +663,7 @@ void RatioLegStrategy::OnTrade(Pack& pack_, size_t leg_, const oms_transaction& 
             hedged = hedged || pack_._tradedLots[leg] * _ratios[BiddingLeg] > pack_._tradedLots[BiddingLeg] * _ratios[leg];
         }
         if (!hedged) {
-            exit = ChooseExit(pack_, price);
+            exit = ChooseExit(pack_, price, quantity);
         }
         if (exit && exit->_reverse) {
             pack_._reverseLots += lots;
@@ -830,8 +823,10 @@ auto RatioLegStrategy::SpreadUpdate(uint64_t nowNs_) -> std::optional<StrategySp
 
 // ═══ Pack math ═══════════════════════════════════════════════════════════════
 
-auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_, size_t index_) const -> std::optional<float> {
-    long long raw = 0;
+// Every leg at the opposite side's index_. With quantity_ (leg 0 units) the hedge legs are instead priced at what their
+// hedges for quantity_ would pay walking the book (HedgeSum), the same price SpreadPresent and ChooseExit use.
+auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_, size_t index_, int quantity_) const -> std::optional<float> {
+    double raw = 0;
     for (size_t leg = 0; leg < _legCount; ++leg) {
         const int price = Price(_quote[leg], pack_._oppositeSide[leg], index_);
         if (price <= 0) {
@@ -840,31 +835,49 @@ auto RatioLegStrategy::MarketSpread(const Pack& pack_, LegArrayT<int>* prices_, 
         if (prices_ != nullptr) {
             (*prices_)[leg] = price;
         }
-        raw += static_cast<long long>(price) * pack_._signedRatio[leg];
-    }
-    return static_cast<float>(AdjustGap(static_cast<double>(raw)));
-}
-
-// Leg 0 at price_ and the hedge legs at the opposite side's top: does the pack still make its target?
-// A hedge leg with no price cannot be hedged, so the spread counts as gone.
-auto RatioLegStrategy::SpreadPresent(const Pack& pack_, int price_) const -> bool {
-    double raw = static_cast<double>(price_) * pack_._signedRatio[BiddingLeg];
-    for (size_t leg = 0; leg < _legCount; ++leg) {
-        if (leg != BiddingLeg) {
-            const int price = Price(_quote[leg], pack_._oppositeSide[leg], 0);
-            if (price <= 0) {
-                return false;
-            }
+        if (quantity_ <= 0 || leg == BiddingLeg) {
             raw += static_cast<double>(price) * pack_._signedRatio[leg];
         }
     }
-    return AdjustGap(raw) >= pack_._targetSpread;
+    if (quantity_ > 0) {
+        const std::optional<double> hedges = HedgeSum(pack_, quantity_);
+        if (!hedges) {
+            return std::nullopt;
+        }
+        raw += *hedges;
+    }
+    return static_cast<float>(AdjustGap(raw));
 }
 
-// Complete: the hedge legs at the opposite side's index 2, where SendHedges sends them. A hedge leg without that price cannot be
-// counted on, so leg 0 is reversed. Reverse: leg 0 at its own side's index 2, where Reverse() sends, plus both leg 0 trades' charges.
+// Signed sum of the hedge legs for quantity_ units of leg 0: each leg at the average price its hedge would pay walking the
+// opposite side's levels, so a thin top level is not counted at its own price for the whole hedge. nullopt when a leg's
+// shown book holds less than its hedge.
+auto RatioLegStrategy::HedgeSum(const Pack& pack_, int quantity_) const -> std::optional<double> {
+    double sum = 0;
+    for (size_t leg = 0; leg < _legCount; ++leg) {
+        if (leg != BiddingLeg) {
+            const double price = FillPrice(_quote[leg], pack_._oppositeSide[leg], quantity_ * _ratios[leg] / _ratios[BiddingLeg]);
+            if (price <= 0) {
+                return std::nullopt;
+            }
+            sum += price * pack_._signedRatio[leg];
+        }
+    }
+    return sum;
+}
+
+// Leg 0 at price_ for quantity_ and the hedge legs at what their hedges would pay: does the pack still make its target?
+// A hedge leg whose book cannot fill its hedge counts as gone.
+auto RatioLegStrategy::SpreadPresent(const Pack& pack_, int price_, int quantity_) const -> bool {
+    const std::optional<double> hedges = HedgeSum(pack_, quantity_);
+    return hedges && AdjustGap((static_cast<double>(price_) * pack_._signedRatio[BiddingLeg]) + *hedges) >= pack_._targetSpread;
+}
+
+// Complete: the hedge legs at what their hedges for quantity_ would pay walking the book (HedgeSum), the same price the entry
+// (bid back-solve, IOC gate) used, so a fill the entry judged good is hedged, not reversed (sandbox10 2026-11-11: index 2
+// here reversed every crossing fill). A hedge leg whose book cannot fill its hedge cannot be counted on, so leg 0 is reversed. Reverse: leg 0 at its own side's index 2, where Reverse() sends, plus both leg 0 trades' charges.
 // Reversed only when the slippage is above 0 and above the reverse loss. Leg 0 with no price to reverse into is completed. No AllowedSlippage cap: ReportPacks stops the strategy after the pack.
-auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_) const -> ExitChoice {
+auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_, int quantity_) const -> ExitChoice {
     constexpr double Unknown = std::numeric_limits<double>::infinity();
 
     double reverse = Unknown;
@@ -877,18 +890,12 @@ auto RatioLegStrategy::ChooseExit(const Pack& pack_, int fill_) const -> ExitCho
         reverse               = _ratios[BiddingLeg] * ((buy - sell) + (buy * buyRate) + (sell * sellRate));
     }
 
-    double raw = static_cast<double>(fill_) * pack_._signedRatio[BiddingLeg];
-    for (size_t leg = 0; leg < _legCount; ++leg) {
-        if (leg != BiddingLeg) {
-            const int price = Price(_quote[leg], pack_._oppositeSide[leg], 2);
-            if (price <= 0) {
-                return {Unknown, reverse, true};
-            }
-            raw += static_cast<double>(price) * pack_._signedRatio[leg];
-        }
+    const std::optional<double> hedges = HedgeSum(pack_, quantity_);
+    if (!hedges) {
+        return {Unknown, reverse, true};
     }
-    const double slippage = pack_._targetSpread - AdjustGap(raw);
-    // Target met even at index 2: the pack is completed, even when a buy-back would now be in profit.
+    const double slippage = pack_._targetSpread - AdjustGap((static_cast<double>(fill_) * pack_._signedRatio[BiddingLeg]) + *hedges);
+    // Target met: the pack is completed, even when a buy-back would now be in profit.
     return {slippage, reverse, slippage > 0 && slippage > reverse};
 }
 
@@ -1098,6 +1105,22 @@ auto RatioLegStrategy::LotsText(const Pack& pack_) const -> std::string {
 
 auto RatioLegStrategy::Price(const Quote& quote_, ORDER_SIDE side_, size_t level_) -> int {
     return side_ == BUY_SIDE ? quote_.message.bid_levels[level_].price : quote_.message.ask_levels[level_].price;
+}
+
+// Average price of taking quantity_ from side_'s levels, best first; 0 when the shown levels hold less than quantity_.
+auto RatioLegStrategy::FillPrice(const Quote& quote_, ORDER_SIDE side_, int quantity_) -> double {
+    int    left  = quantity_;
+    double value = 0;
+    for (size_t level = 0; level < aef::infra::quote::QUOTE_LEVELS && left > 0; ++level) {
+        const auto& book = side_ == BUY_SIDE ? quote_.message.bid_levels[level] : quote_.message.ask_levels[level];
+        if (book.price <= 0 || book.qty <= 0) {
+            break;
+        }
+        const int take = std::min(left, static_cast<int>(book.qty));
+        value += static_cast<double>(book.price) * take;
+        left -= take;
+    }
+    return left > 0 || quantity_ <= 0 ? 0.0 : value / quantity_;
 }
 
 auto RatioLegStrategy::HasLevels(const Quote& quote_, ORDER_SIDE side_, size_t depth_) -> bool {
